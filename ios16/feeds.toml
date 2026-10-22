@@ -1,0 +1,25 @@
+# Sources of the iOS 16 board, on top of the feeds.toml of UniXNU. Entries here replace the UniXNU entry of the same name.
+#
+# The 20H392 kernelcache is xnu-8796.142.1.703.8; xnu-8796.141.3 is the newest published 8796 source. The UniXNU patches
+# apply through the 8796 series of the ios16-stack branch (patches/xnu-8796: replacements and skips).
+[[source]]
+name = "xnu"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/xnu.git"
+ref = "xnu-8796.141.3"
+commit = "1b191cb58250d0705d8a51287127505aa4bc0789"
+darwin = "22.6.0"
+version = "8796.141.3"
+ios_min = "16.0"
+patch_series = "8796"
+driverkit_tag = "xnu-10063.121.3"    # only fills DriverKit headers the tag lacks; xnu-8796.141.3 has them all
+trustcache_tag = "xnu-8796.101.5"
+
+# The pthread kernel component of the Darwin 22 kernels (CONFIG_XNU_SOURCE_PTHREAD): libpthread-519 (Darwin 23) uses
+# pthread shims that xnu-8796 does not have (proc_get_jit_entitled).
+[[source]]
+name = "libpthread"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libpthread.git"
+ref = "libpthread-486.100.11"
+commit = "cf9e1c7e611440e511af230905be2cfefc5c6121"

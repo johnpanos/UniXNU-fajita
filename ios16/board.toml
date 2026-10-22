@@ -1,0 +1,115 @@
+# Board description of the OnePlus 6T (fajita, SDM845) with the iOS 16.7.16 userland of the iPhone X, read by the unixnu
+# build driver. It is the second boot option next to the iPadOS 17.7.11 board of the parent directory (../board.toml),
+# which includes this board's payload entry; see ../NOTES-ios16.md.
+#
+# This directory is a device directory of its own (unixnu -D ../UniXNU-fajita/ios16): the board name gives it its own build
+# tree, feeds (xnu-8796.141.3, feeds.toml), lock and defconfig. drivers, kits, package and scripts are those of the parent.
+
+[board]
+name = "fajita-ios16"
+soc = "SDM845"
+description = "OnePlus 6T, iOS 16.7.16 (iPhone10,6)"
+kit = "fajita"
+
+# The unchanged iPhone10,3/iPhone10,6 iOS 16.7.16 restore image. iPhone10,6 (D221AP) is the identity. The pins are the
+# sha256 of the members as read on 2026-10-22; their SHA-384 also matches the Digest of BuildManifest.plist.
+[ipsw]
+url = "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+product = "iPhone10,6"
+version = "16.7.16"
+build = "20H392"
+device_class = "d221ap"
+chip_id = 0x8015
+board_id = 14
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+"087-86698-044.dmg" = "80f426d5b8fca8552f95be427434f1911dbb4c2c6d28aad94f2426ddd0c92483"             # OS
+"087-86593-047.dmg" = "9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849"             # Cryptex1,SystemOS
+"087-86698-044.dmg.trustcache" = "63e01c03b31e1532a5581a24865490673f0b5c297b0199fe0095637c6100ef4b"  # StaticTrustCache
+"087-86593-047.dmg.trustcache" = "9cc478fe3525e2683b5b9ea1eea0851eaebebdab21d206556233400e59d2e361"  # Cryptex1,SystemTrustCache
+"DeviceTree.d221ap.im4p" = "889e838319619c10f5f7f6ef25f9ff2a3a652a3c078803038ba678efa1201b79"
+
+# The second root image of userdata: the OS and SystemOS disk images of 20H392 behind a version 2 manifest at 16 GiB,
+# after the iPadOS image (8.74 GiB at 0). The kernel finds it with native-ufs-root-base=16384 (drivers/NativeUfs).
+[userdata]
+first_lba = 0x186f40
+last_lba = 0x3ad1ffa
+lba_bytes = 4096
+base_mib = 16384
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[kernel]
+defconfig = "fajita_ios16_defconfig"
+# Archive builders of the kernel step, in order: the iPad list. The storage, verified-root, PMGR and boot progress builders
+# run only when the defconfig turns their component on, so fajita_ios16_candidate_defconfig (the first kernel of a new
+# kernelcache, without them) builds from the same list and gives the prelinked candidate FAJITA_STORAGE_CANDIDATE names.
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
+  "build-arm-driver.py NativeAES",
+  "build-native-aes-bindings.py",
+  "build-mockfs-fixture.py",
+  "build-libpthread-kernel.py",
+  # storage ABI audit and NativeVirtioBlock bindings (needs FAJITA_STORAGE_CANDIDATE, a prelinked 20H392 kernel)
+  { run = "build-fajita-storage.py --ipsw-build 20H392", when = "XNU_NATIVE_VIRTIO_BLOCK" },
+  { run = "build-arm-driver.py NativeRamBlock", when = "XNU_NATIVE_RAM_BLOCK" },
+  { run = "build-native-virtio-bindings.py --component NativeRamBlock --directory build/native-ram-block", when = "XNU_NATIVE_RAM_BLOCK" },
+  # owner keys, OS and SystemOS policies over the 20H392 images, libVerifiedRootProbe.a
+  { run = "build-fajita-verified-root.py --ipsw-build 20H392 --image os:087-86698-044.dmg:DADD93F8-DBBF-4B17-A1DF-0F11E64172F7:6e87bfcaa8eca952e00b719f333d1f1060715a63566112267ad8730e1ed98906:1375753 --image systemos:087-86593-047.dmg:96096B28-B6DC-4BC7-9D3A-2632A0FE53F1:9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849:669696", when = "XNU_VERIFIED_ROOT_PROBE" },
+  { run = "build-arm-driver.py NativeUfs", when = "XNU_NATIVE_UFS" },
+  { run = "build-sheng-platform-power.py", when = "XNU_SHENG_PMGR" },
+  { run = "build-boot-progress.py", when = "XNU_BOOT_PROGRESS" },
+]
+
+# The 20H392 kernelcache (xnu-8796.142.1.703.8). The roots are the iPad list; all of them are in this kernelcache.
+[kernel.prelink]
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+kernelcache_sha256 = "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221"
+slide = "-0x1000000"
+# _initializeAppleMobileFileIntegrity() of the 20H392 AMFI (the function that references that name and "cs_enforcement_disable"),
+# the counterpart of 0xfffffff005ab4ae0 in 21H461.
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005703c54"
+# The 20H392 Libm keeps a 1228-byte constant pool in its code (0xfffffff005b8c054..0xfffffff005b8c520, between a ret and the
+# next function, read by ldr and adr) where 21H461 has the 1248-byte one NativePrelink knows; some of its words decode as
+# branches out of the collection.
+extra_args = ["--inline-data", "0000807f0000004100008040db0f493f:1228:73df5b757c53532583e3686b7d93df11ec1f5dd8c201d05502654a7812cc385f"]
+roots = [
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleARMPlatform",
+  "com.apple.driver.AppleARMWatchdogTimer",
+  "com.apple.driver.AppleAudioClockLibs",
+  "com.apple.driver.AppleEffaceableStorage",
+  "com.apple.driver.AppleIISController",
+  "com.apple.driver.AppleM2ScalerCSCDriver",
+  "com.apple.driver.AppleMobileFileIntegrity",
+  "com.apple.driver.ApplePMGR",
+  "com.apple.driver.IODARTFamily",
+  "com.apple.filesystems.apfs",
+  "com.apple.iokit.CoreAnalyticsFamily",
+  "com.apple.iokit.IOAVFamily",
+  "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOCECFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily",
+  "com.apple.iokit.IOHDCPFamily",
+  "com.apple.iokit.IOMobileGraphicsFamily",
+  "com.apple.iokit.IOReportFamily",
+  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+  "com.apple.iokit.IOStorageFamily",
+  "com.apple.iokit.IOSurface",
+  "com.apple.kec.Libm",
+  "com.apple.kec.corecrypto",
+  "com.apple.kext.AppleMatch",
+  "com.apple.kext.CoreTrust",
+  "com.apple.security.AppleImage4",
+  "com.apple.security.sandbox",
+  "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOHIDEventDriver",
+]

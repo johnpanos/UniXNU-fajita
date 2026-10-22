@@ -13,6 +13,12 @@ OUT = ROOT / 'build/sheng-platform-power'
 OUT.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(ROOT / 'kits/NativePrelink'))
 from native_prelink import macho, backed_offset, exports
+import os
+# The iOS release of the XNU source (feeds.toml ios_min, through the unixnu driver): the deployment target the
+# kernel objects carry, so the archives match it.
+IOS_MIN = os.environ.get('UNIXNU_XNU_IOS_MIN', '17.0')
+IOS_TARGET = f'arm64-apple-ios{IOS_MIN}'
+IOS_DEPLOYMENT = (2, int(IOS_MIN.split('.')[0]) << 16 | int((IOS_MIN.split('.') + ['0'])[1]) << 8)
 
 
 def run(command, **kwargs):
@@ -70,7 +76,7 @@ raw = obj.read_bytes()
 info = macho(raw)
 require(info['kind'] == 1, 'Require actual ARM64 subtype-0 Mach-O object')
 build_version = [struct.unpack_from('<2I', raw, at + 8) for cmd, at, _ in info['commands'] if cmd == 0x32]
-require(build_version == [(2, 0x110000)], 'Require iOS17 build target')
+require(build_version == [IOS_DEPLOYMENT], 'Require iOS17 build target')
 sym_at = next(at for cmd, at, _ in info['commands'] if cmd == 2)
 at, count, strings, _ = struct.unpack_from('<4I', raw, sym_at + 8)
 symbols = []
@@ -125,7 +131,7 @@ bindings.update({'_sheng_original_pmgr_nub_create': 0xfffffff004a22568,
 asm = OUT / 'original-bindings.S'
 asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name, va in bindings.items()))
 sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
-run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
+run(['xcrun', 'clang', '-target', IOS_TARGET, '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
 late = OUT / 'ShengPlatformPower.late.o'
 run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
      '--globalize-symbol=__GLOBAL__sub_I_ShengPlatformPower.cpp', obj, late])

@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 import struct
 import subprocess
+import os
+# The iOS release of the XNU source (feeds.toml ios_min, through the unixnu driver): the deployment target the
+# kernel objects carry, so the archives match it.
+IOS_MIN = os.environ.get('UNIXNU_XNU_IOS_MIN', '17.0')
+IOS_TARGET = f'arm64-apple-ios{IOS_MIN}'
+IOS_DEPLOYMENT = (2, int(IOS_MIN.split('.')[0]) << 16 | int((IOS_MIN.split('.') + ['0'])[1]) << 8)
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -105,7 +111,7 @@ for _ in range(count):
     if cmd == 0x32:
         deployment = struct.unpack_from('<II', data, offset + 8)
     offset += length
-if deployment != (2, 0x110000):
+if deployment != IOS_DEPLOYMENT:
     raise SystemExit(f'Unexpected platform deployment {deployment}')
 archive = out / ('lib' + component + '.a')
 archive.unlink(missing_ok=True)
