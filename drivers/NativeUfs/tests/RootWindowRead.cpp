@@ -77,7 +77,7 @@ int main() {
     assert(r.status==2 && r.done==131072 && !o.held); }
   { Ops o(s); o.shortCopy=17; auto r=ufsReadWindow(o,0,o.disk.size(),0,8,s.bounce);
     assert(r.status==2 && r.done==17 && !o.held && o.output[17]==0xa5); }
-  { Ops o(s); for(auto count:{0ULL,UINT64_MAX}) {
+  { Ops o(s); for(auto count:{uint64_t(0),uint64_t(UINT64_MAX)}) {
       auto r=ufsReadWindow(o,0,o.disk.size(),0,count,s.bounce); assert(r.status==1 && !o.reads); }
     auto r=ufsReadWindow(o,0,o.disk.size(),o.disk.size()/512,1,s.bounce); assert(r.status==1 && !o.reads); }
   // First reader pauses inside verification until a second request has tried

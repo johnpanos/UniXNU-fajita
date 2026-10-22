@@ -4,7 +4,7 @@
 // ---- LUN 0 GPT and the root-image manifest -------------------------------------------------
 struct RootWindow {
   char name[32];
-  uint64_t offset;   // bytes from the start of the userdata partition
+  uint64_t offset;   // bytes from the manifest, i.e. from userdata start + RootLayout::baseBytes
   uint64_t size;     // bytes
   uint8_t sha256[32];
 };
@@ -12,12 +12,14 @@ struct RootWindow {
 struct RootLayout {
   uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
+  uint64_t baseBytes;                     // the manifest's byte offset in userdata (native-ufs-root-base); windows are relative to it
   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
   uint32_t windows;
   RootWindow window[4];
-  uint32_t manifestStatus;                // 0 ok, 1 no manifest magic, 2 bad version/count, 3 hash, 4 bounds, 5 names, 6 overlap, 7 attributes
-  uint32_t magic0, magic1;                // first 8 bytes of the partition's first block
+  uint32_t manifestStatus;                // 0 ok, 1 no manifest magic, 2 bad version/count, 3 hash, 4 bounds, 5 names, 6 overlap, 7 attributes,
+                                          // 8 base mismatch (version 1 away from base 0, or version 2 whose base_bytes differs)
+  uint32_t magic0, magic1;                // first 8 bytes of the manifest block
   uint32_t ext4Magic;                     // 16 bits at byte 1080 of the partition (0xef53 on Linux ext4)
   uint32_t ext4Blocks;                    // s_blocks_count_lo at byte 1028
 };
@@ -55,11 +57,14 @@ static bool rootEntryUsed (const uint8_t *entry)
 }
 
 // Find the partition named "userdata" in LUN 0's primary GPT (4096-byte sectors), then read the
-// manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
-static bool findRootLayout (RootLayout *layout, const char **why)
+// manifest baseBytes into it (0: its first block). Read-only. Returns false only if the GPT itself is unusable.
+// Manifest version 1 is accepted only at base 0. Version 2 adds u64 base_bytes at byte 4056 (hashed) and is accepted
+// only when base_bytes equals baseBytes. Window offsets and image_bytes are relative to the manifest.
+static bool findRootLayout (RootLayout *layout, const char **why, uint64_t baseBytes = 0)
 {
   ROOT_STAGE ("GPT header");
   bzero (layout, sizeof (*layout));
+  layout->baseBytes = baseBytes;
   if (hostRead4k (0, 1, 1, gScratch) != kIOReturnSuccess) {
     *why = "GPT header read";
     return false;
@@ -158,9 +163,21 @@ static bool findRootLayout (RootLayout *layout, const char **why)
   gRootDiagnostic.last = layout->userdataLast;
   ROOT_LOG ("userdata LBA %llx..%llx\n", layout->userdataFirst, layout->userdataLast);
   ROOT_STAGE ("root manifest");
-  // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
-    *why = "userdata first block read";
+  uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
+  if (baseBytes) ROOT_LOG ("root manifest base %llx bytes (%llu MiB)\n", baseBytes, baseBytes >> 20);
+  if (baseBytes >= partitionBytes || (baseBytes & 4095)) {
+    // Nothing is read: the requested base is not a block inside the partition.
+    ROOT_LOG ("root manifest base %llx outside userdata (%llx bytes)\n", baseBytes, partitionBytes);
+    layout->manifestStatus = 4;
+    gRootDiagnostic.magic0 = gRootDiagnostic.magic1 = 0;
+    gRootDiagnostic.manifest = layout->manifestStatus;
+    gRootDiagnostic.windows = 0;
+    return true;
+  }
+  const uint64_t manifestLba = layout->userdataFirst + baseBytes / 4096;
+  // The block at the base: manifest if the root image was flashed, ext4 otherwise (base 0).
+  if (hostRead4k (0, manifestLba, 1, gScratch) != kIOReturnSuccess) {
+    *why = baseBytes ? "userdata root base block read" : "userdata first block read";
     return false;
   }
   layout->magic0 = le32 (gScratch);
@@ -173,7 +190,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
     uint32_t version = le32 (gScratch + 8), n = le32 (gScratch + 12);
     uint64_t imageBytes = le64 (gScratch + 16);
     layout->manifestStatus = 2;
-    if (version == 1 && n && n <= 4) {
+    if ((version == 1 || version == 2) && n && n <= 4) {
       SHA256_CTX context;
       uint8_t digest[32];
       SHA256_Init (&context);
@@ -200,7 +217,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
             ++shown;
           }
         strlcat (gRootManifestText, "\n", sizeof (gRootManifestText));
-        if (pass || hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) break;
+        if (pass || hostRead4k (0, manifestLba, 1, gScratch) != kIOReturnSuccess) break;
       }
       if (memcmp (digest, gScratch + 4064, 32) != 0) {
         // Hardware 2026-10-22 (fajita): something stamps a protective MBR (0xEE entry at 0x1BE, 55AA at 0x1FE) on the
@@ -214,10 +231,16 @@ static bool findRootLayout (RootLayout *layout, const char **why)
         SHA256_Final (digest, &context);
         if (memcmp (digest, gScratch + 4064, 32) == 0) ROOT_LOG ("root manifest: ignoring a protective MBR stamped on it\n");
       }
-      if (memcmp (digest, gScratch + 4064, 32) == 0) {
-        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
+      // Version 1 has no base field and only ever describes base 0; version 2 names its own base (hashed above).
+      const bool hashed = memcmp (digest, gScratch + 4064, 32) == 0;
+      const uint64_t manifestBase = version == 1 ? 0 : le64 (gScratch + 4056);
+      if (hashed && manifestBase != baseBytes) {
+        ROOT_LOG ("root manifest version %u base %llx, requested %llx\n", version, manifestBase, baseBytes);
+        layout->manifestStatus = 8;
+      } else if (hashed) {
         layout->manifestStatus = 4;
-        bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes;
+        // baseBytes < partitionBytes (checked above), so the subtraction cannot wrap.
+        bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes - baseBytes;
         for (uint32_t index = 0; index < n && bounds; index++) {
           const uint8_t *entry = gScratch + 24 + 128 * index;
           uint64_t offset = le64 (entry + 32), size = le64 (entry + 40);

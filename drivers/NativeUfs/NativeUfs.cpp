@@ -1027,6 +1027,21 @@ static uint32_t be32w (const uint8_t *at)
 static char gRootManifestText[900];
 #include "RootLayout.h"
 #include "RootWindowRead.h"
+
+// native-ufs-root-base=<MiB>: byte offset in userdata of the root image's manifest (0, the default: its first block, the
+// first image). A second image sits at a fixed base after the first; its manifest is version 2 and names that base.
+static uint64_t rootBaseBytes (void)
+{
+  static bool read = false;
+  static uint64_t cached = 0;
+  if (!read) {
+    uint32_t mib = 0;
+    if (!PE_parse_boot_argn ("native-ufs-root-base", &mib, sizeof (mib))) mib = 0;
+    cached = static_cast<uint64_t> (mib) * 1048576ULL;
+    read = true;
+  }
+  return cached;
+}
 #include "RootPublication.h"
 
 }
@@ -1039,7 +1054,7 @@ static char gRootManifestText[900];
 namespace {
 struct StoreGeometry {
   bool valid;
-  uint64_t first, last, imageBytes, entriesLba;
+  uint64_t first, last, imageBytes, entriesLba;   // imageBytes: end of the selected root image in userdata (base + image)
   uint32_t headerCrc, entriesCrc, entryCount;
 };
 StoreGeometry gStoreGeometry;
@@ -1798,21 +1813,21 @@ bool NativeUfs::start (IOService *provider)
     adoptAndRead (probe);
   }
   if (probe == 10) {
-    // Read-only check before anything is flashed: LUN 0 GPT -> "userdata" -> its first block.
+    // Read-only check before anything is flashed: LUN 0 GPT -> "userdata" -> its block at native-ufs-root-base (0: the first).
     const char *why = "";
     if (!hostBringUp (&why)) {
       panic ("NATIVE_UFS root check: bring-up failed: %s", why);
     }
     RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
-    if (!layout || !findRootLayout (layout, &why)) {
+    if (!layout || !findRootLayout (layout, &why, rootBaseBytes ())) {
       panic ("NATIVE_UFS root check: %s", why);
     }
     panic ("NATIVE_UFS root check\n"
-           "userdata first=%llx last=%llx\n"
-           "block0 magic %08x %08x ext4magic=%04x ext4blocks=%u\n"
-           "manifest status=%u windows=%u",
-           layout->userdataFirst, layout->userdataLast, layout->magic0, layout->magic1,
-           layout->ext4Magic, layout->ext4Blocks, layout->manifestStatus, layout->windows);
+           "userdata first=%llx last=%llx base=%llx\n"
+           "base block magic %08x %08x ext4magic=%04x ext4blocks=%u\n"
+           "manifest status=%u windows=%u image=%llx",
+           layout->userdataFirst, layout->userdataLast, layout->baseBytes, layout->magic0, layout->magic1,
+           layout->ext4Magic, layout->ext4Blocks, layout->manifestStatus, layout->windows, layout->imageBytes);
   }
   if (probe == 11) {
     // After the root image is flashed: manifest, then each window's own GPT (sector 1 of the
@@ -1822,13 +1837,13 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS root windows: bring-up failed: %s", why);
     }
     RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
-    if (!layout || !findRootLayout (layout, &why)) {
+    if (!layout || !findRootLayout (layout, &why, rootBaseBytes ())) {
       panic ("NATIVE_UFS root windows: %s", why);
     }
     uint32_t sig[4][2] = {};
     uint32_t seen[4] = {};
     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->baseBytes + layout->window[index].offset;
       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
         seen[index] = 1;
         sig[index][0] = le32 (gScratch + 512);
@@ -1836,12 +1851,12 @@ bool NativeUfs::start (IOService *provider)
       }
     }
     panic ("NATIVE_UFS root windows\n"
-           "userdata first=%llx last=%llx manifest status=%u windows=%u\n"
+           "userdata first=%llx last=%llx base=%llx manifest status=%u windows=%u\n"
            "w0 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
            "w1 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
            "w0 sha %08x %08x %08x %08x\n"
            "w1 sha %08x %08x %08x %08x",
-           layout->userdataFirst, layout->userdataLast, layout->manifestStatus, layout->windows,
+           layout->userdataFirst, layout->userdataLast, layout->baseBytes, layout->manifestStatus, layout->windows,
            layout->window[0].name, layout->window[0].offset, layout->window[0].size, sig[0][0], sig[0][1], seen[0],
            layout->window[1].name, layout->window[1].offset, layout->window[1].size, sig[1][0], sig[1][1], seen[1],
            be32w (layout->window[0].sha256), be32w (layout->window[0].sha256 + 4), be32w (layout->window[0].sha256 + 8), be32w (layout->window[0].sha256 + 12),
@@ -1899,7 +1914,7 @@ bool NativeUfs::startRoot (IOService *provider)
   }
   native_ufs_root_step = 2;
   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
-  if (!layout || !findRootLayout (layout, &why)) {
+  if (!layout || !findRootLayout (layout, &why, rootBaseBytes ())) {
     rootDiagnosticFailure (layout ? why : "root layout allocation failed");
     printf ("NativeUfs: root layout failed: %s\n", why);
     if (layout) IOFree (layout, sizeof (RootLayout));
@@ -1908,12 +1923,13 @@ bool NativeUfs::startRoot (IOService *provider)
   native_ufs_root_step = 3;
   if (layout->manifestStatus != 0) {
     rootDiagnosticFailure ("root manifest rejected");
-    printf ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
-           layout->manifestStatus, layout->magic0, layout->magic1);
+    printf ("NativeUfs: no valid root manifest in userdata (status %u, base %llx, magic %08x %08x)\n",
+           layout->manifestStatus, layout->baseBytes, layout->magic0, layout->magic1);
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
-  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+  // The store and log guards treat everything up to the end of the selected image (base + image) as the root image.
+  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->baseBytes + layout->imageBytes, layout->gptEntriesLba,
                      layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
   const char *names[4] = {};
   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
@@ -1942,7 +1958,7 @@ bool NativeUfs::startRoot (IOService *provider)
       gPendingDevice[index] = device;
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->baseBytes + layout->window[index].offset;
       if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
           !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
       ROOT_STAGE ("root window attachment");

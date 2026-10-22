@@ -8,6 +8,9 @@
 #include "verified_root.h"
 #include "RootCommandsBridge.cpp"
 constexpr IOReturn kIOReturnNotPrivileged=0xe00002c1;
+#define ROOT_STAGE(name) do { (void) (name); } while (0)
+#define ROOT_LOG(...) do { } while (0)
+static char gRootManifestText[900];
 #include "../RootLayout.h"
 #include "../RootWindowRead.h"
 extern "C" int vr_host_open(const uint8_t *,size_t,const uint8_t *,uint64_t,vr_view *);
@@ -48,7 +51,7 @@ uint32_t ufs_path_read(uint64_t block,uint64_t count,uint8_t *out,uint64_t capac
     }
     uint64_t copy(uint64_t offset,const void *data,uint64_t length) { memcpy(out+offset,data,length); return length; }
   } ops{out};
-  auto result=ufsReadWindow(ops,layout.userdataFirst*4096+layout.window[selected].offset,
+  auto result=ufsReadWindow(ops,layout.userdataFirst*4096+layout.baseBytes+layout.window[selected].offset,
                              layout.window[selected].size,block,count,bounce);
   *done=result.done; return result.status;
 }
