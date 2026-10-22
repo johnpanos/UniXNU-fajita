@@ -1,136 +1,160 @@
 #!/usr/bin/env python3
-"""Build the owner-signed userland pieces of the SSH-over-USB channel for arm64 iOS:
-the fajita-reboot tool (package/ssh-tools/fajita-reboot.c) and, with --dropbear DIR,
-a static dropbear SSH server. Output (ignored, never committed):
-build/ssh-userland/{fajita-reboot,dropbear,...} plus trust.json with their CDHashes,
-which make-owner-trust-bundle.py adds to an owner trust module.
+"""Build the owner-signed userland of the SSH-over-USB channel for plain arm64 iOS
+(not arm64e: the A10X iPadOS 17.7.11 userland has no pointer authentication):
 
-Signing and the iOS SDK
------------------------
-Linking an iOS userland binary needs an iOS SDK sysroot (libSystem et al.) and the
-binary must be code-signed (ad-hoc, 4 KiB pages) for AMFI to let it run, exactly as
-scripts/build-adreno-metal-plugin.py signs the Adreno probe daemon. This repository's
-Linux host has neither an iOS SDK nor a Mach-O signer, so this script is written to
-run where they exist:
+  * fajita-reboot  (package/ssh-tools/fajita-reboot.c)
+  * dropbearmulti  (dropbear SSH server + dropbearkey + scp + dbclient), from a
+    pinned, sha256-checked source tarball
+  * an ed25519 host key and the launchd job org.blu-sharky.sshd.plist
 
-  * macOS with Xcode: xcrun supplies the SDK (clang/ld64) and codesign.
-  * Linux with an iOS SDK sysroot in UNIXNU_IOS_SDK and a signer (ldid/rcodesign):
-    the cross toolchain at ~/unixnu-toolchain (clang + ld64) links against the SDK.
+Everything is ad-hoc code-signed with 4 KiB pages (the kernel validates 4 KiB pages;
+see native-4k-signature-hash-cache), exactly as scripts/build-adreno-metal-plugin.py
+signs the Adreno probe daemon. The output and the cdhashes (codesign -dvvv) go to the
+output directory with a JSON report; scripts/make-fajita-owner-trust.py adds the
+cdhashes to an owner trust module on the Linux host.
 
-With neither, the script stops with a clear message instead of producing an
-unsignable or unlinkable binary. It never downloads anything.
+This needs an iOS SDK and codesign, so it runs on macOS CI (xcrun --sdk iphoneos),
+not on the Linux build host. See .github/workflows/ssh-userland.yml.
+
+  build-ssh-userland.py --dropbear-tarball FILE [--out DIR] [--ios-version 17.0]
+
+The tarball is untrusted: it is checked against DROPBEAR_SHA256, extracted into its
+own directory, and built there; this script lives elsewhere and is passed paths.
 """
 import argparse
+import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'build/ssh-userland'
+
+# Pinned dropbear source. Update both together.
+DROPBEAR_VERSION = '2024.86'
+DROPBEAR_SHA256 = 'e78936dffc395f2e0db099321d6be659190966b99712b55c530dd0a1822e0a5e'
+
+# Where the binaries and host key land on the device (under the GPU-addon mount root
+# /private/var/ngpu; the daemons/ dir is unioned over /System/Library/LaunchDaemons).
+DEVICE_BIN = '/private/var/ngpu/bin'
+DEVICE_ETC = '/private/var/ngpu/etc'
 
 
-def find_sdk():
-    sdk = os.environ.get('UNIXNU_IOS_SDK')
-    if sdk and Path(sdk).is_dir():
-        return Path(sdk)
-    if shutil.which('xcrun'):
-        try:
-            return Path(subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip())
-        except subprocess.CalledProcessError:
-            pass
-    return None
+def sdk_path():
+    return subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 
 
-def find_signer():
-    if shutil.which('codesign'):
-        return 'codesign'
-    for name in ('ldid', 'rcodesign'):
-        if shutil.which(name):
-            return name
-    return None
-
-
-def compiler(sdk):
-    # macOS: xcrun clang. Linux: the cross clang of ~/unixnu-toolchain with the SDK.
-    if shutil.which('xcrun') and not os.environ.get('UNIXNU_IOS_SDK'):
-        return ['xcrun', 'clang']
-    clang = os.environ.get('UNIXNU_XNU_CLANG', str(Path.home() / 'unixnu-toolchain/clang/bin/clang'))
-    ld64 = os.environ.get('UNIXNU_LD64', str(Path.home() / 'unixnu-toolchain/ld64/bin/arm64-apple-darwin-ld'))
-    return [clang, f'-fuse-ld={ld64}']
-
-
-def sign(signer, path, identifier, entitlements=None):
-    if signer == 'codesign':
-        cmd = ['codesign', '--force', '--sign', '-', '--pagesize', '4096', '--identifier', identifier]
-        if entitlements:
-            cmd += ['--entitlements', str(entitlements)]
-        subprocess.run(cmd + [str(path)], check=True)
-    elif signer == 'ldid':
-        cmd = ['ldid', '-S' + (str(entitlements) if entitlements else ''), '-I' + identifier]
-        subprocess.run(cmd + [str(path)], check=True)
-    else:  # rcodesign
-        subprocess.run(['rcodesign', 'sign', str(path)], check=True)
+def cdhash(path):
+    out = subprocess.run(['codesign', '-d', '--verbose=4', str(path)], capture_output=True, text=True).stderr
+    m = re.search(r'^CDHash=([a-f0-9]{40})$', out, re.M)
+    if not m:
+        raise SystemExit(f'no CDHash from codesign for {path}:\n{out}')
+    return m.group(1)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--dropbear', metavar='DIR', help='a dropbear source tree (untrusted; built, not run from)')
+    parser.add_argument('--dropbear-tarball', required=True, help='pinned dropbear source tarball (sha256-checked)')
+    parser.add_argument('--out', default=str(ROOT / 'build/ssh-userland'))
+    parser.add_argument('--ios-version', default='17.0', help='minimum iOS/iPadOS version (the userland is 17.7.11)')
     args = parser.parse_args()
 
-    sdk = find_sdk()
-    signer = find_signer()
-    if not sdk:
-        raise SystemExit('No iOS SDK: set UNIXNU_IOS_SDK=/path/to/iPhoneOS.sdk or run on macOS with Xcode. '
-                         'This Linux host has only the kernel stand-in SDK, which cannot link a userland binary.')
-    if not signer:
-        raise SystemExit('No Mach-O signer (codesign/ldid/rcodesign) found; AMFI will refuse an unsigned binary.')
+    out = Path(args.out).resolve()
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    base = compiler(sdk) + ['-target', 'arm64-apple-ios17.0', '-isysroot', str(sdk), '-O2',
-                            '-Wall', '-Wextra', '-Werror', '-fstack-protector-strong']
-    cdhashes = {}
+    sdk = sdk_path()
+    target = f'arm64-apple-ios{args.ios_version}'
+    clang = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', target, '-isysroot', sdk,
+             '-arch', 'arm64', '-O2', '-Wall', '-Wextra', '-Werror', '-fstack-protector-strong']
+    report = {'target': target, 'sdk': sdk, 'dropbear_version': DROPBEAR_VERSION,
+              'dropbear_sha256': DROPBEAR_SHA256, 'cdhashes': {}}
 
-    # fajita-reboot: no entitlements needed (reboot(2) is allowed for root).
-    reboot_bin = OUT / 'fajita-reboot'
-    subprocess.run(base + [str(ROOT / 'package/ssh-tools/fajita-reboot.c'), '-o', str(reboot_bin)], check=True)
-    sign(signer, reboot_bin, 'org.blu-sharky.fajita-reboot')
-    cdhashes['fajita-reboot'] = cdhash(reboot_bin)
+    # 1. fajita-reboot. reboot(2) is allowed for root; no entitlements needed.
+    reboot_bin = out / 'fajita-reboot'
+    subprocess.run(clang + [str(ROOT / 'package/ssh-tools/fajita-reboot.c'), '-o', str(reboot_bin)], check=True)
+    subprocess.run(['codesign', '--force', '--sign', '-', '--pagesize', '4096',
+                    '--identifier', 'org.blu-sharky.fajita-reboot', str(reboot_bin)], check=True)
+    subprocess.run(['codesign', '--verify', '--strict', str(reboot_bin)], check=True)
+    report['cdhashes']['fajita-reboot'] = cdhash(reboot_bin)
 
-    if args.dropbear:
-        src = Path(args.dropbear).resolve()
-        if not src.is_dir():
-            raise SystemExit(f'--dropbear: {src} is not a directory')
-        # dropbear ships an autotools build; cross-configure against the SDK, then
-        # build a single static multi-call binary (dropbearmulti: dropbear + dbclient
-        # + dropbearkey + scp). Entitlements: a daemon outside every sandbox profile
-        # needs no-container, like the Adreno probe daemon.
-        ent = OUT / 'dropbear-entitlements.plist'
-        ent.write_bytes(plistlib.dumps({'com.apple.private.security.no-container': True,
-                                        'platform-application': True}))
-        env = dict(os.environ, CC=' '.join(base), CFLAGS='-DHAVE_GETGROUPLIST')
-        subprocess.run(['./configure', '--host=arm-apple-darwin', '--disable-zlib',
-                        '--enable-static'], cwd=src, env=env, check=True)
-        subprocess.run(['make', 'PROGRAMS=dropbear dbclient dropbearkey scp', 'MULTI=1', 'dropbearmulti'],
-                       cwd=src, env=env, check=True)
-        multi = OUT / 'dropbearmulti'
-        shutil.copyfile(src / 'dropbearmulti', multi)
-        sign(signer, multi, 'org.blu-sharky.dropbear', ent)
-        cdhashes['dropbear'] = cdhash(multi)
+    # 2. dropbear. Verify, extract, cross-build a static multi-call binary.
+    tar = Path(args.dropbear_tarball).resolve()
+    digest = hashlib.sha256(tar.read_bytes()).hexdigest()
+    if digest != DROPBEAR_SHA256:
+        raise SystemExit(f'dropbear tarball sha256 {digest} != pinned {DROPBEAR_SHA256}')
+    src_root = out / 'dropbear-src'
+    src_root.mkdir()
+    with tarfile.open(tar) as t:
+        t.extractall(src_root, filter='data')
+    src = next(p for p in src_root.iterdir() if p.is_dir())
 
-    (OUT / 'trust.json').write_text(json.dumps(dict(cdhashes=cdhashes,
-        purpose='owner-built SSH-over-USB userland; trusted only through an extra owner trust module'), indent=2) + '\n')
-    print('PASS: SSH userland built and signed, CDHashes', cdhashes)
+    # The server/host-outside-every-sandbox grant, like the Adreno probe daemon.
+    ent = out / 'dropbear-entitlements.plist'
+    ent.write_bytes(plistlib.dumps({'com.apple.private.security.no-container': True,
+                                    'platform-application': True}))
 
+    env = dict(os.environ, CC='xcrun --sdk iphoneos clang',
+               CFLAGS=f'-target {target} -isysroot {sdk} -arch arm64 -O2',
+               LDFLAGS=f'-target {target} -isysroot {sdk} -arch arm64')
+    # --host marks a cross build so configure skips run-tests. iOS has no utmp/lastlog/wtmp.
+    subprocess.run(['./configure', '--host=aarch64-apple-darwin', '--disable-zlib',
+                    '--disable-lastlog', '--disable-utmp', '--disable-utmpx',
+                    '--disable-wtmp', '--disable-wtmpx', '--disable-pututline', '--disable-pututxline'],
+                   cwd=src, env=env, check=True)
+    subprocess.run(['make', 'PROGRAMS=dropbear dropbearkey scp dbclient', 'MULTI=1',
+                    '-j', str(os.cpu_count() or 2), 'dropbearmulti'], cwd=src, env=env, check=True)
+    multi = out / 'dropbearmulti'
+    shutil.copyfile(src / 'dropbearmulti', multi)
+    multi.chmod(0o755)
+    subprocess.run(['codesign', '--force', '--sign', '-', '--pagesize', '4096',
+                    '--identifier', 'org.blu-sharky.dropbear', '--entitlements', str(ent), str(multi)], check=True)
+    subprocess.run(['codesign', '--verify', '--strict', str(multi)], check=True)
+    report['cdhashes']['dropbearmulti'] = cdhash(multi)
 
-def cdhash(path):
-    out = subprocess.run(['codesign', '-d', '--verbose=4', str(path)], capture_output=True, text=True).stderr \
-        if shutil.which('codesign') else ''
-    import re
-    m = re.search(r'^CDHash=([a-f0-9]{40})$', out, re.M)
-    return m.group(1) if m else 'unknown (compute with the signer in use)'
+    # 3. An ed25519 host key, generated with the just-built dropbearkey on the CI host
+    #    (dropbearmulti is an iOS binary and cannot run here; dropbearkey must come from
+    #    a host build). We build a host dropbearkey too, only to make the key.
+    host_key = out / 'dropbear_ed25519_host_key'
+    env_host = dict(os.environ, CC='xcrun clang', CFLAGS='-O2', LDFLAGS='')
+    build_host = out / 'dropbear-host'
+    shutil.copytree(src, build_host)
+    subprocess.run(['./configure', '--disable-zlib'], cwd=build_host, env=env_host, check=True)
+    subprocess.run(['make', 'PROGRAMS=dropbearkey', '-j', str(os.cpu_count() or 2), 'dropbearkey'],
+                   cwd=build_host, env=env_host, check=True)
+    keygen = subprocess.run([str(build_host / 'dropbearkey'), '-t', 'ed25519', '-f', str(host_key)],
+                            capture_output=True, text=True, check=True)
+    shutil.rmtree(build_host)
+    fp = re.search(r'(SHA256:\S+)', keygen.stdout + keygen.stderr)
+    report['host_key_fingerprint'] = fp.group(1) if fp else None
+
+    # 4. The launchd job. dropbear in the foreground, logging to stderr, with the owner
+    #    host key, listening on port 22 on every interface (the CDC-ECM ifnet, once it
+    #    exists). -R would write keys to a read-only path, so a fixed -r key is shipped.
+    plist_name = 'org.blu-sharky.sshd.plist'
+    plist = out / plist_name
+    plist.write_bytes(plistlib.dumps(dict(
+        Label='org.blu-sharky.sshd',
+        ProgramArguments=[f'{DEVICE_BIN}/dropbearmulti', 'dropbear', '-F', '-E',
+                          '-r', f'{DEVICE_ETC}/dropbear_ed25519_host_key', '-p', '22'],
+        RunAtLoad=True, KeepAlive=True, UserName='root',
+        StandardOutPath='/dev/console', StandardErrorPath='/dev/console'), fmt=plistlib.FMT_XML))
+
+    # The addon layout the device consumes (scripts/make-fajita-ssh-addon.py).
+    report['device_layout'] = {
+        f'{DEVICE_BIN}/dropbearmulti': 'dropbearmulti',
+        f'{DEVICE_BIN}/fajita-reboot': 'fajita-reboot',
+        f'{DEVICE_ETC}/dropbear_ed25519_host_key': 'dropbear_ed25519_host_key',
+        '/private/var/ngpu/daemons/' + plist_name: plist_name,
+    }
+    (out / 'trust.json').write_text(json.dumps(report, indent=2) + '\n')
+    print('PASS: SSH userland built and signed')
+    print(json.dumps(report['cdhashes'], indent=2))
 
 
 if __name__ == '__main__':

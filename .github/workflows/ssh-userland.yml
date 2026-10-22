@@ -1,0 +1,65 @@
+name: SSH userland
+
+# Builds the owner-signed userland of the SSH-over-USB channel (dropbear + fajita-reboot)
+# for plain arm64 iOS on a macOS runner, which has the Xcode iOS SDK, clang and codesign
+# that the Linux build host lacks. Output: the signed Mach-O binaries, their cdhashes, the
+# ed25519 host key, the launchd plist and a JSON report, as one artifact. The Linux side
+# adds the cdhashes to an owner trust module with scripts/make-fajita-owner-trust.py.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - package/ssh-tools/fajita-reboot.c
+      - scripts/build-ssh-userland.py
+      - .github/workflows/ssh-userland.yml
+
+permissions:
+  contents: read
+
+jobs:
+  userland:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos clang --version
+          codesign --version || true
+
+      - name: Fetch the pinned dropbear source
+        run: |
+          mkdir -p src
+          # Pinned release; the build script re-checks this sha256 before extracting.
+          VER=2024.86
+          SHA=e78936dffc395f2e0db099321d6be659190966b99712b55c530dd0a1822e0a5e
+          for url in \
+            "https://matt.ucc.asn.au/dropbear/releases/dropbear-$VER.tar.bz2" \
+            "https://github.com/mkj/dropbear/releases/download/DROPBEAR_$VER/dropbear-$VER.tar.bz2"; do
+            if curl -fsSL "$url" -o src/dropbear.tar.bz2; then break; fi
+          done
+          echo "$SHA  src/dropbear.tar.bz2" | shasum -a 256 -c -
+
+      - name: Build and sign the SSH userland
+        run: python3 scripts/build-ssh-userland.py --dropbear-tarball src/dropbear.tar.bz2 --out out --ios-version 17.0
+
+      - name: Show cdhashes
+        run: |
+          for b in out/fajita-reboot out/dropbearmulti; do
+            echo "== $b =="
+            codesign -dvvv "$b" 2>&1 | grep -E 'CDHash|Identifier|Page size|flags' || true
+          done
+          cat out/trust.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-userland
+          path: |
+            out/fajita-reboot
+            out/dropbearmulti
+            out/dropbear_ed25519_host_key
+            out/org.blu-sharky.sshd.plist
+            out/dropbear-entitlements.plist
+            out/trust.json
+          if-no-files-found: error

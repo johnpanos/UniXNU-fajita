@@ -170,8 +170,14 @@ reach PEHaltRestart through the sheng PMGR stub on a given build.
 - `package/BootLog.c` row `U` surfaces the probe over the UFS log.
 - **Full Linux kernel build + link succeeds** with the driver, personality and log
   row in place; `NativeDwc3` + `native_dwc3_*` symbols are in the linked kernel.
-- `package/ssh-tools/fajita-reboot.c` (source) + `scripts/build-ssh-userland.py`
-  (cross-build + signing recipe; stops cleanly where the SDK/signer are absent).
+- `package/ssh-tools/fajita-reboot.c` + `scripts/build-ssh-userland.py` +
+  `.github/workflows/ssh-userland.yml`: dropbear (pinned `2024.86`, sha256-checked) and
+  fajita-reboot built for arm64 iOS 17 and 4 KiB ad-hoc signed on macOS CI; artifact
+  carries the binaries, host key, launchd plist and cdhashes.
+- `scripts/make-fajita-owner-trust.py` (Linux): owner trust bundle = the two original
+  modules + an owner module with the userland cdhashes; loader-valid (unit-checked).
+- `scripts/make-fajita-ssh-addon.py` (Linux): packs the userland into a GPU-addon file
+  that the existing union mount delivers and launchd starts.
 - Two pre-existing build breakages on this branch fixed so the kernel builds at all:
   `BootReset.c` included `<stdio.h>` (fails under `-nostdlibinc`), and `BootLog.c`
   referenced weak_import diagnostics with no definition (ld64 refuses undefined
@@ -181,10 +187,62 @@ reach PEHaltRestart through the sheng PMGR stub on a given build.
 
 - NativeDwc3 stage B (CDC-ACM gadget) and stage C (CDC-ECM + `ifnet`): design above;
   not written. The on-device probe results drive these (adopt vs. bring up PHY/clocks).
-- Building + signing dropbear and `fajita-reboot`: needs an iOS SDK sysroot
-  (`UNIXNU_IOS_SDK`) or macOS, plus `codesign`/`ldid`/`rcodesign`.
-- Extending `make-owner-trust-bundle.py` with the userland cdhashes and the
-  `org.blu-sharky.sshd.plist` launchd job (reusing the GPU-addon mount).
+- Running the SSH daemon end to end: it is staged (built, signed, trusted, delivered)
+  but has no transport until the DWC3 gadget (stage B/C) exists.
+
+## Building the userland on macOS CI, and delivering it
+
+The Linux host has no iOS SDK or Mach-O signer, so the userland is built on a macOS
+runner and consumed on Linux:
+
+1. **CI build** — `.github/workflows/ssh-userland.yml` (macos-15, `workflow_dispatch`
+   + push on the ssh-userland paths) runs `scripts/build-ssh-userland.py`:
+   - `xcrun --sdk iphoneos clang -target arm64-apple-ios17.0` (plain arm64, the A10X
+     userland has no PAC; deployment target = the iPadOS 17.7.11 userland's);
+   - dropbear from the pinned `2024.86` tarball (sha256 `e78936dff…`, re-checked
+     before extraction) built as a static `dropbearmulti`; `fajita-reboot` from source;
+   - both `codesign --force --sign - --pagesize 4096` ad-hoc signed, dropbear with
+     `com.apple.private.security.no-container` + `platform-application`;
+   - an ed25519 host key (`dropbearkey`) and `org.blu-sharky.sshd.plist`;
+   - artifact `ssh-userland`: the binaries, `dropbear_ed25519_host_key`, the plist,
+     entitlements and `trust.json` (the cdhashes from `codesign -dvvv`).
+
+2. **Trust cache (Linux)** — download the artifact into
+   `/home/john/src/UniXNU-fajita/.cache/ssh-userland/` (gitignored), then:
+   ```
+   python3 scripts/make-fajita-owner-trust.py \
+       --original-bundle <the combined original static+System bundle, i.e. the file
+                          normally passed as --trust-cache; sha256 7416ca4f…> \
+       --ssh-trust /home/john/src/UniXNU-fajita/.cache/ssh-userland/trust.json \
+       --out /home/john/src/UniXNU-fajita/.cache/ssh-userland/owner-ssh.bundle
+   ```
+   This carries the two original modules byte-for-byte plus one owner module with the
+   dropbear/fajita-reboot cdhashes; the loader's structural checks are reproduced, so a
+   malformed result is caught offline.
+
+3. **Addon (Linux)** — pack the binaries, host key and plist into a GPU-addon file:
+   ```
+   python3 scripts/make-fajita-ssh-addon.py \
+       --from /home/john/src/UniXNU-fajita/.cache/ssh-userland \
+       --out  /home/john/src/UniXNU-fajita/.cache/ssh-userland/ssh-addon.bin
+   ```
+   The kernel writes these into Data under `/private/var/ngpu` and union-mounts
+   `/private/var/ngpu/daemons` over `/System/Library/LaunchDaemons` (boot arg
+   `sheng-gpu-addon=1`), so launchd starts `dropbear` as root.
+
+4. **Payload** — build it with the owner trust cache (skips the board allow-list), the
+   SSH addon, and the mount + probe boot args:
+   ```
+   unixnu build payload -D /home/john/src/UniXNU-fajita-ssh \
+       --owner-trust-cache /home/john/src/UniXNU-fajita/.cache/ssh-userland/owner-ssh.bundle \
+       --gpu-addon         /home/john/src/UniXNU-fajita/.cache/ssh-userland/ssh-addon.bin \
+       --kernel-arg sheng-gpu-addon=1 \
+       --kernel-arg native-dwc3-probe=2 \
+       --kernel-arg sheng-log=1
+   ```
+   (`--owner-trust-cache` replaces `--trust-cache`. SSH itself needs the stage-B/-C
+   DWC3 gadget before there is a transport; until then the daemon is staged and the
+   channel is proven via the probe's `U` log row and, once stage B lands, `/dev/ttyACM0`.)
 
 ## On-device test steps (for the stage-A probe, which is what is built)
 
