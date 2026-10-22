@@ -122,8 +122,12 @@ def main():
     #    a host build). We build a host dropbearkey too, only to make the key.
     host_key = out / 'dropbear_ed25519_host_key'
     env_host = dict(os.environ, CC='xcrun clang', CFLAGS='-O2', LDFLAGS='')
-    build_host = out / 'dropbear-host'
-    shutil.copytree(src, build_host)
+    # A FRESH extraction: reusing the iOS-built tree would relink iOS objects for macOS.
+    host_root = out / 'dropbear-host-src'
+    host_root.mkdir()
+    with tarfile.open(tar) as t:
+        t.extractall(host_root, filter='data')
+    build_host = next(p for p in host_root.iterdir() if p.is_dir())
     subprocess.run(['./configure', '--disable-zlib'], cwd=build_host, env=env_host, check=True)
     subprocess.run(['make', 'PROGRAMS=dropbearkey', '-j', str(os.cpu_count() or 2), 'dropbearkey'],
                    cwd=build_host, env=env_host, check=True)
