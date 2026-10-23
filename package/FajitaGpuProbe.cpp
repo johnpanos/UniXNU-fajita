@@ -227,6 +227,14 @@ bool stage4()
 {
     // a6xx_gmu_init (A630 branch): dummy 4 KiB at 0x60000000, debug 16 KiB, log 16 KiB, hfi 16 KiB; no icache (a page is
     // allocated anyway, the allocator wants one; nothing uses it). The GMU is arm-smmu-qcom's second client: bank 1.
+    // The reset S2CRs read 0x000200ff (TYPE fault, CBNDX 0xff); the stream kit leases only a slot whose S2CR is exactly
+    // fault with index 0 (gpu2: attach refused Busy). Both are "fault": rewrite the unused slots 0 and 1 to the form it expects.
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        volatile uint32_t *smr = reinterpret_cast<volatile uint32_t *>(gSmmu.va + 0x800 + 4 * slot);
+        volatile uint32_t *s2cr = reinterpret_cast<volatile uint32_t *>(gSmmu.va + 0xc00 + 4 * slot);
+        if (!(*smr & 0x80000000u) && *s2cr == 0x000200ffu) *s2cr = 0x00020000u;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
     IOReturn st = NativeAdrenoGmuContextSetSizes(0x1000, 0x1000, 0x4000, 0x4000, 0x4000);
     if (!st) st = NativeAdrenoGmuContextBringup(gSmmu.va, gSmmu.bytes, 1, 1, 1, 5, ctxProgress, &gGmuCtx);
     ctxReport("S4 gmuctx", st, gGmuCtx);
