@@ -25,11 +25,16 @@ The probe starts from the boot progress monitor (`BootProgress.c`, once a second
 
 ## Stages and boot arguments
 
+Command line room (fajita iOS 16): the board-constant display and UFS arguments moved to `[payload] board_args` (ios16/board.toml),
+which travel in `/chosen/board-args` and are read by `PE_parse_boot_argn` when the command line lacks them (UniXNU
+`patches/xnu-8796/board-args.patch`); the command line is ~520 bytes now, so the touch arguments fit. The iPad board is unchanged.
+Keep `boot-progress=2` (the board default): `boot-progress=1` stops the machine at 120 s on purpose.
+
 Add to `kernel_args` one stage at a time; each stage runs all lower ones first, and the first failure stops the sequence.
 
 | Boot arguments | Stage | Writes to hardware |
 | --- | --- | --- |
-| `boot-progress=1 sheng-log=1 fajita-touch=1` | 1: read GCC votes, branch states, S4 DFS levels, the five pins; the engine registers only if the QUP clocks already run | none |
+| `fajita-touch=1` (with the board's `boot-progress=2 sheng-log=1`) | 1: read GCC votes, branch states, S4 DFS levels, the five pins; the engine registers only if the QUP clocks already run | none |
 | `... fajita-touch=2` | 2: vote GCC 0x5200c bits 20/21/26 (OR, never cleared), wait for the branches, pins 49/50 to qup12, 125 input pull-up, 88 high (1.8 V), reset 99 high 10 ms, low 10 ms, high, 200 ms; GENI init (FIFO, 8-bit packing), 400 kHz from the TCXO DFS level; ACK probe: write 0xe9 to 0x20, up to 5 tries | GCC vote, TLMM 5 pins, SE4 |
 | `... fajita-touch=3` | 3: PDT scan of page 0 (fixed S3706B table if the first entry is empty), F01 identity, F01 ctrl0 = normal + NoSleep + Configured, interrupt enable = F12 abs + F01, F12 descriptors or the hardcoded layout, Control 8 maxima | touch controller registers |
 | `... fajita-touch=4 sheng-touch-hid=1` | 4: poll F01 status/interrupts at 100 Hz, read F12 Data1 when its bit is set, publish contacts; NativeHidInput adds its digitizer collection and sends them to the event driver (the board already has `offline-hid-input=1 offline-hid-home=1`) | none new |
@@ -49,6 +54,8 @@ Options (all optional):
 | `fajita-touch-poll-all=1` | 0 | read F12 every poll even without its interrupt bit (for a controller that never sets it) |
 | `fajita-touch-letterbox=1` | 0 | with a logical display: drop a contact that begins in the letterbox (default: clamp it to the image edge) |
 | `fajita-touch-view=0` | 1 | ignore the display's logical mode; map onto the whole panel |
+| `fajita-touch-synth=S` | 0 | unattended test: from S s after boot, synthetic gestures through the same publication as the controller's contacts (id 9); row FT6 |
+| `fajita-touch-synth-count=N`, `-interval=S`, `-kind=K` | 3, 30, 0 | gestures, seconds between them; kind 0 swipe up from the bottom edge (x 540, y 2335 -> 1100 in 24 frames of 10 ms), 1 tap at the panel centre |
 
 ### Coordinates
 

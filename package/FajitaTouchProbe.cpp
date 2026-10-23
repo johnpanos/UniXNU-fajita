@@ -42,8 +42,10 @@ extern "C" volatile struct fajita_display_logical fajita_display_logical;
 extern "C" __attribute__((weak)) volatile struct fajita_display_logical fajita_display_logical = {};
 
 #define TOUCH_SLOTS 12   // the array size NativeHidInput and BootProgress declare
-// fajita_touch_rows: 0-2 FT1, 3 FT2, 4-5 FT3, 6 FT4, 7 FTE (the last error), 8 FT5 (the HID side). BootLog.c declares the same size.
-#define FTB_ROWS 10
+// fajita_touch_rows: 0-2 FT1, 3 FT2, 4-5 FT3, 6 FT4, 7 FTE (the last error), 8 FT5 (the HID side), 9 FT6 (synthetic gestures),
+// 10 FT2L (the LDO28 vote).
+// BootLog.c declares the same size.
+#define FTB_ROWS 12
 
 extern "C" {
 // Read by package/BootProgress.c (page rows, touch pad overlay) and package/BootLog.c (UFS log); the types are those of their
@@ -117,11 +119,13 @@ const unsigned kGpio[kPins] = {FTB_GPIO_SDA, FTB_GPIO_SCL, FTB_GPIO_VIO, FTB_GPI
 
 struct Options {
     unsigned stage, hz, power, pdt, rmiReset, maxX, maxY, orient, rate, irq, pollAll, letterbox, view;
+    unsigned synth, synthCount, synthInterval, synthKind;   // fajita-touch-synth*: see synthFrame
+    unsigned ldo, ldoMv;                                    // fajita-touch-ldo (default 1): vote LDO28 over RPMh in stage 2
 };
 
 struct Session {
     Options opt;
-    Region gccLow, gccBranch, gccVote, pin[kPins], wrapper, se;
+    Region gccLow, gccBranch, gccVote, pin[kPins], wrapper, se, cmdDb, rsc;
     // stage 1
     uint32_t vote, gpll0Vote, gpll0Mode, haltM, haltS, haltS4, dfsr, rcgCfg, perfCfg[FTB_DFS_LEVELS], perfM[FTB_DFS_LEVELS],
         perfN[FTB_DFS_LEVELS];
@@ -189,6 +193,7 @@ void errorRow(const Session &s, const char *what) {
           g.timeouts, g.errors, g.recoveries, g.first_err);
     if (g.snap_valid) o.add(" irq%08x gs%08x gp%x ios%x tx%x rx%x cmd%08x", g.snap_irq, g.snap_status, g.snap_gp_len, g.snap_ios,
                             g.snap_txfs, g.snap_rxfs, g.snap_cmd);
+    o.add(" m%08x/%08x/%08x", g.last_first, g.last_acc, g.last_done);
 }
 
 // ---- stage 1: read only ----
@@ -250,6 +255,71 @@ bool snapshot(Session &s) {
     return true;
 }
 
+// ---- stage 2, fajita-touch-ldo=1: LDO28 (the controller's VDD) through an ACTIVE TCS of the apps RSC ----
+// Only a TCS that is idle (STATUS nonzero) and not triggered is used; nothing else of the RSC is written. Any failure stops
+// stage 2 before the pins change, with the reason in FT2L.
+bool ldoVote(Session &s) {
+    native_touch_step = 26;
+    Out o(fajita_touch_rows[10], sizeof fajita_touch_rows[10]);
+    o.add("FT2L");
+    if (!mapRegion(FTB_CMD_DB_BASE, FTB_CMD_DB_SIZE, s.cmdDb) || !mapRegion(FTB_RSC_DRV2_BASE, 0x10000, s.rsc)) {o.add(" map"); fail(26, -12); return false;}
+    // cmd-db is ordinary memory: copy it out word by word through the uncached mapping before parsing.
+    uint8_t *db = static_cast<uint8_t *>(IOMalloc(FTB_CMD_DB_SIZE));
+    if (!db) {fail(26, -12); return false;}
+    for (uint32_t i = 0; i < FTB_CMD_DB_SIZE; i += 4) {const uint32_t w = rd32(s.cmdDb.va, i); memcpy(db + i, &w, 4);}
+    uint32_t version = 0;
+    const uint32_t addr = ftb_cmd_db_addr(db, FTB_CMD_DB_SIZE, FTB_LDO_NAME, &version);
+    o.add(" db v%x magic%02x%02x%02x%02x %s@%x", version, db[4], db[5], db[6], db[7], FTB_LDO_NAME, addr);
+    IOFree(db, FTB_CMD_DB_SIZE);
+    if (!addr) {o.add(" NOT FOUND"); fail(26, -2); return false;}
+    const uintptr_t r = s.rsc.va;
+    int tcs = -1;
+    uint32_t st[FTB_RSC_ACTIVE_TCS], ctl[FTB_RSC_ACTIVE_TCS], en[FTB_RSC_ACTIVE_TCS];
+    for (unsigned t = 0; t < FTB_RSC_ACTIVE_TCS; t++) {
+        st[t] = rd32(r, ftb_tcs_reg(t, FTB_TCS_STATUS));
+        ctl[t] = rd32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL));
+        en[t] = rd32(r, ftb_tcs_reg(t, FTB_TCS_CMD_ENABLE));
+        o.add(" t%u:%x/%x/%x", t, st[t], ctl[t], en[t]);
+        if (tcs < 0 && st[t] && !(ctl[t] & FTB_TCS_AMC_TRIGGER)) tcs = static_cast<int>(t);
+    }
+    if (tcs < 0) {o.add(" BUSY"); fail(26, -16); return false;}
+    const unsigned t = static_cast<unsigned>(tcs);
+    const uint32_t data[3][2] = {{FTB_VRM_VOLTAGE, s.opt.ldoMv}, {FTB_VRM_MODE, FTB_LDO_MODE_HPM}, {FTB_VRM_ENABLE, 1}};
+    // __tcs_buffer_write, then __tcs_set_trigger (rpmh-rsc.c).
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CMD_ENABLE), 0);
+    for (unsigned c = 0; c < 3; c++) {
+        wr32(r, ftb_tcs_cmd_reg(t, c, FTB_TCS_CMD_MSGID), FTB_CMD_MSGID_WRITE_RESP);
+        wr32(r, ftb_tcs_cmd_reg(t, c, FTB_TCS_CMD_ADDR), addr + data[c][0]);
+        wr32(r, ftb_tcs_cmd_reg(t, c, FTB_TCS_CMD_DATA), data[c][1]);
+    }
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_WAIT_FOR_CMPL), 7);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CMD_ENABLE), 7);
+    uint32_t control = rd32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL)) & ~(FTB_TCS_AMC_TRIGGER | FTB_TCS_AMC_ENABLE);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL), control);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL), control | FTB_TCS_AMC_ENABLE);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL), control | FTB_TCS_AMC_ENABLE | FTB_TCS_AMC_TRIGGER);
+    uint32_t cs[3] = {}, us = 0;
+    bool done = false;
+    for (; us < 100000 && !done; us += 10) {
+        done = true;
+        for (unsigned c = 0; c < 3; c++) {
+            cs[c] = rd32(r, ftb_tcs_cmd_reg(t, c, FTB_TCS_CMD_STATUS));
+            done &= (cs[c] & (FTB_CMD_STATUS_ISSUED | FTB_CMD_STATUS_COMPL)) == (FTB_CMD_STATUS_ISSUED | FTB_CMD_STATUS_COMPL);
+        }
+        if (!done) IODelay(10);
+    }
+    const uint32_t irq = rd32(r, FTB_RSC_TCS_OFFSET + FTB_TCS_IRQ_STATUS);
+    // tcs_tx_done: untrigger, disable the commands, clear the TCS's completion bit.
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL), control | FTB_TCS_AMC_ENABLE);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CONTROL), control);
+    wr32(r, ftb_tcs_reg(t, FTB_TCS_CMD_ENABLE), 0);
+    wr32(r, FTB_RSC_TCS_OFFSET + FTB_TCS_IRQ_CLEAR, 1u << t);
+    o.add(" ->t%u %umV cs%x/%x/%x irq%x %uus%s", t, s.opt.ldoMv, cs[0], cs[1], cs[2], irq, us, done ? "" : " TIMEOUT");
+    if (!done) {fail(26, -110); return false;}
+    IOSleep(FTB_STARTUP_MS);   // the rail ramps; the controller's power-on reset follows
+    return true;
+}
+
 // ---- stage 2: clocks, pins, power, reset, engine, ACK ----
 void pinWrite(Session &s, unsigned pin, uint32_t ctl) {wr32(s.pin[pin].va, 0, ctl);}
 void pinOut(Session &s, unsigned pin, bool high) {wr32(s.pin[pin].va, 4, high ? FTB_IO_OUT : 0);}
@@ -269,14 +339,20 @@ bool enable(Session &s) {
     s.haltM = rd32(s.gccBranch.va, FTB_HALT_M_AHB & 0xfff);
     s.haltS = rd32(s.gccBranch.va, FTB_HALT_S_AHB & 0xfff);
     s.haltS4 = rd32(s.gccBranch.va, FTB_HALT_S4 & 0xfff);
-    o.add("FT2 vote%08x m%08x s%08x s4%08x %uus", s.voteAfter, s.haltM, s.haltS, s.haltS4, s.waitedUs);
-    if (!on) {o.add(" CLOCKS OFF"); fail(2, -110); return false;}   // never touch the engine without running clocks
+    // The branch words only matter when they stay off (run16t-s2: vote05bc0000 m0 s0 s400004220 after 10 us).
+    if (!on) {o.add("FT2 vote%08x m%08x s%08x s4%08x %uus CLOCKS OFF", s.voteAfter, s.haltM, s.haltS, s.haltS4, s.waitedUs); fail(2, -110); return false;}
+    o.add("FT2 clk%uus", s.waitedUs);
     if (s.xoLevel < 0) {o.add(" no 19.2MHz DFS level"); fail(21, -22); return false;}
     // Pins: the I2C pair to qup12 (2 mA, no bias, as qupv3_se12_i2c_active); the interrupt an input with pull-up (ts_default_pins);
     // the 1.8 V enable and reset outputs, the level written before the output is enabled.
     pinWrite(s, kSda, ftb_pin_cfg(FTB_FUNC_QUP12, 2, FTB_PULL_NONE, 0));
     pinWrite(s, kScl, ftb_pin_cfg(FTB_FUNC_QUP12, 2, FTB_PULL_NONE, 0));
     pinWrite(s, kInt, ftb_pin_cfg(FTB_FUNC_GPIO, 16, FTB_PULL_UP, 0));
+    if (s.opt.ldo) {
+        const bool ok = ldoVote(s);
+        logRow(10);
+        if (!ok) {o.add(" LDO"); return false;}
+    }
     if (s.opt.power) {
         native_touch_step = 22;
         pinOut(s, kVio, true);
@@ -316,7 +392,12 @@ bool enable(Session &s) {
         IOSleep(20);
     }
     if (s.ackTries > 5) s.ackTries = 5;
-    o.add(" ack%d x%u", s.ackRc, s.ackTries);
+    o.add(" ack%d x%u w%x/%x", s.ackRc, s.ackTries, s.i2c.last_first, s.i2c.last_acc);
+    if (s.ackRc) {   // a one-byte read as a second opinion (it only reads the register the controller points at)
+        uint8_t byte = 0;
+        const int rr = geni_i2c_read(&s.i2c, FTB_I2C_ADDR, &byte, 1);
+        o.add(" rd%d:%02x %x/%x", rr, byte, s.i2c.last_first, s.i2c.last_acc);
+    }
     if (s.ackRc) {
         // No ACK: the controller is unpowered (VDD = PM8998 LDO28, an RPMh rail XNU does not drive) or held in reset; a timeout or a
         // bus error with the lines low (ios) points at the 1.8 V pull-ups instead.
@@ -469,6 +550,71 @@ void publish(Session &s, unsigned count, const struct rmi_contact *c) {
     if (void (*sink)(void *) = __atomic_load_n(&gTouchSink, __ATOMIC_ACQUIRE)) sink(gTouchSinkContext);
 }
 
+// Synthetic gestures (fajita-touch-synth=<s>): for unattended runs, where no finger is on the panel. From <s> seconds after boot,
+// every fajita-touch-synth-interval seconds (default 30), fajita-touch-synth-count times (default 3), one gesture goes through the
+// same publication as the controller's contacts (publish(): the display mapping, the seqlock, NativeHidInput's sink), with id 9
+// (an F12 slot the S3706B's ten objects use last). fajita-touch-synth-kind: 0 (default) a swipe up from the bottom edge of the
+// panel (x 540, y 2335 -> 1100 over 24 frames of 10 ms, then the lift: the home-bar gesture that unlocks), 1 a tap at the panel
+// centre (3 frames, then the lift). Real contacts are not published while a gesture runs. Row FT6 counts what was sent.
+void loopRow(const Session &s);
+struct Synth {uint32_t next, sent, frames, gestures; int frame;};
+Synth gSynth;
+void synthRow(const Session &s) {
+    Out o(fajita_touch_rows[9], sizeof fajita_touch_rows[9]);
+    o.add("FT6 synth k%u at%u+%ux%u sent%u/%u frames%u hid%u last%d,%d", s.opt.synthKind, s.opt.synth, s.opt.synthInterval,
+          s.opt.synthCount, gSynth.gestures, s.opt.synthCount, gSynth.frames, native_touch_hid_reports, native_touch_last_x,
+          native_touch_last_y);
+}
+// True while a gesture owns the publication (one frame published per call; the caller waits 10 ms between calls).
+bool synthFrame(Session &s) {
+    if (!s.opt.synth || gSynth.gestures >= s.opt.synthCount) return false;
+    const uint32_t now = touchMs();
+    if (gSynth.frame < 0) {
+        if (!gSynth.next) gSynth.next = s.opt.synth * 1000;
+        if (now < gSynth.next) return false;
+        gSynth.frame = 0;
+    }
+    const int frames = s.opt.synthKind == 1 ? 3 : 24;
+    struct rmi_contact c = {};
+    c.id = 9;
+    unsigned count = 1;
+    if (gSynth.frame < frames) {
+        const unsigned px = 540, py = s.opt.synthKind == 1 ? 1170 : 2335 - (2335 - 1100) * static_cast<unsigned>(gSynth.frame) / (frames - 1);
+        // publish() maps controller coordinates; give it the panel pixel in the controller's range (inverse of ftb_map_panel
+        // without orientation), so the same display mapping applies.
+        const unsigned mx = s.map.max_x ? s.map.max_x : FTB_DEFAULT_MAX_X, my = s.map.max_y ? s.map.max_y : FTB_DEFAULT_MAX_Y;
+        const struct ftb_map saved = s.map;
+        s.map.orient = 0;
+        c.x = static_cast<uint16_t>((static_cast<uint64_t>(px) * mx + (FTB_PANEL_W - 2)) / (FTB_PANEL_W - 1));
+        c.y = static_cast<uint16_t>((static_cast<uint64_t>(py) * my + (FTB_PANEL_H - 2)) / (FTB_PANEL_H - 1));
+        publish(s, count, &c);
+        s.map = saved;
+    } else {
+        publish(s, 0, nullptr);   // the lift
+    }
+    ++gSynth.frames;
+    if (++gSynth.frame > frames) {
+        gSynth.frame = -1;
+        ++gSynth.gestures;
+        gSynth.next += s.opt.synthInterval * 1000;
+        IOLog("fajita-touch: synthetic gesture %u of %u sent (hid reports %u)\n", gSynth.gestures, s.opt.synthCount, native_touch_hid_reports);
+    }
+    synthRow(s);
+    return true;
+}
+// Without a controller (a stage below 4, or a failed stage) the synthetic gestures still run, on this thread, until they are done.
+void synthOnly(Session &s) {
+    if (!s.opt.synth) return;
+    s.liveIds = 0;
+    synthRow(s);
+    while (gSynth.gestures < s.opt.synthCount) {
+        if (synthFrame(s)) IOSleep(10);
+        else {loopRow(s); summary(s); IOSleep(200);}
+    }
+    loopRow(s);
+    summary(s);
+}
+
 void loopRow(const Session &s) {
     Out o(fajita_touch_rows[6], sizeof fajita_touch_rows[6]);
     o.add("FT4 polls%u irq%u fr%u cf%u c%u dn%u lb%u/%u raw%d,%d ext x%d..%d y%d..%d st%02x err%u back%u recfg%u gpio%u/%u",
@@ -532,6 +678,11 @@ static void pollLoop(Session &s) {
     uint32_t seen = gTouchIrqEvents;
     unsigned failures = 0, rowTick = 0;
     for (;;) {
+        if (synthFrame(s)) {   // a synthetic gesture owns the publication; the controller's contacts wait
+            if ((++rowTick % s.opt.rate) == 0) {loopRow(s); summary(s);}
+            IOSleep(10);
+            continue;
+        }
         native_touch_loop_step = 1;
         ++s.polls;
         uint8_t status = 0;
@@ -604,6 +755,18 @@ static void readOptions(Options &o) {
     if (o.rate < 10 || o.rate > 250) o.rate = 100;
     PE_parse_boot_argn("fajita-touch-irq", &o.irq, sizeof o.irq);
     PE_parse_boot_argn("fajita-touch-poll-all", &o.pollAll, sizeof o.pollAll);
+    o.ldo = 1; o.ldoMv = FTB_LDO_MV;   // the firmware leaves LDO28 off (run16t-s2b: no ACK without it, run16t-s2l: ACK with it)
+    PE_parse_boot_argn("fajita-touch-ldo", &o.ldo, sizeof o.ldo);
+    PE_parse_boot_argn("fajita-touch-ldo-mv", &o.ldoMv, sizeof o.ldoMv);
+    if (o.ldoMv < 2856 || o.ldoMv > 3008) o.ldoMv = FTB_LDO_MV;
+    o.synth = 0; o.synthCount = 3; o.synthInterval = 30; o.synthKind = 0;
+    PE_parse_boot_argn("fajita-touch-synth", &o.synth, sizeof o.synth);
+    PE_parse_boot_argn("fajita-touch-synth-count", &o.synthCount, sizeof o.synthCount);
+    PE_parse_boot_argn("fajita-touch-synth-interval", &o.synthInterval, sizeof o.synthInterval);
+    PE_parse_boot_argn("fajita-touch-synth-kind", &o.synthKind, sizeof o.synthKind);
+    if (o.synthCount > 20) o.synthCount = 20;
+    if (o.synthInterval < 2) o.synthInterval = 2;
+    if (o.synthKind > 1) o.synthKind = 0;
 }
 
 static void touchThread(void *, wait_result_t) {
@@ -612,6 +775,7 @@ static void touchThread(void *, wait_result_t) {
     if (!s) {fail(0, -12); return;}
     bzero(static_cast<void *>(s), sizeof *s);   // Session has member initializers: clang 19+ -Wnontrivial-memcall wants the cast
     s->ackRc = 1;   // not probed
+    gSynth.frame = -1;
     s->opt.stage = native_touch_stage_req;
     readOptions(s->opt);
     do {
@@ -640,6 +804,7 @@ static void touchThread(void *, wait_result_t) {
     summary(*s);
     logRow(7);
     IOLog("fajita-touch: %s\n", native_touch_rows[0]);
+    synthOnly(*s);
     // The session stays allocated: its mappings keep the registers the rows describe readable for a later look.
 }
 

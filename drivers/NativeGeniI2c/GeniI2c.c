@@ -192,9 +192,13 @@ static int message(struct geni_i2c *g, unsigned op, uint8_t addr, const uint8_t 
                        (stop ? 0 : GI2C_STOP_STRETCH));
     if (op == GI2C_OP_WRITE) wr(g, GI2C_TX_WATERMARK, 1);   // the FIFO refill is driven by the watermark event
     int err = 0, done = 0;
+    g->last_first = g->last_acc = g->last_done = 0;
     for (unsigned n = 0; n < g->poll_limit; n++) {
         uint32_t st = rd(g, GI2C_M_IRQ_STATUS);
         if (!st) {pause_us(g, 1); continue;}
+        if (!g->last_first) g->last_first = st;
+        g->last_acc |= st;
+        if (st & GI2C_M_CMD_DONE) g->last_done = st;
         if (!err) err = classify(g, st, op);
         if (err) {
             if (op == GI2C_OP_WRITE) wr(g, GI2C_TX_WATERMARK, 0);   // stop feeding a failed write
@@ -207,6 +211,9 @@ static int message(struct geni_i2c *g, unsigned op, uint8_t addr, const uint8_t 
         if (st & GI2C_M_CMD_DONE) {done = 1; break;}
         // An error without CMD_DONE is left to the timeout, as in the Linux driver.
     }
+    // The engine may raise CMD_FAILURE and the general-purpose bit that says why in separate status reads (run16t-s2b: a NACK
+    // seen as 0x40000000, then the failure, then GP_IRQ1): classify on everything the message raised.
+    if (err == GI2C_ERR_IO && (g->last_acc & GI2C_M_GP_IRQS)) err = classify(g, g->last_acc, op);
     if (!done) {
         snapshot(g);
         if (!err) err = GI2C_ERR_TIMEOUT;
@@ -214,7 +221,10 @@ static int message(struct geni_i2c *g, unsigned op, uint8_t addr, const uint8_t 
         geni_i2c_recover(g);
     } else {
         if (!err && op == GI2C_OP_READ && c.done < len) drain(g, &c);
-        if (!err && c.done < len) err = GI2C_ERR_IO;   // the engine finished early
+        if (!err && c.done < len) {   // the engine finished early: a NACK flag without CMD_FAILURE still says why
+            err = (g->last_acc & GI2C_M_GP_IRQ1) ? (rd(g, GI2C_M_GP_LENGTH) || op != GI2C_OP_WRITE || c.done ? GI2C_ERR_DATA_NACK : GI2C_ERR_ADDR_NACK)
+                                               : GI2C_ERR_IO;
+        }
         if (err) {
             snapshot(g);
             if (err != GI2C_ERR_ADDR_NACK) geni_i2c_recover(g);

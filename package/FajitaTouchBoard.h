@@ -197,6 +197,68 @@ static inline int ftb_map_point(const struct ftb_map *map, const struct ftb_view
     return inside;
 }
 
+// VDD of the controller: PM8998 LDO28 (sdm845-oneplus-common.dtsi vreg_l28a_3p0, 2856..3008 mV, HPM; the rmi4 vdd-supply), an
+// RPMh VRM resource the firmware leaves off (run16t-s2b). It is voted the way Linux's rpmh-regulator does it, through an ACTIVE
+// TCS of the apps RSC (rpmh-rsc.c): cmd-db (sdm845.dtsi reserved-memory@85fe0000, size 0x20000, "qcom,cmd-db"; cmd-db.c layout)
+// gives the resource address of "ldoa28"; then three writes, voltage (+0x0, mV), mode (+0x8, 7 = PMIC4 LDO HPM) and enable
+// (+0x4, 1), each with a completion response.
+#define FTB_CMD_DB_BASE 0x85fe0000ULL
+#define FTB_CMD_DB_SIZE 0x20000u
+#define FTB_LDO_NAME "ldoa28"
+#define FTB_LDO_MV 2856u
+#define FTB_LDO_MODE_HPM 7u
+#define FTB_VRM_VOLTAGE 0x0u
+#define FTB_VRM_ENABLE 0x4u
+#define FTB_VRM_MODE 0x8u
+// apps_rsc (sdm845.dtsi rsc@179c0000): drv-2 at 0x179e0000 is the HLOS DRV (qcom,drv-id = 2), TCSes at +0xd00 (qcom,tcs-offset),
+// qcom,tcs-config ACTIVE 2, SLEEP 3, WAKE 3, CONTROL 1 (Linux numbers them in that order: TCS 0 and 1 are the active ones).
+#define FTB_RSC_DRV2_BASE 0x179e0000ULL
+#define FTB_RSC_TCS_OFFSET 0xd00u
+#define FTB_RSC_ACTIVE_TCS 2u
+#define FTB_TCS_STRIDE 672u                     // RSC_DRV_TCS_OFFSET
+#define FTB_TCS_CMD_STRIDE 20u                  // RSC_DRV_CMD_OFFSET
+#define FTB_TCS_IRQ_STATUS 0x04u                // common, one bit per TCS
+#define FTB_TCS_IRQ_CLEAR 0x08u
+#define FTB_TCS_WAIT_FOR_CMPL 0x10u             // per TCS
+#define FTB_TCS_CONTROL 0x14u
+#define FTB_TCS_STATUS 0x18u                    // zero while the TCS is busy
+#define FTB_TCS_CMD_ENABLE 0x1cu
+#define FTB_TCS_CMD_MSGID 0x30u                 // per command
+#define FTB_TCS_CMD_ADDR 0x34u
+#define FTB_TCS_CMD_DATA 0x38u
+#define FTB_TCS_CMD_STATUS 0x3cu
+#define FTB_TCS_AMC_ENABLE (1u << 16)
+#define FTB_TCS_AMC_TRIGGER (1u << 24)
+#define FTB_CMD_MSGID_WRITE_RESP ((1u << 16) | (1u << 8) | 8u)   // CMD_MSGID_WRITE | CMD_MSGID_RESP_REQ | CMD_MSGID_LEN
+#define FTB_CMD_STATUS_ISSUED (1u << 8)
+#define FTB_CMD_STATUS_COMPL (1u << 16)
+static inline uint32_t ftb_tcs_reg(unsigned tcs, uint32_t reg) {return FTB_RSC_TCS_OFFSET + FTB_TCS_STRIDE * tcs + reg;}
+static inline uint32_t ftb_tcs_cmd_reg(unsigned tcs, unsigned cmd, uint32_t reg) {return ftb_tcs_reg(tcs, reg) + FTB_TCS_CMD_STRIDE * cmd;}
+// cmd_db_read_addr: the address of a resource by its id (up to 8 characters, NUL padded), 0 if absent or the image is malformed.
+// db is the whole reservation; *version gets the header's version word.
+static inline uint32_t ftb_cmd_db_addr(const uint8_t *db, size_t size, const char *name, uint32_t *version) {
+    if (!db || size < 8 + 8 * 16 + 8) return 0;
+    if (version) *version = (uint32_t)db[0] | ((uint32_t)db[1] << 8) | ((uint32_t)db[2] << 16) | ((uint32_t)db[3] << 24);
+    if (db[4] != 0xdb || db[5] != 0x30 || db[6] != 0x03 || db[7] != 0x0c) return 0;   // CMD_DB_MAGIC
+    const size_t data = 8 + 8 * 16 + 8;
+    char id[8] = {0};
+    for (unsigned i = 0; i < 8 && name[i]; i++) id[i] = name[i];
+    for (unsigned h = 0; h < 8; h++) {
+        const uint8_t *r = db + 8 + 16 * h;
+        const unsigned slv = r[0] | (r[1] << 8), hoff = r[2] | (r[3] << 8), cnt = r[6] | (r[7] << 8);
+        if (!slv) break;
+        for (unsigned e = 0; e < cnt; e++) {
+            const size_t at = data + hoff + 24u * e;
+            if (at + 24 > size) return 0;
+            const uint8_t *ent = db + at;
+            unsigned k = 0;
+            while (k < 8 && ent[k] == (uint8_t)id[k]) k++;
+            if (k == 8) return (uint32_t)ent[16] | ((uint32_t)ent[17] << 8) | ((uint32_t)ent[18] << 16) | ((uint32_t)ent[19] << 24);
+        }
+    }
+    return 0;
+}
+
 // RMI register access over the GENI I2C engine: a read is the 1-byte register address, a repeated START, then the data
 // (rmi_i2c.c); a write is the register address followed by the data in one message.
 struct ftb_rmi_link {struct geni_i2c *i2c; uint8_t addr; int last;};

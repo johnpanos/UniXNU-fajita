@@ -152,6 +152,8 @@ struct geni_i2c {
     int first_err, last_err;
     uint32_t snap_irq, snap_status, snap_gp_len, snap_ios, snap_txfs, snap_rxfs, snap_cmd;
     int snap_valid;
+    // M_IRQ_STATUS of the last message: the first nonzero value, all values ORed, and the one with CMD_DONE (0: none).
+    uint32_t last_first, last_acc, last_done;
 };
 
 // Read-only: protocol, FIFO geometry, FIFO-disable flag, versions. Only valid while the SE and wrapper AHB clocks run.
