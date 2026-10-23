@@ -614,6 +614,47 @@ def main():
         description += f', AMFI vmm byte at {amfi_skip_pmgr(data, plan):#x}'
         if os.environ.get('FAJITA_IMG4_SKIP_PMAP_CS') == '1':
             description += f', AppleImage4 pmap cs runtime off at {img4_skip_pmap_cs(data, plan):#x}'
+    if os.environ.get('FAJITA_PANIC_FAST_RESET') == '1':
+        # fajita: panic() and the common panic funnel reset at once (PSCI SYSTEM_RESET), so a panic comes back to fastboot in
+        # ~20 s where a hang takes the 55 s watchdog path: tells the two apart without a screen (probe builds have none).
+        with tempfile.TemporaryDirectory() as tmp:
+            cave = early_wdog_cave(data, 0x100) + (0x200 if early_wdog else 0)
+            if any(data[file_offset(cave):file_offset(cave) + 0x80]):
+                raise SystemExit(f'Padding at {cave:#x} is not empty')
+            match = os.environ.get('FAJITA_PANIC_MATCH')
+            source = RESET_BEFORE
+            bits = os.environ.get('FAJITA_PANIC_BITS')   # '<base>:<shift>': wait 4 s per unit of ((x0 - base) >> shift) & 7
+            if bits:
+                base, shift = bits.split(':')
+                # FAJITA_PANIC_SRC: x0 (the format, default), sp0 / sp8 (the first / second variadic word, on the stack in Darwin's ABI)
+                src = {'x0': '  mov x15, x0\n', 'sp0': '  ldr x15, [sp]\n', 'sp8': '  ldr x15, [sp, #8]\n'}[os.environ.get('FAJITA_PANIC_SRC', 'x0')]
+                source = (f'.text\n.global _start\n_start:\n{src}  ldr x16, ={int(base, 16):#x}\n  sub x16, x15, x16\n'
+                          f'  lsr x16, x16, #{int(shift)}\n  and x16, x16, #7\n  ldr x17, ={TIMEBASE * 4}\n  mul x16, x16, x17\n'
+                          f'  mrs x1, cntpct_el0\n  add x2, x1, x16\n1:\n  isb\n  mrs x1, cntpct_el0\n  cmp x1, x2\n  b.lo 1b\n'
+                          + RESET_BEFORE.split('_start:\n', 1)[1] + '.ltorg\n')
+                description += f', panic x0 bits {shift}..'
+            elif match:
+                # Reset at once only when panic's format string (x0) is this one; any other panic waits 12 s first.
+                needle = match.encode() + b'\0'
+                hits = [va for va, _, fo, fs in [(v, 0, o, f) for v, vs, o, f in SEGMENTS]
+                        for va in [v + i for i in range(len(data)) if False]]
+                at = bytes(data).find(needle)
+                if at < 0 or bytes(data).find(needle, at + 1) >= 0:
+                    raise SystemExit(f'panic format {match!r} not found once')
+                string_va = next(v + at - o for v, vs, o, f in SEGMENTS if o <= at < o + f)
+                source = (f'.text\n.global _start\n_start:\n  ldr x16, ={string_va:#x}\n  cmp x0, x16\n  b.eq 3f\n'
+                          f'  mrs x1, cntpct_el0\n  ldr x2, ={TIMEBASE * 12}\n  add x2, x1, x2\n1:\n  isb\n  mrs x1, cntpct_el0\n'
+                          f'  cmp x1, x2\n  b.lo 1b\n3:\n' + RESET_BEFORE.split('_start:\n', 1)[1] + '.ltorg\n')
+                description += f', match {match!r} at {string_va:#x}'
+            code = assemble(source, cave, {}, Path(tmp))
+        data[file_offset(cave):file_offset(cave) + len(code)] = code
+        common = kernel_names.get('_panic_trap_to_debugger')
+        for site in (PANIC_VA, common):
+            if site is None or word(site) in (0, 0xFFFFFFFF):
+                raise SystemExit('panic entry missing for the fast panic reset')
+            struct.pack_into('<I', data, file_offset(site), branch(site, cave))
+        args.panic_screen = False
+        description += f', panic resets at once ({cave:#x})'
     if args.panic_screen:
         # Right after the last probe cave in use, so the padding is shared as tightly as possible.
         PANIC_CAVE = max(CAVES[stage] for _, stage, _ in sites) + CAVE_SIZE
