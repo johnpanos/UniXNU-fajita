@@ -18,6 +18,8 @@ fajita_cpufreq_rows
 fajita_pmic_poll
 fajita_touch_rows
 native_adreno_audit_attr
+native_button_set_sink
+native_button_state
 native_adreno_audit_ticks
 native_adreno_cached_read32
 native_adreno_cache_stats
