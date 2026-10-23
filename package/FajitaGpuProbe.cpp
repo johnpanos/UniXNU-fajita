@@ -583,6 +583,12 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         memcpy(out, fajita_gpu_text + from, n - from);
         return n - from;
     }
+    if (!strncmp(a, "retry", 5)) {   // run the failed stage again (every stage starts from its own register state)
+        if (fajita_gpu_running) return appendf(out, cap, 0, "busy\n");
+        const int f = fajita_gpu_failed;
+        fajita_gpu_failed = 0;
+        return appendf(out, cap, 0, "cleared failure of stage %d\n", f);
+    }
     if (!strncmp(a, "regs", 4)) {
         if (!mapAll()) return appendf(out, cap, 0, "map failed\n");
         w = appendf(out, cap, w, "gcc ahb %08x memnoc %08x axi %08x; cx %08x gx %08x gmuclk %08x\n", ioRead(nullptr, A630BlockGcc, 0x71004),
@@ -608,7 +614,7 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
     }
     w = appendf(out, cap, w, "stage %u running %u failed %d status %x iofaults %u\n", (unsigned)fajita_gpu_stage,
                 (unsigned)fajita_gpu_running, (int)fajita_gpu_failed, (unsigned)fajita_gpu_status, (unsigned)gIoFaults);
-    w = appendf(out, cap, w, "usage: gpu [N | log | regs]  (stages 1..%u)\n", kLastStage);
+    w = appendf(out, cap, w, "usage: gpu [N | log | regs | retry]  (stages 1..%u)\n", kLastStage);
     return w;
 }
 

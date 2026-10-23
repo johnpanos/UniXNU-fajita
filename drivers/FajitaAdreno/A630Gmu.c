@@ -163,15 +163,6 @@ A630Status A630PowerCx(const A630Io *io, A630ClockReport *r)
     gccw(io, kGccGpll0Vote, gcc(io, kGccGpll0Vote) | (1u << 15) | (1u << 16));
     barrier(io);
     delay(io, 10);
-    /* The adreno_smmu "bus" clock and the GMU "memnoc"/"axi" clocks (BRANCH_VOTED). */
-    int ok = branchOn(io, A630BlockGcc, kGccGpuMemnocGfx, &r->polls);
-    ok &= branchOn(io, A630BlockGcc, kGccDdrssGpuAxi, &r->polls);
-    r->gcc_cfg_ahb = gcc(io, kGccGpuCfgAhb);
-    r->gcc_memnoc = gcc(io, kGccGpuMemnocGfx);
-    r->gcc_axi = gcc(io, kGccDdrssGpuAxi);
-    r->gcc_gpll0 = gcc(io, kGccGpll0Vote);
-    r->gcc_misc = gcc(io, kGccGpuMisc);
-    if (!ok) return A630ErrClock;
     /* gpu_cx_gdsc (gdsc_init then gdsc_enable): HW_CONTROL and SW_OVERRIDE off, EN_REST_WAIT 2, EN_FEW_WAIT 8,
      * CLK_DIS_WAIT 8 (clk_dis_wait_val), then SW_COLLAPSE cleared and PWR_ON awaited. */
     r->cx_before = cc(io, kCcCxGdscr);
@@ -184,6 +175,15 @@ A630Status A630PowerCx(const A630Io *io, A630ClockReport *r)
     r->polls += i;
     r->cx_after = cc(io, kCcCxGdscr);
     if (!(r->cx_after & kGdscPwrOn)) return A630ErrGdsc;
+    /* The adreno_smmu "bus" clock and the GMU "memnoc"/"axi" clocks (BRANCH_VOTED). */
+    int ok = branchOn(io, A630BlockGcc, kGccGpuMemnocGfx, &r->polls);
+    ok &= branchOn(io, A630BlockGcc, kGccDdrssGpuAxi, &r->polls);
+    r->gcc_cfg_ahb = gcc(io, kGccGpuCfgAhb);
+    r->gcc_memnoc = gcc(io, kGccGpuMemnocGfx);
+    r->gcc_axi = gcc(io, kGccDdrssGpuAxi);
+    r->gcc_gpll0 = gcc(io, kGccGpll0Vote);
+    r->gcc_misc = gcc(io, kGccGpuMisc);
+    if (!ok) return A630ErrClock;
     delay(io, 1);   /* gdsc_enable: clocks of the domain must not run within 400 ns of power-up */
     /* gpu_cc_cxo_clk ("cxo" of the GMU). */
     ok = branchOn(io, A630BlockGpuCc, kCcCxoCbcr, &r->polls);
