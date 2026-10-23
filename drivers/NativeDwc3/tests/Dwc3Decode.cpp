@@ -69,6 +69,17 @@ int main()
   assert(kDwc3SmmuStream == 0x740);
   assert(kAppsSmmuBase == 0x15000000ull && kAppsSmmuSize == 0x80000ull);
 
+  // Event-buffer decode against the raw words Linux's unions describe (core.h dwc3_event_*):
+  // device event: bit0 = 1, class [7:1] = 0, type [11:8]; endpoint event: bit0 = 0, ep [5:1], type [9:6].
+  assert(dwc3EvtIsDevSpec(0x101u) && dwc3EvtIsDevice(0x101u) && dwc3DevEvtType(0x101u) == kDwc3DevEvtReset);
+  assert(dwc3EvtIsDevice(0x201u) && dwc3DevEvtType(0x201u) == kDwc3DevEvtConnectDone);
+  assert(dwc3EvtIsDevice(0x001u) && dwc3DevEvtType(0x001u) == kDwc3DevEvtDisconnect);
+  assert(dwc3EvtIsDevSpec(0x007u) && !dwc3EvtIsDevice(0x007u));        // class 3 (carkit), not a device event
+  uint32_t xc = (1u << 1) | (kDwc3DepEvtXferComplete << 6);            // ep0-IN XferComplete
+  assert(!dwc3EvtIsDevSpec(xc) && dwc3DepEvtEp(xc) == 1 && dwc3DepEvtType(xc) == kDwc3DepEvtXferComplete);
+  uint32_t nr = (5u << 1) | (kDwc3DepEvtXferNotReady << 6) | (2u << 12);
+  assert(dwc3DepEvtEp(nr) == 5 && dwc3DepEvtType(nr) == kDwc3DepEvtXferNotReady && dwc3DepEvtStatus(nr) == 2);
+
   std::printf("Dwc3Decode: all register decode assertions passed\n");
   return 0;
 }

@@ -172,12 +172,14 @@ enum : uint32_t {
   kDwc3DstsDevCtrlHlt = 1u << 22,
 };
 // An event-buffer entry: bit0 clear = endpoint event (ep in [5:1], type in [9:6]);
-// bit0 set = non-endpoint; a device event has device-event type in [7:1].
-static inline bool dwc3EvtIsDevice(uint32_t e) { return (e & 1u) != 0; }
+// bit0 set = device-specific, whose class is in [7:1] (0 = device event) and, for a
+// device event, its type in [11:8] (dwc3_event_type / dwc3_event_devt in core.h).
+static inline bool dwc3EvtIsDevSpec(uint32_t e) { return (e & 1u) != 0; }
+static inline bool dwc3EvtIsDevice(uint32_t e) { return (e & 1u) && ((e >> 1) & 0x7f) == 0; }
 static inline unsigned dwc3DepEvtEp(uint32_t e) { return (e >> 1) & 0x1f; }
 static inline unsigned dwc3DepEvtType(uint32_t e) { return (e >> 6) & 0xf; }
 static inline unsigned dwc3DepEvtStatus(uint32_t e) { return (e >> 12) & 0xf; }
-static inline unsigned dwc3DevEvtType(uint32_t e) { return (e >> 1) & 0x7f; }
+static inline unsigned dwc3DevEvtType(uint32_t e) { return (e >> 8) & 0xf; }
 
 // ---- Field helpers ------------------------------------------------------------
 // GSNPSID: the top 16 bits are the IP class, the low 16 the revision. DWC_usb3

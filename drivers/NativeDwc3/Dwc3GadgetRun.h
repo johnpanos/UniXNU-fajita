@@ -500,17 +500,20 @@ inline void Gadget::poll()
     uint32_t e = ev[pos];
     pos = (pos + 1) % (GadgetDma::kEventBytes / 4);
     native_dwc3_events = native_dwc3_events + 1;
-    if (dwc3EvtIsDevice(e)) {
+    if (dwc3EvtIsDevSpec(e)) {
+      if (!dwc3EvtIsDevice(e)) continue;   // carkit/i2c classes: not used
       unsigned type = dwc3DevEvtType(e);
       if (type == kDwc3DevEvtReset) {
-        phase = kWaitSetup;
+        // USB reset (dwc3_gadget_reset_interrupt): address 0; if ep0 was inside a control transfer, start over
+        // with a fresh SETUP (one is already pending when it sat in the setup phase).
         uint32_t dcfg = m.core_rd(kDwc3DCFG); dcfg &= ~(0x7fu << 3); m.core_wr(kDwc3DCFG, dcfg);
         native_dwc3_addr = 0;
+        if (phase != kWaitSetup) ep0QueueSetup();
       } else if (type == kDwc3DevEvtConnectDone) {
+        // dwc3_gadget_conndone_interrupt: the negotiated speed decides the bulk max packet the descriptors report.
         uint32_t speed = m.core_rd(kDwc3DSTS) & 7u;
         native_dwc3_link_speed = speed;
         ep0.highSpeed = (speed == 0);     // DWC3_DSTS_HIGHSPEED == 0
-        ep0QueueSetup();
       }
     } else {
       unsigned ep = dwc3DepEvtEp(e), etype = dwc3DepEvtType(e);
