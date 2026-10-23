@@ -8,6 +8,7 @@ into the kernel through CONFIG_XNU_EXTRA_LD_ARCHIVES (board.toml / fajita_defcon
 The driver is default-off; it reads nothing unless native-dwc3-probe=1 is set.
 """
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -54,7 +55,7 @@ if result.returncode:
     raise SystemExit(result.stdout[-3500:])
 
 # Audit the Mach-O: ARM64 (cpu 0x100000c, subtype 0), iOS deployment (LC_BUILD_VERSION
-# platform 2, min 0x110000 = 17.0), the same checks build-arm-driver.py applies.
+# platform 2, min of the XNU source's iOS release), the same checks build-arm-driver.py applies.
 data = DEST.read_bytes()
 magic, cpu, subtype, kind, count, size = struct.unpack_from('<6I', data)
 if (magic, cpu, subtype, kind) != (0xfeedfacf, 0x100000c, 0, 1):
@@ -66,7 +67,9 @@ for _ in range(count):
     if cmd == 0x32:   # LC_BUILD_VERSION
         deployment = struct.unpack_from('<II', data, offset + 8)
     offset += length
-if deployment != (2, 0x110000):
+# The deployment follows the XNU source (feeds.toml ios_min through the unixnu driver): 17.0, or 16.0 for xnu-8796.
+ios_min = os.environ.get('UNIXNU_XNU_IOS_MIN', '17.0').split('.') + ['0']
+if deployment != (2, int(ios_min[0]) << 16 | int(ios_min[1]) << 8):
     raise SystemExit(f'Unexpected NativeDwc3 deployment {deployment}')
 
 archive = OUT / 'libNativeDwc3.a'

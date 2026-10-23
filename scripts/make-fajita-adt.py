@@ -93,6 +93,9 @@ def main():
                              'values follow the unchanged iPad7,1 tree')
     parser.add_argument('--identity', choices=sorted(IDENTITIES), default=None,
                         help='the device the tree describes; ipad7,1 is --ipad-identity, iphone10,6 the iPhone X of the iOS 16 board')
+    parser.add_argument('--vmm-present', action='store_true',
+                        help='/defaults vmm-present = 1 (kern.hv_vmm_present): the 20H392 AMFI then skips its ApplePMGRNub wait and '
+                             'PMGRAON latch (it panics after 30 s without a PMGR), so the iOS 16 board needs no PMGR stub')
     parser.add_argument('--cpu-regs', default='0',
                         help='Comma-separated CPU MPIDR affinity values (the /cpus reg of each core); the first is the running boot CPU. '
                              'SDM845 numbers its cores 0x000..0x700 in Affinity1 (sdm845.dtsi). More than one adds /psci')
@@ -188,7 +191,8 @@ def main():
         # kern.maxvnodes: this kernel is built with CONFIG_VNODES=1024 (xsmall), so desiredvnodes clips to 1024 and the desktop's
         # ~1950 live vnodes made vnode jetsam kill idle daemons about once a second (int-102 log). XNU reads the value from /defaults
         # before it clips; this is its own formula, memory/64K + 1024, for the iPad7,1's 4 GiB.
-        node('defaults', [('sleep-disabled', struct.pack('<I', 1)), ('kern.maxvnodes', struct.pack('<I', 66560))]),
+        node('defaults', [('sleep-disabled', struct.pack('<I', 1)), ('kern.maxvnodes', struct.pack('<I', 66560)),
+                          *([('vmm-present', struct.pack('<I', 1))] if args.vmm_present else [])]),
         node('options', []),
         # The original AppleImage4 panics without a product node. Name and model are the
         # board DT's own strings.

@@ -63,8 +63,12 @@ archives = [
   # owner keys, OS and SystemOS policies over the 20H392 images, libVerifiedRootProbe.a
   { run = "build-fajita-verified-root.py --ipsw-build 20H392 --image os:087-86698-044.dmg:DADD93F8-DBBF-4B17-A1DF-0F11E64172F7:6e87bfcaa8eca952e00b719f333d1f1060715a63566112267ad8730e1ed98906:1375753 --image systemos:087-86593-047.dmg:96096B28-B6DC-4BC7-9D3A-2632A0FE53F1:9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849:669696", when = "XNU_VERIFIED_ROOT_PROBE" },
   { run = "build-arm-driver.py NativeUfs", when = "XNU_NATIVE_UFS" },
+  { run = "build-fajita-dwc3.py", when = "XNU_BOOT_PROGRESS" },   # NativeDwc3 (dormant here: no personality patch); BootLog reads its state words
   { run = "build-sheng-platform-power.py", when = "XNU_SHENG_PMGR" },
   { run = "build-boot-progress.py", when = "XNU_BOOT_PROGRESS" },
+  { run = "build-native-legacy-display.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },   # CPU-rendered display, HID input, keystore stub
+  { run = "build-fajita-touch.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },            # libFajitaTouch.a (fajita-touch=<stage>), NOTES-touch.md
+  { run = "build-fajita-cpufreq.py", when = "XNU_BOOT_PROGRESS" },                  # libFajitaCpuFreq.a (fajita-cpufreq=<n>)
 ]
 
 # The 20H392 kernelcache (xnu-8796.142.1.703.8). The roots are the iPad list; all of them are in this kernelcache.
@@ -113,3 +117,61 @@ roots = [
   "com.apple.iokit.IOHIDFamily",
   "com.apple.iokit.IOHIDEventDriver",
 ]
+
+# The payload of the iOS 16 boot option: the iPad payload (../board.toml) with the iPhone X identity, the 20H392 trust caches,
+# volumes and Data seed (ios16/data-seed.json), and the root image at 16 GiB into userdata. The boot image (UEFI and
+# DarwinBoot) is the iPad board's; only the payload partition (system_a) differs.
+[payload]
+volume = "FAJITAESP"
+size_mib = 192
+loader = "firmware"
+title = "fajita iOS 16.7.16 (iPhone X)"
+dram_size = "0x200000000"
+panic_screen = true
+# The static and System trust caches of 20H392, bundled unchanged (static first).
+trust_cache_sha256 = [
+  "eb1475f643f45a974ebd40596f6e2b1cdf40205d2ca3c6094d774886099399c3",
+]
+kernel_args = [
+  "debug=0x14e",
+  "kt_fixed_zones=120",
+  "armcpu-timer-intid=19","-apfs_shared_datavolume","ml-timeout-lock-panic-scale=40","sheng-staged-apps=1","sheng-disable-watchdogd=1","sheng-lite=1","sheng-data-persist=2","boot-progress=2","sheng-log=1","sheng-autoreset=1200","fajita-wdog=3","sheng-smp=1","cpus=8","armcpu-self-ipi=1","fajita-cpufreq=2","native-data-writeback=1",
+  "-no_slto_panic",
+  "native-ufs-root=1",
+  "native-ufs-root-base=16384",       # the 20H392 root image starts 16 GiB into userdata, after the iPadOS one
+  "native-ufs-smmu-stream=0x100",
+  "native-ufs-smmu-mask=0xf",
+  "native-ufs-smmu-size=0x80000",
+  "native-ufs-smmu-adopt=1",
+  "offline-mobile-graphics-load=1",
+  "offline-mobile-graphics-client=1",
+  "offline-legacy-register=1",
+  "offline-legacy-phase=4",
+  "offline-legacy-gop=1",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
+  # The iPhone X screen, 1125x2436 at scale 3 (375x812 points), fitted onto the 1080x2340 panel (0.96, nearly edge to edge).
+  "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
+  "sheng-vsync=60",
+  "sheng-banner=0",
+  "offline-hid-input=1",
+  "offline-hid-home=1",
+  "offline-key-events=1",
+  "sheng-aks=1",
+  "sheng-gpu-addon=1",
+]
+
+[payload.adt]
+tool = "scripts/make-fajita-adt.py"
+root_match_volume_uuid = "DADD93F8-DBBF-4B17-A1DF-0F11E64172F7"   # the 20H392 OS volume
+owned_memory_size = "0x130000000"
+packed_data_ramdisk = true
+persistent_data = true
+# --vmm-present: AMFI skips the PMGR (scripts/make-fajita-adt.py), so CONFIG_XNU_SHENG_PMGR is off for this board.
+args = ["--identity", "iphone10,6", "--vmm-present"]
+chip_id = "207"
+unique_chip_id = "required"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+psci_method = "smc"

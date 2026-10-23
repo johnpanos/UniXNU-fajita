@@ -14,7 +14,8 @@ CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
 CONFIG_XNU_VERIFIED_ROOT_PROBE=y
 CONFIG_XNU_OWNER_ROOT_AUDIT=y
 CONFIG_XNU_OWNER_ROOT_TRUST=y
-CONFIG_XNU_SHENG_PMGR=y
+# Off: the iOS 16 ADT sets vmm-present, so the 20H392 AMFI does not wait for a PMGR (the stub is bound to 21H461).
+CONFIG_XNU_SHENG_PMGR=n
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
@@ -23,12 +24,14 @@ CONFIG_XNU_NATIVE_ARCH_TIMER=y
 CONFIG_XNU_NATIVE_PAN=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
-CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+# The touch bring-up and the CPU clock probe (both default off), as on the iPad board; NativeDwc3 is not linked (its personality patch is iPad-only).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/fajita-dwc3/libNativeDwc3.a -Wl,-force_load,{tree}/build/fajita-cpufreq/libFajitaCpuFreq.a"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_NATIVE_ADRENO=n
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+# Off until the display driver is ported to the 20H392 IOMobileGraphicsFamily (fajita_ios16_display_defconfig has it on).
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
 CONFIG_XNU_OWNER_CACHE_MOUNT=y
@@ -36,7 +39,7 @@ CONFIG_XNU_OWNER_CACHE_STARTUP=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_OWNER_BOOT_MANIFEST=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
-CONFIG_XNU_OWNER_DATA_VOLUME_UUID="0E1D5C2A-7B3F-4C88-9A61-2F4D8E0B6C17"
+CONFIG_XNU_OWNER_DATA_VOLUME_UUID="01EBF4D7-BD9F-4FCA-A9B0-4608872D60B1"
 CONFIG_XNU_BOOT_PROGRESS=y
 # The OS and SystemOS volumes of 20H392 (read from the images' APFS volume superblocks), for the owner SystemOS mount
 # and boot manifest of the xnu-8796 series.
