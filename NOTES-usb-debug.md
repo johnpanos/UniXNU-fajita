@@ -110,3 +110,70 @@ for the ttyACM (the pmOS gadget already gets this; a rule for `1209:0001` /
   native-dwc3-probe=2` (the backstop args are added automatically).
 - `scratchpad/cycle.sh usb-probe scratchpad/payload16-usb.img scratchpad/boot-kc.img`
   (queues behind the phone.lock). The `U` row comes back in `logs/usb-probe/`.
+
+## Status (2026-10-23): working on hardware
+
+Route taken: CDC-ACM gadget (kernel, polled) + framed fjdbg protocol + a userland agent.
+SSH was not needed: iOS 16 has no shell, so the agent runs the binaries iOS ships
+(`ioreg`, `ps`, `df`, `hidutil`, `nvram`, ...) and streams their output back.
+
+```
+host /dev/ttyACM0 (cdc_acm, 1209:4d69, seat ACL via systemd hwdb, no root)
+  <-> fjdbg frames: LOG (kernel msgbuf, live) | CMD/RSP (kernel) | SHELL
+  <-> NativeDwc3 gadget (DWC3 device mode, poll thread MAXPRI_KERNEL on CPU 1)
+  SHELL <-> /dev/fjdbg <-> fjdbg-agent (= /usr/sbin/wifid via union mount, launchd root job)
+```
+
+Hardware milestones (logs under scratchpad/logs/usb-*):
+1. probe: UEFI leaves the USB30 GDSC on, the QUSB2 PLL locked and the core in device
+   mode (`U ... cap=2 phy=1 gdsc=f8222000`); the gadget reuses them (`clk=0 phy=0`).
+2. enumeration: host `lsusb` `1209:4d69 Generic fajita usb-debug`, `/dev/ttyACM0`, about
+   17 s after boot.
+3. data: the kernel log streams to the host; host requests reach the kernel (bulk OUT).
+4. userspace: `ioreg -c IOService -d 2` typed on the host runs in iOS userland and its
+   output comes back (usb-enum9).
+
+Bugs found on hardware, each from a BootLog `V` row:
+- SMMU: the NativeUfs planner claims banks top-down and collided with UFS's bank;
+  a dwc3-specific free-bank scan installs the VA64 bypass for stream 0x740.
+- DEPSTARTCFG(2) belongs on physical ep 0 (dwc3_gadget_start_config).
+- Device events: the type is in bits [11:8]; with it fixed, the speed (and so the
+  512-byte HS bulk descriptors) is right.
+- SET_ADDRESS: write DCFG.DEVADDR while handling the SETUP (dwc3_ep0_set_address).
+- Starvation: ep0 has tight host timeouts; the poll thread runs at MAXPRI_KERNEL bound
+  to CPU 1 (Linux services ep0 from the interrupt).
+- The boot addon never reaches the iOS 16 kernel (BootLog `A files=-1` on every run, the
+  touch board's too), so the kernel embeds the CI-signed agent and writes it itself.
+
+## How to use
+
+Build (own worktree, own out dir; the backstop args are added by the payload script):
+```
+S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad
+cd /home/john/src/UniXNU-ios16-stack
+bash $S/build-kernel16-usb.sh          # sets FAJITA_USBDBG_AGENT (the CI agent) for the embed
+bash $S/build-payload16-usb.sh usb-debug=3 sheng-autoreset=300
+$S/cycle.sh NAME $S/payload16-usb.img $S/boot-kc.img
+```
+`usb-debug=1` stops after the core reset, `=2` enumerates and runs the kernel channel,
+`=3` also installs and mounts the userland agent.
+
+Host (no root; Python stdlib only):
+```
+T=scripts/fajita-usbdbg.py
+python3 $T console                 # kernel log, live
+python3 $T hello | state           # kernel command layer
+python3 $T shell                   # type: ps -A | ioreg -l | hidutil list | @read /path
+```
+The agent: `package/usb-debug-tools/fjdbg-agent.c`, built and 4 KiB ad-hoc signed by
+`.github/workflows/usb-debug-agent.yml`; download with
+`gh run download <id> -n fjdbg-agent -D /home/john/src/UniXNU-fajita/.cache/usbdbg-agent`.
+
+## Left
+
+- ep0 status stage: start it on XferNotReady(status), as Linux does, rather than right
+  after the SETUP (works today when serviced promptly; the Linux order is more robust).
+- Interrupt-driven ep0 (GIC SPI 133) instead of the 1 ms poll.
+- Kernel memory/MMIO read hooks for the command layer (the protocol has them).
+- KDP over the KDP channel (`kdp-proxy` on the host is written).
+- Why the boot addon never arrives on the iOS 16 board (`A files=-1`).

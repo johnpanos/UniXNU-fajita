@@ -69,7 +69,8 @@ public:
   void pumpLog();                  // mirror new kernel-log bytes to the host
   void kickTx();                   // poll thread: start the next bulk-IN transfer if idle
   bool eventsPending() const { return m.core && (m.core_rd(kDwc3GEVNTCOUNT0) & 0xffff) != 0; }
-  bool queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree = 0);   // any thread
+  // any thread; seq < 0 stamps the next device sequence number, a reply passes the request's seq to echo it
+  bool queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree = 0, int seq = -1);
 
 private:
   void fail(GadgetStage st, const char *why) { native_dwc3_gadget_stage = st; native_dwc3_gadget_status = -int(st); native_dwc3_gadget_failure = why; }
@@ -418,11 +419,12 @@ inline void Gadget::armBulkOut()
   bulkOutArmed = true;
 }
 
-inline bool Gadget::queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree)
+inline bool Gadget::queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree, int seq)
 {
   if (!txLock || !txRing || !len) return false;
   IOSimpleLockLock(txLock);
-  size_t n = usbdbg::encodeFrame(channel, txSeq++, data, len, encBuf, sizeof encBuf);
+  uint16_t frameSeq = seq >= 0 ? uint16_t(seq) : txSeq++;
+  size_t n = usbdbg::encodeFrame(channel, frameSeq, data, len, encBuf, sizeof encBuf);
   bool ok = n && (kTxRing - (txHead - txTail)) >= n + keepFree;   // keepFree: room left for replies / SHELL
   if (ok) {
     for (size_t i = 0; i < n; i++) txRing[(txHead + i) & (kTxRing - 1)] = encBuf[i];
@@ -496,7 +498,7 @@ inline void Gadget::onBulkOut(uint32_t remaining)
       };
       alignas(4) static uint8_t rsp[usbdbg::kMaxData];
       size_t rn = usbdbg::handleCommand(t, rx.data(), rx.length(), rsp);
-      queueFrame(usbdbg::kChRsp, rsp, rn);
+      queueFrame(usbdbg::kChRsp, rsp, rn, 0, rx.seq());   // the host matches a reply on its request's seq
     } else if (rx.channel() == usbdbg::kChShell) {
       const uint8_t *d = rx.data();
       for (size_t k = 0; k < rx.length(); k++) {
