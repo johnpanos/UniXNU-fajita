@@ -66,8 +66,16 @@ enum {kSlots=256,kDispatch=NATIVE_HID_DISPATCH_EVENT_SLOT,kGetType=NATIVE_HID_EV
 static_assert(NATIVE_HID_EVENT_DRIVER_SLOTS<=kSlots,"the vtable copy covers the original IOHIDEventDriver table");
 static_assert(kDispatch<NATIVE_HID_EVENT_DRIVER_SLOTS,"dispatchEvent is a slot of the original IOHIDEventDriver table");
 enum : uint32_t {kDigitizer=11,kX=0xB0000,kY=0xB0001,kIndex=0xB0005,kMask=0xB0007,kTouch=0xB0009,kMaskTouch=2,kFromEdgeTip=0x800};
-// 48 panel pixels of 3048 x 2032 (the sweet reference uses 48 px), in the driver's normalised IOFixed coordinates.
-static const int32_t kEdgeX=48*65536/3048,kEdgeY=48*65536/2032;
+// 48 panel pixels of 3048 x 2032 (the sweet reference uses 48 px), in the driver's normalised IOFixed coordinates. A board can
+// set its own zone in thousandths of the screen: native-touch-edge-side, -top, -bottom (the fajita iOS 16 board: HackiOS's
+// iPhone X zone, 16/375, 16/812 and 34/812, the strip of the home bar, as 43, 20 and 42).
+static int32_t kEdgeX=48*65536/3048,kEdgeTop=48*65536/2032,kEdgeBottom=48*65536/2032;
+static void configure() {
+    unsigned v=0;
+    if(PE_parse_boot_argn("native-touch-edge-side",&v,sizeof v) && v<500)kEdgeX=(int32_t)(v*65536/1000);
+    if(PE_parse_boot_argn("native-touch-edge-top",&v,sizeof v) && v<500)kEdgeTop=(int32_t)(v*65536/1000);
+    if(PE_parse_boot_argn("native-touch-edge-bottom",&v,sizeof v) && v<500)kEdgeBottom=(int32_t)(v*65536/1000);
+}
 static uintptr_t originalDispatch;
 static bool fromEdge[kContacts];
 extern "C" {volatile uint32_t native_touch_edge_stats[4];}   // [0] installed, [1] contacts begun, [2] of them at an edge, [3] skipped events
@@ -83,7 +91,7 @@ static bool mark(void *child) {
     const bool touch=call<int32_t,uint32_t,IOOptionBits>(child,kGetInteger,kTouch,0)!=0;
     if((mask&kMaskTouch) && touch) {   // the contact begins: its position now decides
         const int32_t x=call<int32_t,uint32_t,IOOptionBits>(child,kGetFixed,kX,0),y=call<int32_t,uint32_t,IOOptionBits>(child,kGetFixed,kY,0);
-        fromEdge[index]=x<kEdgeX || x>65536-kEdgeX || y<kEdgeY || y>65536-kEdgeY;
+        fromEdge[index]=x<kEdgeX || x>65536-kEdgeX || y<kEdgeTop || y>65536-kEdgeBottom;
         native_touch_edge_stats[1]=native_touch_edge_stats[1]+1;
         if(fromEdge[index])native_touch_edge_stats[2]=native_touch_edge_stats[2]+1;
     }
@@ -114,6 +122,7 @@ static void dispatch(IOService *self,OSObject *event,IOOptionBits options) {
 // This device's own event driver gets the wrapped copy; any other driver keeps the original table.
 static void install(IORegistryEntry *driver) {
     if(originalDispatch || !driver)return;
+    configure();
     uintptr_t *table=*reinterpret_cast<uintptr_t **>(driver);
     uintptr_t *copy=static_cast<uintptr_t *>(IOMalloc(kSlots*sizeof(uintptr_t)));
     if(!copy)return;

@@ -169,6 +169,9 @@ board_args = [
   "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-display-ppi=458","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
   "sheng-vsync=60",
   "sheng-banner=0",
+  # Touch edge zone of NativeHidInput (thousandths of the screen): HackiOS's iPhone X zone, 16/375 at the sides, 16/812 at the top,
+  # 34/812 (the home bar strip) at the bottom. A contact that begins there is marked as coming in over the edge (0x800).
+  "native-touch-edge-side=43","native-touch-edge-top=20","native-touch-edge-bottom=42",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,

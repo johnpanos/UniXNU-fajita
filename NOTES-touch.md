@@ -1,8 +1,19 @@
 # fajita: touchscreen bring-up (Synaptics S3706B over GENI I2C)
 
-Status 2026-10-22: rebased onto main (the CPU-rendered UI, NativeLegacyDisplay + NativeHidInput); built and linked into the fajita
-kernel; host-tested against register models; **not yet run on the phone**. Default off: without `fajita-touch=<n>` nothing is mapped
-or touched, and without `sheng-touch-hid=1` NativeHidInput publishes only its keyboard (Home) collection, as before. Research and sources: the touch/display research notes (S3706B RMI4 at 0x20 on i2c12 = QUP wrapper 1 SE4).
+Status 2026-10-23 (fajita iOS 16.7.16 board, first runs on the phone; logs in the session scratchpad, logs/run16t-*):
+
+| Stage | Run | Result |
+| --- | --- | --- |
+| 1 | run16t-s1 | `FT1 clk vote01bc0000 ... s480004220 ... dfs21 ... xoL0`: M/S AHB voted and running, S4 branch off, DFS level 0 = 19.2 MHz; all five pins GPIO inputs pulled low (`sda001/0 ... vio001/0 rst001/0`) |
+| 2 | run16t-s2, -s2b | clocks on in 10 us, SE4 I2C firmware `fw0300`, FIFO depth 16, 400 kHz; **0x20 NACKs** (`w40000000/40000409`: TX watermark, then CMD_FAILURE + GP_IRQ1; the read probe `rd-6`): VDD off |
+| 2 | run16t-s2l | `FT2L db v1 ... ldoa28@42100 ... ->t0 2856mV cs10101/10101/10101 irq1 260us`, then `ack0`: LDO28 voted over RPMh (now the default, `fajita-touch-ldo=0` skips it) |
+| 3 | run16t-s3 | `pdt0 scan`, F34@e9 F01@e3 F12@dd, `id'S3706B'`, ctrl0 `00>84` (NoSleep + Configured), `ien06`, F12 descriptors: Data1 80 bytes, 10 objects, Control 8 maxima **1079x2339** (the panel, so the mapping is the identity) |
+| 4 | not run yet | payload ready: `fajita-touch=4 sheng-touch-hid=1 fajita-touch-synth=180 fajita-touch-synth-count=4 fajita-touch-synth-interval=40 sheng-autoreset=420` |
+
+Before these runs: built and linked, host-tested against register models; default off: without `fajita-touch=<n>` nothing is mapped
+or touched, and without `sheng-touch-hid=1` NativeHidInput publishes only its keyboard (Home) collection, as before. Research and sources: the touch/display research notes (S3706B RMI4 at 0x20 on i2c12 = QUP wrapper 1 SE4); the reference
+implementation is mainline Linux v6.16 (`/home/john/src/ref/linux`, sparse: i2c-qcom-geni.c, qcom-geni-se.c, rmi4/, rpmh-rsc.c,
+cmd-db.c, qcom-rpmh-regulator.c, the sdm845 and oneplus dts).
 
 ## Pieces
 
@@ -190,6 +201,9 @@ are, because this probe publishes in sheng's units. Not compiled here (it needs 
 
 ## Open risks
 
+- **LDO28 (resolved, run16t-s2l).** The vote below is implemented as `ldoVote` in FajitaTouchProbe.cpp, after rpmh-rsc.c and
+  qcom-rpmh-regulator.c: only an idle, untriggered ACTIVE TCS (0 or 1) is used, and it is cleaned up after the completions. The
+  design notes as written before the run:
 - **LDO28.** VDD of the controller is PM8998 LDO28, an RPMh VRM rail that is not `regulator-boot-on`; no UEFI driver touches it.
   If XBL/ABL leave it off, stage 2 ends with `ack-6 x5` and `FTE no ACK at 0x20 (LDO28 off?)`, with `vio3 rst3` showing the 1.8 V
   enable and reset driven. Nothing read-only can tell LDO28's state from the apps processor (no PMIC or RPMh read path is used).
