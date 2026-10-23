@@ -140,6 +140,18 @@ kernel_args = [
   "-no_slto_panic",
   "native-ufs-root=1",
   "native-ufs-root-base=16384",       # the 20H392 root image starts 16 GiB into userdata, after the iPadOS one
+  "offline-hid-input=1",
+  "offline-hid-home=1",
+  "offline-key-events=1",
+  "sheng-aks=1",
+  "sheng-gpu-addon=1",
+]
+
+# Board arguments beyond the 1020-byte command line: the ADT tool writes them to /chosen/board-args and the kernel's
+# PE_parse_boot_argn reads one there when the command line lacks it (UniXNU patches/xnu-8796/board-args.patch); a --kernel-arg of
+# the same name still replaces one. Only arguments read after the device tree is set up belong here: these are all read by
+# drivers (NativeUfs, NativeLegacyDisplay, the fajita kit) or by bsd_init. The iPad board keeps all of them on its command line.
+board_args = [
   "native-ufs-smmu-stream=0x100",
   "native-ufs-smmu-mask=0xf",
   "native-ufs-smmu-size=0x80000",
@@ -157,11 +169,6 @@ kernel_args = [
   "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-display-ppi=458","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
   "sheng-vsync=60",
   "sheng-banner=0",
-  "offline-hid-input=1",
-  "offline-hid-home=1",
-  "offline-key-events=1",
-  "sheng-aks=1",
-  "sheng-gpu-addon=1",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,

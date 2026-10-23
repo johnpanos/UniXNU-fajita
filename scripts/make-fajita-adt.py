@@ -115,6 +115,9 @@ def main():
                         help='The Data disk keeps its writes across boots (sheng-data-persist): no ephemeral-storage, so first-boot data migration runs')
     parser.add_argument('--trust-cache', action='store_true', help='Zeroed TrustCache sidecar handoff placeholder')
     parser.add_argument('--gpu-addon', action='store_true', help='Zeroed GpuAddon sidecar handoff placeholder (the loader fills in kernel.macho.gpuaddon)')
+    parser.add_argument('--board-args', default='',
+                        help='/chosen/board-args: kernel arguments beyond the command line ([payload] board_args), read by PE_parse_boot_argn '
+                             'when the command line lacks them (UniXNU patches/xnu-8796/board-args.patch)')
     parser.add_argument('--text-fixup', action='append', default=[],
                         help='/chosen/text-fixups entry <file name>,<file offset>,<original>,<replacement> for the kernel\'s signed-text fixups')
     args = parser.parse_args()
@@ -185,6 +188,7 @@ def main():
                         # Strict policy for the original AMFI: platform code only. This keeps AMFI
                         # enforcing; it does not relax it.
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
+                        *([('board-args', args.board_args.encode() + b'\0')] if args.board_args else []),
                         *([('text-fixups', b''.join(f.encode() + b'\0' for f in args.text_fixup))] if args.text_fixup else []),
                         *empty_nvram_proxy()],
              [node('memory-map', ([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))] if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
