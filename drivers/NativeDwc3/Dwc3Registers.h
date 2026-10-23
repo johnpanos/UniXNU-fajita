@@ -126,6 +126,59 @@ static inline uint32_t dwc3DepCmdPar0(unsigned ep) { return kDwc3DEPCMDPAR0Base 
 static inline uint32_t dwc3DepCmdPar1(unsigned ep) { return kDwc3DEPCMDPAR1Base + ep * 0x10u; }
 static inline uint32_t dwc3DepCmdPar2(unsigned ep) { return kDwc3DEPCMDPAR2Base + ep * 0x10u; }
 
+// ---- Gadget bit fields (facts of the DWC3 IP; from dwc3/core.h, gadget.h) -----
+// Endpoint command word (DEPCMD): command in [3:0], ACT/IOC, param in [31:16].
+enum : uint32_t {
+  kDwc3DepCmdSetEpConfig = 0x01, kDwc3DepCmdSetXferResource = 0x02, kDwc3DepCmdStartXfer = 0x06,
+  kDwc3DepCmdUpdateXfer = 0x07, kDwc3DepCmdEndXfer = 0x08, kDwc3DepCmdStartConfig = 0x09,
+  kDwc3DepCmdAct = 1u << 10, kDwc3DepCmdIoc = 1u << 8,
+};
+static inline uint32_t dwc3DepCmdParam(uint32_t p) { return p << 16; }
+static inline unsigned dwc3DepCmdStatus(uint32_t reg) { return (reg >> 12) & 0xf; }
+// DEPCFG param0/param1 (SETEPCONFIG): type [2:1], max packet [13:3], fifo num [21:17],
+// ep number [29:25]; param1 enables: xfer-complete bit8, xfer-not-ready bit10,
+// xfer-in-progress bit9; action in param0 [31:30] (0 = init).
+enum : uint32_t {
+  kDwc3DepCfgTypeShift = 1, kDwc3DepCfgMaxPktShift = 3, kDwc3DepCfgFifoNumShift = 17, kDwc3DepCfgEpNumShift = 25,
+  kDwc3DepCfgXferCompleteEn = 1u << 8, kDwc3DepCfgXferInProgressEn = 1u << 9, kDwc3DepCfgXferNotReadyEn = 1u << 10,
+  kDwc3DepCfgActionInit = 0u << 30,
+  kDwc3DepXferCfgNumXferRes1 = 1,          // DEPXFERCFG param0 = 1 resource
+  kDwc3EpTypeControl = 0, kDwc3EpTypeIsoc = 1, kDwc3EpTypeBulk = 2, kDwc3EpTypeIntr = 3,
+};
+// TRB control [5:0] TRBCTL (<<4), HWO bit0, LST bit1, CHN bit2, CSP bit3, ISP/IMI bit10, IOC bit11.
+enum : uint32_t {
+  kDwc3TrbHwo = 1u << 0, kDwc3TrbLst = 1u << 1, kDwc3TrbChn = 1u << 2, kDwc3TrbCsp = 1u << 3,
+  kDwc3TrbIspImi = 1u << 10, kDwc3TrbIoc = 1u << 11,
+  kDwc3TrbCtlNormal = 1u << 4, kDwc3TrbCtlControlSetup = 2u << 4, kDwc3TrbCtlControlStatus2 = 3u << 4,
+  kDwc3TrbCtlControlStatus3 = 4u << 4, kDwc3TrbCtlControlData = 5u << 4, kDwc3TrbCtlLink = 8u << 4,
+  kDwc3TrbSizeMask = 0x00ffffff,
+};
+// Device event enables (DEVTEN) and device-event / endpoint-event types.
+enum : uint32_t {
+  kDwc3DevtenDisconn = 1u << 0, kDwc3DevtenUsbReset = 1u << 1, kDwc3DevtenConnectDone = 1u << 2,
+  kDwc3DevtenUlstChng = 1u << 3, kDwc3DevtenWakeup = 1u << 4, kDwc3DevtenEvntOverflow = 1u << 11,
+  kDwc3DevtenCmdCmplt = 1u << 10, kDwc3DevtenErrTicErr = 1u << 9, kDwc3DevtenSuspend = 1u << 6,
+};
+enum : unsigned {
+  kDwc3DevEvtDisconnect = 0, kDwc3DevEvtReset = 1, kDwc3DevEvtConnectDone = 2, kDwc3DevEvtLinkStsChange = 3,
+  kDwc3DevEvtWakeup = 4, kDwc3DevEvtSuspend = 6, kDwc3DevEvtCmdCmpl = 10,
+  kDwc3DepEvtXferComplete = 1, kDwc3DepEvtXferInProgress = 2, kDwc3DepEvtXferNotReady = 3, kDwc3DepEvtEpCmdCmplt = 7,
+};
+// DCFG: IGNSTRMPP bit23, NUMP in [21:17]. GEVNTCOUNT EHB bit31 ack. DCTL KEEP_CONNECT bit19.
+enum : uint32_t {
+  kDwc3DcfgIgnStrmPp = 1u << 23, kDwc3DcfgNumpShift = 17, kDwc3DcfgLpmCap = 1u << 22,
+  kDwc3GevntCountEhb = 1u << 31, kDwc3GevntSizIntMask = 1u << 31,
+  kDwc3DctlKeepConnect = 1u << 19,
+  kDwc3DstsDevCtrlHlt = 1u << 22,
+};
+// An event-buffer entry: bit0 clear = endpoint event (ep in [5:1], type in [9:6]);
+// bit0 set = non-endpoint; a device event has device-event type in [7:1].
+static inline bool dwc3EvtIsDevice(uint32_t e) { return (e & 1u) != 0; }
+static inline unsigned dwc3DepEvtEp(uint32_t e) { return (e >> 1) & 0x1f; }
+static inline unsigned dwc3DepEvtType(uint32_t e) { return (e >> 6) & 0xf; }
+static inline unsigned dwc3DepEvtStatus(uint32_t e) { return (e >> 12) & 0xf; }
+static inline unsigned dwc3DevEvtType(uint32_t e) { return (e >> 1) & 0x7f; }
+
 // ---- Field helpers ------------------------------------------------------------
 // GSNPSID: the top 16 bits are the IP class, the low 16 the revision. DWC_usb3
 // reports 0x5533xxxx; DWC_usb31 reports 0x3331xxxx / 0x3330xxxx.
