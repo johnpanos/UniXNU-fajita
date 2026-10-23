@@ -1,0 +1,214 @@
+Prefer chosen CPUs for timeshare threads on xnu-8796: pcpu=<mask> and rcpu=<mask> (fajita iOS 16, both default off).
+
+The xnu-8796.141.3 form of patches/xnu/fajita-pcpu.patch (xnu-10063), which the 8796 series uses in its place
+(same name). The behaviour is the same; xnu-8796 lacks what the 10063 form hooks, so the hooks differ:
+- xnu-8796 has no pset perfcontrol preferred/migration bitmasks (nor cpu_preferred_last_chosen), so pset_init
+  is left alone and choose_processor() tests the pcpu mask itself: an idle hint outside the mask is passed over
+  while a CPU of the mask is idle, and the idle search takes the idle CPUs of the mask first, in rotation.
+- xnu-8796's thread_avoid_processor() has no AST reason argument. The clutch one stands in !first_timeslice for
+  AST_QUANTUM: thread_quantum_expire() clears it before its csw_check(AST_QUANTUM), and it stays clear until the
+  processor dispatches a thread with a fresh quantum.
+- xnu-8796's struct recount_usage has ru_user_time_mach and ru_system_time_mach (10063: ru_metrics[] levels and
+  recount_usage_time_mach()).
+sched_pcpu_tick(), called once a second by package/BootLog.c, applies rcpu as CPUs come online and fills the two
+[sched] rows of the UFS log, as on 10063. Touches only osfmk/kern sched_prim.c and sched_clutch.c, which no other
+patch of the 8796 series changes.
+diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
+index 3657d83..174c92a 100644
+--- a/osfmk/kern/sched_clutch.c
++++ b/osfmk/kern/sched_clutch.c
+@@ -3200,6 +3200,8 @@ sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context)
+ 
+ extern int sched_allow_rt_smt;
+ 
++extern uint64_t sched_pcpu_mask, sched_pcpu_stats[4];
++
+ /* Return true if this thread should not continue running on this processor */
+ static bool
+ sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread)
+@@ -3214,6 +3216,22 @@ sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread)
+ 		}
+ 	}
+ 
++	/*
++	 * fajita (pcpu=<mask>, see sched_prim.c): as the edge scheduler rebalances at quantum expiry, an unbound
++	 * timeshare thread whose quantum has expired leaves a CPU outside the mask while a recommended CPU of the
++	 * mask is idle; choose_processor() then places it there. xnu-8796 passes no AST reason here (xnu-10063
++	 * checks AST_QUANTUM); thread_quantum_expire() clears first_timeslice before its csw_check, and it stays
++	 * clear until the processor dispatches a thread with a fresh quantum. The mask is 0 by default.
++	 */
++	if (sched_pcpu_mask != 0 && !processor->first_timeslice && thread->sched_pri < BASEPRI_RTQUEUES &&
++	    thread->bound_processor == PROCESSOR_NULL && !bit_test(sched_pcpu_mask, processor->cpu_id)) {
++		processor_set_t pset = processor->processor_set;
++		if ((pset->cpu_state_map[PROCESSOR_IDLE] & pset->recommended_bitmask & sched_pcpu_mask) != 0) {
++			os_atomic_inc(&sched_pcpu_stats[3], relaxed);
++			return true;
++		}
++	}
++
+ 	return false;
+ }
+ 
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+index 8e29586..4236b7c 100644
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -270,6 +270,25 @@ TUNABLE_DEV_WRITEABLE(int, safe_fixed_multiplier, "safe_fixed_multiplier", SAFE_
+ #define         MAX_POLL_QUANTA                 2
+ TUNABLE(int, max_poll_quanta, "poll", MAX_POLL_QUANTA);
+ 
++/*
++ * fajita (patches/xnu-8796/fajita-pcpu.patch, the xnu-8796 form of patches/xnu/fajita-pcpu.patch). pcpu=<mask>
++ * prefers the CPUs of the mask for timeshare threads: choose_processor() takes an idle CPU of the mask first and
++ * passes over an idle hint outside it, and the clutch thread_avoid_processor() moves a timeshare thread off a CPU
++ * outside the mask once its quantum has expired while a CPU of the mask is idle. xnu-10063 does this through the
++ * pset perfcontrol preferred/migration bitmasks, which xnu-8796 does not have; here the mask itself plays both
++ * (preferred = mask, migration = the rest) for every pset. rcpu=<mask> instead recommends only the CPUs of the mask
++ * (sched_pcpu_tick, a measurement aid). Both are logical CPU masks (processor->cpu_id); 0, the default, changes
++ * nothing.
++ */
++extern uint64_t sched_pcpu_mask, sched_rcpu_mask, sched_pcpu_stats[4];
++extern char sched_pcpu_rows[2][240];
++TUNABLE(uint64_t, sched_pcpu_mask, "pcpu", 0);
++TUNABLE(uint64_t, sched_rcpu_mask, "rcpu", 0);
++/* [0] idle CPUs picked in the mask [1] idle CPUs picked outside it [2] idle hints passed over [3] quantum avoid decisions */
++uint64_t sched_pcpu_stats[4];
++/* The rotation among the idle CPUs of the mask (xnu-10063: pset->cpu_preferred_last_chosen). */
++static int sched_pcpu_last_chosen = -1;
++
+ #define         SCHED_POLL_YIELD_SHIFT          4               /* 1/16 */
+ int             sched_poll_yield_shift = SCHED_POLL_YIELD_SHIFT;
+ 
+@@ -5084,7 +5103,12 @@ choose_processor(
+ 				 * the "least cost idle" processor above.
+ 				 */
+ 				if ((thread->sched_pri < BASEPRI_RTQUEUES) || processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
+-					return processor;
++					/* fajita (pcpu=<mask>): pass over an idle hint outside the mask while a CPU of the mask is idle */
++					uint64_t pcpu_idle_map = pset->cpu_state_map[PROCESSOR_IDLE] & pset->primary_map & pset->recommended_bitmask & sched_pcpu_mask;
++					if (!(sched_pcpu_mask != 0 && !bit_test(sched_pcpu_mask, processor->cpu_id) && pcpu_idle_map != 0)) {
++						return processor;
++					}
++					os_atomic_inc(&sched_pcpu_stats[2], relaxed);
+ 				}
+ 				processor = PROCESSOR_NULL;
+ 				break;
+@@ -5246,9 +5270,23 @@ no_available_cpus:
+ 		/* there shouldn't be a pending AST if the processor is idle */
+ 		assert((idle_primary_map & pset->pending_AST_URGENT_cpu_mask) == 0);
+ 
+-		int cpuid = lsb_first(idle_primary_map);
++		/* fajita (pcpu=<mask>): the idle CPUs of the mask first, in rotation */
++		uint64_t pcpu_idle_map = idle_primary_map & sched_pcpu_mask;
++		int cpuid = lsb_next(pcpu_idle_map, sched_pcpu_last_chosen);
++		if (cpuid < 0) {
++			cpuid = lsb_first(pcpu_idle_map);
++		}
+ 		if (cpuid >= 0) {
+ 			processor = processor_array[cpuid];
++			sched_pcpu_last_chosen = cpuid;
++			os_atomic_inc(&sched_pcpu_stats[0], relaxed);
++			return processor;
++		}
++
++		cpuid = lsb_first(idle_primary_map);
++		if (cpuid >= 0) {
++			processor = processor_array[cpuid];
++			os_atomic_inc(&sched_pcpu_stats[1], relaxed);
+ 			return processor;
+ 		}
+ 
+@@ -8936,3 +8974,93 @@ sysctl_get_quantum_us(void)
+ }
+ 
+ #endif /* DEVELOPMENT || DEBUG */
++
++#if __arm64__
++/*
++ * fajita: called once a second by the boot progress monitor (package/BootLog.c boot_log_tick), in thread
++ * context with preemption enabled. Applies rcpu=<mask> whenever the set of online CPUs changes (a CPU that
++ * comes up is recommended by processor_init), and every 5th call refreshes the two [sched] rows of the UFS
++ * log: the masks, the choose_processor counters and each CPU as XNU sees it (MPIDR, ml topology type and
++ * cluster, pset, recommended), then each CPU's user and total busy share of the last window and its user time.
++ * xnu-8796's recount_usage has ru_user_time_mach and ru_system_time_mach (xnu-10063: ru_metrics[] levels).
++ */
++char sched_pcpu_rows[2][240];
++extern void sched_pcpu_tick(void);
++void
++sched_pcpu_tick(void)
++{
++	static uint32_t calls;
++	static uint64_t last_online, last_at, last_user[MAX_CPUS], last_busy[MAX_CPUS];
++
++	if (sched_rcpu_mask != 0 && preemption_enabled()) {
++		uint64_t online = os_atomic_load(&sched_online_processors, relaxed);
++		if (online != last_online) {
++			last_online = online;
++			sched_perfcontrol_update_recommended_cores_reason(sched_rcpu_mask, REASON_CLPC_USER, 0);
++		}
++	}
++	if (calls++ % 5 != 0) {
++		return;
++	}
++
++	const ml_topology_info_t *ti = ml_get_topology_info();
++	uint64_t rec = 0, now = mach_absolute_time(), win = now - last_at;
++	char *r0 = sched_pcpu_rows[0], *r1 = sched_pcpu_rows[1];
++	size_t cap = sizeof(sched_pcpu_rows[0]);
++	int n0 = snprintf(r0, cap, "[sched] pcpu=0x%llx rcpu=0x%llx online=0x%llx picks in=%llu out=%llu passed=%llu qavoid=%llu |",
++	    sched_pcpu_mask, sched_rcpu_mask, os_atomic_load(&sched_online_processors, relaxed),
++	    os_atomic_load(&sched_pcpu_stats[0], relaxed), os_atomic_load(&sched_pcpu_stats[1], relaxed),
++	    os_atomic_load(&sched_pcpu_stats[2], relaxed), os_atomic_load(&sched_pcpu_stats[3], relaxed));
++	uint64_t win_ms = 0;
++	absolutetime_to_nanoseconds(win, &win_ms);
++	win_ms /= NSEC_PER_MSEC;
++	int n1 = snprintf(r1, cap, "[sched busy] win=%llums user/busy%%", last_at ? win_ms : 0);
++	char tail[120];
++	int nt = snprintf(tail, sizeof(tail), " | user s");
++
++	for (unsigned int k = 0; ti != NULL && k < ti->num_cpus && k < MAX_CPUS; k++) {
++		const ml_topology_cpu_t *c = &ti->cpus[k];
++		unsigned int id = c->cpu_id;
++		processor_t p = (id < MAX_SCHED_CPUS) ? processor_array[id] : PROCESSOR_NULL;
++		char type = c->cluster_type == CLUSTER_TYPE_E ? 'E' : c->cluster_type == CLUSTER_TYPE_P ? 'P' : 'S';
++		if (p != PROCESSOR_NULL && p->is_recommended) {
++			bit_set(rec, id);
++		}
++		if (n0 > 0 && n0 < (int)cap) {
++			n0 += snprintf(r0 + n0, cap - n0, " %u=%x/%c%u/s%d%s", id, c->phys_id, type, c->cluster_id,
++			    p != PROCESSOR_NULL ? (int)p->processor_set->pset_id : -1,
++			    p == PROCESSOR_NULL ? "-" : p->is_recommended ? "" : "x");
++		}
++		if (p == PROCESSOR_NULL || id >= MAX_CPUS) {
++			continue;
++		}
++		struct recount_usage usage = { 0 };
++		uint64_t idle = 0;
++		recount_processor_usage(&p->pr_recount, &usage, &idle);
++		uint64_t user = usage.ru_user_time_mach, busy = usage.ru_user_time_mach + usage.ru_system_time_mach;
++		unsigned int up = 0, bp = 0;
++		if (last_at && win) {
++			up = (unsigned int)((user - last_user[id]) * 100 / win);
++			bp = (unsigned int)((busy - last_busy[id]) * 100 / win);
++		}
++		last_user[id] = user;
++		last_busy[id] = busy;
++		uint64_t user_ms = 0;
++		absolutetime_to_nanoseconds(user, &user_ms);
++		user_ms /= NSEC_PER_MSEC;
++		if (n1 > 0 && n1 < (int)cap) {
++			n1 += snprintf(r1 + n1, cap - n1, " c%u=%u/%u", id, up, bp);
++		}
++		if (nt > 0 && nt < (int)sizeof(tail)) {
++			nt += snprintf(tail + nt, sizeof(tail) - nt, " %llu.%llu", user_ms / 1000, (user_ms % 1000) / 100);
++		}
++	}
++	if (n0 > 0 && n0 < (int)cap) {
++		snprintf(r0 + n0, cap - n0, " rec=0x%llx", rec);
++	}
++	if (n1 > 0 && n1 < (int)cap) {
++		strlcat(r1, tail, cap);
++	}
++	last_at = now;
++}
++#endif /* __arm64__ */

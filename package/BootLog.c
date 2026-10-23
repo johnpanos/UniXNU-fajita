@@ -122,11 +122,10 @@ extern volatile uint32_t native_adreno_io_coherent __attribute__((weak_import));
 extern char native_cpufreq_row[120] __attribute__((weak_import));
 // FajitaCpuFreq.cpp (fajita-cpufreq=<n>): summary, per-core MHz before the vote and latest, LUTs of d0, d1, L3.
 extern char fajita_cpufreq_rows[6][256] __attribute__((weak_import));
-// XNU (patches/xnu/fajita-pcpu.patch): the [sched] rows, refreshed by sched_pcpu_tick() from boot_log_tick.
-// Weak stand-ins for a kernel without the patch (xnu-8796, the iOS 16 board): no rows, no tick.
-char sched_pcpu_rows[2][240] __attribute__((weak));
-void sched_pcpu_tick(void) __attribute__((weak));
-void sched_pcpu_tick(void) {}
+// XNU (patches/xnu/fajita-pcpu.patch; xnu-8796: ios16/patches/xnu-8796/fajita-pcpu.patch): the [sched] rows, refreshed
+// by sched_pcpu_tick() from boot_log_tick.
+extern char sched_pcpu_rows[2][240];
+extern void sched_pcpu_tick(void);
 extern uint32_t native_gpu_perf_vote[2] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_pool_status __attribute__((weak_import));
 extern volatile uint32_t native_adreno_pool_wc __attribute__((weak_import));

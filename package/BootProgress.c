@@ -143,10 +143,7 @@ extern volatile unsigned boot_ui_trace_index __attribute__((weak_import));
 extern void boot_process_capture(void) __attribute__((weak_import));
 extern void boot_process_snapshot(void) __attribute__((weak_import));
 extern void boot_log_tick(unsigned) __attribute__((weak_import));
-// XNU, patches/xnu/fajita-pcpu.patch (pcpu=, rcpu=). Weak zero definitions for a kernel without the patch (xnu-8796, the
-// iOS 16 board): the patch's strong TUNABLE definitions win where it is applied.
-uint64_t sched_pcpu_mask __attribute__((weak));
-uint64_t sched_rcpu_mask __attribute__((weak));
+extern uint64_t sched_pcpu_mask, sched_rcpu_mask;   // XNU, patches/xnu/fajita-pcpu.patch (xnu-8796: ios16/patches/xnu-8796)
 extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
 // fajita: the touch bring-up (FajitaTouchProbe.cpp, fajita-touch=<stage>) starts itself from here once IOKit is up; the display
 // kit's late probe may call it first. It returns at once when the argument is absent or the thread already runs.
