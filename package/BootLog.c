@@ -21,6 +21,7 @@ extern int native_ufs_log_write(uint64_t, uint32_t, const void *) __attribute__(
 extern uint64_t native_ufs_export_blocks(void) __attribute__((weak_import));
 extern int native_ufs_export_write(uint64_t, uint32_t, const void *) __attribute__((weak_import));
 extern int native_ufs_log_sync(void) __attribute__((weak_import));
+extern void native_ufs_panic_mode(void) __attribute__((weak_import));
 extern unsigned native_ufs_store_gpt_check(void) __attribute__((weak_import));
 extern uint32_t cs_text_fixup_parsed __attribute__((weak_import));
 extern uint32_t cs_text_fixup_applied __attribute__((weak_import));
@@ -40,6 +41,22 @@ extern volatile uint64_t native_data_persist_writes __attribute__((weak_import))
 extern volatile uint64_t native_data_persist_syncs __attribute__((weak_import));
 extern volatile uint64_t native_data_persist_errors __attribute__((weak_import));
 extern volatile uint64_t native_data_persist_first_lba __attribute__((weak_import));
+// NativeDwc3 USB device-mode probe (drivers/NativeDwc3): default-off register probe for the SSH-over-USB channel.
+extern volatile uint32_t native_dwc3_stage __attribute__((weak_import));
+extern volatile int32_t native_dwc3_status __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_mode __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_gsnpsid __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_gctl __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dsts __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dcfg __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dalepena __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_prtcap __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_phy_ready __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_gcc_gdscr __attribute__((weak_import));
+extern volatile int32_t native_dwc3_smmu_slot __attribute__((weak_import));
+extern volatile int32_t native_dwc3_smmu_bank __attribute__((weak_import));
+extern const char *volatile native_dwc3_failure __attribute__((weak_import));
+extern const char *volatile native_dwc3_smmu_error __attribute__((weak_import));
 extern volatile int native_gpu_addon_files __attribute__((weak_import));
 extern volatile int native_gpu_addon_written __attribute__((weak_import));
 extern volatile int native_gpu_addon_same __attribute__((weak_import));
@@ -80,6 +97,10 @@ extern volatile uint32_t native_adreno_map_fail[7][2] __attribute__((weak_import
 extern volatile uint32_t native_adreno_pool_stats[8] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_wc_audit[6] __attribute__((weak_import));
 extern volatile uint32_t native_touch_edge_stats[4] __attribute__((weak_import));
+// fajita touch bring-up (FajitaTouchProbe.cpp): the requested stage, its summary row and one row per stage plus the last I2C error.
+extern volatile unsigned native_touch_stage_req __attribute__((weak_import));
+extern char native_touch_rows[4][120] __attribute__((weak_import));
+extern char fajita_touch_rows[10][120] __attribute__((weak_import));
 extern volatile uint64_t native_adreno_reassert_ticks __attribute__((weak_import));
 extern volatile uint64_t native_adreno_cache_stats[5] __attribute__((weak_import));
 // NativeAdrenoPublish.cpp: per process name that opened the GPU, and the processes that asked the Metal discovery for its plugin.
@@ -99,6 +120,11 @@ extern volatile uint64_t native_gpu_idle_spins __attribute__((weak_import));
 extern volatile uint32_t native_adreno_coherent_skips[4] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_io_coherent __attribute__((weak_import));
 extern char native_cpufreq_row[120] __attribute__((weak_import));
+// FajitaCpuFreq.cpp (fajita-cpufreq=<n>): summary, per-core MHz before the vote and latest, LUTs of d0, d1, L3.
+extern char fajita_cpufreq_rows[6][256] __attribute__((weak_import));
+// XNU (patches/xnu/fajita-pcpu.patch): the [sched] rows, refreshed by sched_pcpu_tick() from boot_log_tick.
+extern char sched_pcpu_rows[2][240];
+extern void sched_pcpu_tick(void);
 extern uint32_t native_gpu_perf_vote[2] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_pool_status __attribute__((weak_import));
 extern volatile uint32_t native_adreno_pool_wc __attribute__((weak_import));
@@ -124,7 +150,7 @@ extern volatile uint64_t native_adreno_import_diag[10] __attribute__((weak_impor
 extern volatile uint32_t native_adreno_import_stage __attribute__((weak_import));
 extern volatile uint64_t native_adreno_import_fail_pa __attribute__((weak_import)), native_adreno_import_fail_offset __attribute__((weak_import));
 // What the reset probe and the autoreset attempt saw, for the [reset] section of the log.
-static char boot_log_reset_probe_text[240], boot_log_reset_result[120], boot_log_reset_mark[64], boot_log_reset_watchdog[120];
+static char boot_log_reset_probe_text[1024], boot_log_reset_result[120], boot_log_reset_mark[64], boot_log_reset_watchdog[120];
 // The kernel message buffer (bsd/sys/msgbuf.h); only these leading fields are read.
 struct boot_log_msgbuf {int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc;};
 extern struct boot_log_msgbuf *msgbufp;
@@ -150,6 +176,8 @@ struct boot_log_header {
 volatile uint32_t boot_log_state, boot_log_rounds, boot_log_errors;
 volatile uint64_t boot_log_first_lba;
 static int boot_log_started;
+static struct boot_log_header *volatile boot_log_live;   // fajita: the writer's header, for boot_log_panic_flush
+static uint32_t boot_log_slot_count;
 static uint8_t *boot_log_buffer;   // LogMsgBlocks blocks: the message buffer, then reused for a slot and the header
 
 // The export: boot_log_export_put takes the blob's pieces in order (any thread) and writes them through a staging buffer straight into
@@ -298,6 +326,25 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              native_gpu_addon_status, native_gpu_addon2_stage, native_gpu_addon2_status, &native_gpu_addon3_stage ? native_gpu_addon3_stage : 0,
              &native_gpu_addon3_status ? native_gpu_addon3_status : 0);
     at = put(out, at, cap, row, sizeof row);
+  }
+  // NativeDwc3 USB device-mode probe (drivers/NativeDwc3, native-dwc3-probe=1): stage (5 = done), status (0 ok), the probe
+  // mode seen, GSNPSID, GCTL, DCFG, DSTS, DALEPENA, the GCTL current mode (2 = device), the QUSB2 PHY-ready bit, the GCC
+  // USB30 GDSCR, and the read-only apps_smmu plan for stream 0x740 (slot/bank, -1 = none).
+  if (&native_dwc3_stage && native_dwc3_mode) {
+    char row[120];
+    snprintf(row, sizeof row, "U st=%u rc=%d mode=%u id=%08x gctl=%08x dcfg=%08x dsts=%08x alep=%x cap=%u phy=%u gdsc=%08x smmu=%d/%d",
+             native_dwc3_stage, native_dwc3_status, native_dwc3_mode, native_dwc3_gsnpsid, native_dwc3_gctl, native_dwc3_dcfg,
+             native_dwc3_dsts, native_dwc3_dalepena, native_dwc3_prtcap, native_dwc3_phy_ready, native_dwc3_gcc_gdscr,
+             native_dwc3_smmu_slot, native_dwc3_smmu_bank);
+    at = put(out, at, cap, row, sizeof row);
+    if (native_dwc3_failure) {
+      snprintf(row, sizeof row, "U fail: %.100s", native_dwc3_failure);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (native_dwc3_smmu_error) {
+      snprintf(row, sizeof row, "U smmu: %.100s", native_dwc3_smmu_error);
+      at = put(out, at, cap, row, sizeof row);
+    }
   }
   // The one-time copy of the OS volume's staged system apps into Data (kern_exec.c native_staged_apps_prepare): stage (2 copied, 3 copied
   // before, -1 no source), directories, files, MiB, failures and the last error.
@@ -530,6 +577,11 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              native_touch_edge_stats[1], native_touch_edge_stats[2], native_touch_edge_stats[3]);
     at = put(out, at, cap, row, sizeof row);
   }
+  if (&native_touch_stage_req && native_touch_stage_req && &native_touch_rows && &fajita_touch_rows) {
+    at = put(out, at, cap, "[fajita touch]", 16);
+    at = put(out, at, cap, native_touch_rows[0], sizeof native_touch_rows[0]);
+    for (unsigned i = 0; i < 10; ++i) if (fajita_touch_rows[i][0]) at = put(out, at, cap, fajita_touch_rows[i], sizeof fajita_touch_rows[i]);
+  }
   // The submissions' write-combine work: audits, IB lines compared and found dirty, pages set back to write-combined, the re-assertion's
   // total time, and the CPU cache maintenance passes (count, total ms, MiB).
   if (&native_adreno_wc_audit && &native_adreno_reassert_ticks && &native_adreno_cache_stats) {
@@ -550,6 +602,10 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              &native_gpu_perf_vote ? native_gpu_perf_vote[1] : 0);
     at = put(out, at, cap, row, sizeof row);
   }
+  if (&fajita_cpufreq_rows)
+    for (unsigned i = 0; i < 6; ++i) if (fajita_cpufreq_rows[i][0]) at = put(out, at, cap, fajita_cpufreq_rows[i], sizeof fajita_cpufreq_rows[i]);
+  // CPU placement (patches/xnu/fajita-pcpu.patch, pcpu=/rcpu=): masks, choose_processor counters, each CPU as XNU sees it, busy shares.
+  for (unsigned i = 0; i < 2; ++i) if (sched_pcpu_rows[i][0]) at = put(out, at, cap, sched_pcpu_rows[i], sizeof sched_pcpu_rows[i]);
   if (&native_adreno_export_stats && (native_adreno_export_stats[0] || native_adreno_export_stats[1])) {
     char row[120];
     snprintf(row, sizeof row, "[export] pieces=%u refused=%u generation=%u bytes=%u | complete generation=%u bytes=%u", native_adreno_export_stats[0],
@@ -634,6 +690,7 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     at = put(out, at, cap, row, sizeof row);
   }
   if (boot_log_reset_probe_text[0]) {
+    if (&boot_reset_probe) boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text);   // live watchdog counters
     at = put(out, at, cap, "[reset]", 8);
     at = put(out, at, cap, boot_log_reset_probe_text, sizeof boot_log_reset_probe_text);
     if (boot_log_reset_mark[0]) at = put(out, at, cap, boot_log_reset_mark, sizeof boot_log_reset_mark);
@@ -732,6 +789,8 @@ static void writer(void *arg, wait_result_t result) {
   if (&boot_progress_tag) strlcpy(h.tag, boot_progress_tag(), sizeof h.tag);
   uint64_t f = 0; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); if (!f) f = 19200000;
   const uint64_t start = log_ticks();
+  boot_log_slot_count = slot_count;
+  boot_log_live = &h;   // the writer never returns while the window is open, so its header outlives any panic flush
   // The reboot-into-fastboot path, read only: PSCI features and the PMIC cell. sheng-autoreset=<seconds of log time> then writes the cell and
   // restarts once, after that round's log is on the medium, but only when the probe found the cell writable.
   uint32_t autoreset = 0;
@@ -779,8 +838,8 @@ static void writer(void *arg, wait_result_t result) {
     ok &= native_ufs_log_write(0, 1, boot_log_buffer);
     ok &= native_ufs_log_sync();
     if (!ok) {boot_log_errors = ++errors;} else errors = 0;
-    if (errors >= LogMaxErrors) {boot_log_state = 3; return;}
-    if (h.gpt_last != h.gpt_open) {boot_log_state = 4; return;}
+    if (errors >= LogMaxErrors) {boot_log_live = 0; boot_log_state = 3; return;}
+    if (h.gpt_last != h.gpt_open) {boot_log_live = 0; boot_log_state = 4; return;}
     if (autoreset && now >= autoreset && !reset_tried && ok) {
       reset_tried = 1;
       if (!reset_ok) strlcpy(boot_log_reset_result, "autoreset skipped: the probe found no writable cell", sizeof boot_log_reset_result);
@@ -795,9 +854,34 @@ static void writer(void *arg, wait_result_t result) {
   }
 }
 
+// fajita: the panic screen (scripts/xnu-panic-screen.c) calls this once, with interrupts masked, after it drew the message (which it also
+// copied to boot_progress_panic_text): one last slot with the panic text, the message buffer and the header (state 5), then a cache sync,
+// all through NativeUfs's lock-free panic mode. Nothing that takes a lock runs here; a command in flight makes it give up.
+void boot_log_panic_flush(void) {
+  struct boot_log_header *h = boot_log_live;
+  if (!h || !boot_log_buffer || !boot_log_slot_count || !&native_ufs_panic_mode) return;
+  native_ufs_panic_mode();
+  int ok = 1;
+  memset(boot_log_buffer, 0, LogSlotBlocks * LogBlock);
+  int n = snprintf((char *)boot_log_buffer, LogSlotBlocks * LogBlock, "[panic] round %u\n", h->rounds);
+  if (&boot_progress_panic_text && n > 0) strlcat((char *)boot_log_buffer, boot_progress_panic_text, LogSlotBlocks * LogBlock);
+  ok &= native_ufs_log_write(LogSlotFirst + (uint64_t)(h->slots_written % boot_log_slot_count) * LogSlotBlocks, LogSlotBlocks, boot_log_buffer);
+  h->msg_bytes = copy_msgbuf(boot_log_buffer);
+  ok &= native_ufs_log_write(LogMsgFirst, LogMsgBlocks, boot_log_buffer);
+  if (ok) ++h->slots_written;
+  h->state = 5;
+  memset(boot_log_buffer, 0, LogBlock);
+  memcpy(boot_log_buffer, h, sizeof *h);
+  ok &= native_ufs_log_write(0, 1, boot_log_buffer);
+  native_ufs_log_sync();
+}
+
 // Called by the board page's monitor once a second; starts the writer the first time when sheng-log=1.
+extern void armcpu_wdog_pet(void) __attribute__((weak_import));
 void boot_log_tick(unsigned now) {
   (void)now;
+  if (&armcpu_wdog_pet) armcpu_wdog_pet();   // fajita: once a second from the monitor thread (see ArmCpu fajita-wdog)
+  sched_pcpu_tick();   // rcpu= as CPUs come online, and the [sched] rows every 5 s
   if (boot_log_started) return;
   boot_log_started = 1;
   uint32_t mode = 0;

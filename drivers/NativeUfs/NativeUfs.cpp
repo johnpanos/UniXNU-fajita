@@ -1142,10 +1142,14 @@ extern "C" int native_ufs_store_write (uint64_t rel, uint32_t blocks, const void
 {
   if (storeMode () != 2 || !gStoreRegionBlocks || !src || !blocks || rel >= gStoreRegionBlocks ||
       blocks > gStoreRegionBlocks - rel) return 0;
+  // native-data-writeback=1: NativeRamBlock orders its own commits with native_ufs_store_sync (PersistOverlay flush), so the writes
+  // may sit in the device cache; otherwise each is forced to the medium.
+  static int writeback = -1;
+  if (writeback < 0) { uint32_t wb = 0; writeback = PE_parse_boot_argn ("native-data-writeback", &wb, sizeof (wb)) && wb ? 1 : 0; }
   while (blocks) {
     uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
     // Forced unit access: the block is on the medium when the command completes, so the overlay needs no cache flush.
-    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, true) != kIOReturnSuccess) return 0;
+    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, !writeback) != kIOReturnSuccess) return 0;
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1231,6 +1235,9 @@ extern "C" int native_ufs_export_write (uint64_t rel, uint32_t blocks, const voi
   }
   return 1;
 }
+
+// Called once by the panic path before its last log round: later commands run lock-free (see hostEnter).
+extern "C" void native_ufs_panic_mode (void) { gPanicMode = true; }
 
 extern "C" int native_ufs_log_sync (void)
 {
@@ -1658,6 +1665,8 @@ static void discardPendingWindow (unsigned index)
   device->release ();
 }
 
+extern "C" volatile uint64_t armcpu_timer_interrupts;  // ArmCpu
+
 static void publishThread (void *, wait_result_t)
 {
   struct Operations {
@@ -1681,6 +1690,10 @@ static void publishThread (void *, wait_result_t)
       // Diagnostic mode affects reporting only, never the dependency gate.
       for (unsigned tick = 0; tick <= 300; ++tick) {
         ready = mediaWithUuidExists (uuid, device);
+        // Timer evidence: a stall between these lines means IOSleep never wakes (no architectural timer interrupt).
+        if (!(tick % 10))
+          ROOT_LOG ("media wait %s tick %u ready %d now %llx timer irqs %llu\n", device->windowLabel (), tick, int (ready),
+                    (unsigned long long) mach_absolute_time (), (unsigned long long) armcpu_timer_interrupts);
         if (ready || tick == 300) break;
         IOSleep (100);
       }

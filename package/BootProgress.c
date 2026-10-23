@@ -143,7 +143,11 @@ extern volatile unsigned boot_ui_trace_index __attribute__((weak_import));
 extern void boot_process_capture(void) __attribute__((weak_import));
 extern void boot_process_snapshot(void) __attribute__((weak_import));
 extern void boot_log_tick(unsigned) __attribute__((weak_import));
+extern uint64_t sched_pcpu_mask, sched_rcpu_mask;   // XNU, patches/xnu/fajita-pcpu.patch (pcpu=, rcpu=)
 extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
+// fajita: the touch bring-up (FajitaTouchProbe.cpp, fajita-touch=<stage>) starts itself from here once IOKit is up; the display
+// kit's late probe may call it first. It returns at once when the argument is absent or the thread already runs.
+extern void native_touch_probe(void) __attribute__((weak_import));
 extern char boot_process_rows[10][120] __attribute__((weak_import));
 extern unsigned boot_ui_trace_role_rows(unsigned,char [][120],unsigned,unsigned) __attribute__((weak_import));
 extern char native_touch_rows[4][120] __attribute__((weak_import));
@@ -364,7 +368,7 @@ static void draw(unsigned now) {
     __asm__ volatile("mrs %0,daif" : "=r"(daif));
     snprintf(b,sizeof(b),"TIMER vct=%llx cval=%llx ctl=%llx DAIF=%llx (read-only monitor sample)",vct,cval,ctl,daif);
     if(!(&native_touch_stage_req && native_touch_stage_req))line(42,b,0xffaaaaaa);
-    snprintf(b,sizeof(b),"CPU IRQ phase=%u id=%u quiesce=%u halt=%u; phase 0=exit 2=clock 4=IPI 6=EOI; sleep-disabled=1",
+    snprintf(b,sizeof(b),"CPU IRQ phase=%u id=%u quiesce=%u halt=%u; phase 0=exit 2=clock 4=IPI 6=EOI",
       armcpu_irq_phase,armcpu_irq_id,armcpu_quiesce_calls,armcpu_halt_calls);line(37,b,0xffffff00);
     if(&armcpu_smp_requested){
       unsigned n=(unsigned)snprintf(b,sizeof(b),"SMP req=%u run=%u cond=%u boot=%x |",
@@ -708,11 +712,40 @@ static void bp_kernel_chain(uint64_t pc) {
     const uint64_t next=frame[0];if(next<=fp)break;fp=next;
   }
 }
+// Per CPU, the last interrupted context of every timer/IRQ entry (any pid, kernel_task included): pc, psr, mach_absolute_time, pid and
+// the first two return addresses of a kernel stack. fajita's watchdog bark handler prints them from a live CPU when another froze.
+struct bp_cpu_last { uint64_t pc, psr, when, lr[2]; int pid; };
+static struct bp_cpu_last bp_cpu_last[8][4];
+static uint32_t bp_cpu_last_head[8];
+extern int cpu_number(void);
+static void bp_cpu_record(uint64_t pc,uint64_t psr) {
+  const int cpu=cpu_number()&7;
+  struct bp_cpu_last *e=&bp_cpu_last[cpu][bp_cpu_last_head[cpu]++&3];
+  e->pc=pc;e->psr=psr;e->when=mach_absolute_time();e->lr[0]=e->lr[1]=0;
+  e->pid=started && nprocs>0 ? proc_selfpid() : -1;
+  const arm_saved_state_t *s=getCpuDatap()->cpu_int_state;thread_t thread=current_thread();
+  if((psr&0x1f)==0 || !s || !thread || !thread->kernel_stack)return;
+  const uint64_t low=(uint64_t)thread->kernel_stack,high=low+(uint64_t)kernel_stack_size;
+  uint64_t fp=(uint64_t)get_saved_state_fp(s);
+  for(unsigned i=0;i<2 && fp>=low && fp+16<=high && !(fp&15);++i){const uint64_t *f=(const uint64_t *)fp;e->lr[i]=f[1];if(f[0]<=fp)break;fp=f[0];}
+}
+size_t boot_progress_cpu_tail(int cpu,char *out,size_t cap) {
+  size_t at=0;if(!cap)return 0;out[0]=0;cpu&=7;
+  const uint32_t head=bp_cpu_last_head[cpu];
+  for(unsigned k=0;k<4 && k<head;k++){
+    const struct bp_cpu_last *e=&bp_cpu_last[cpu][(head-1-k)&3];
+    int w=snprintf(out+at,cap-at,"%s%c%llx<%llx<%llx p%d t%llx",k?" ":"",(e->psr&0x1f)?'k':'u',(unsigned long long)e->pc,
+                   (unsigned long long)e->lr[0],(unsigned long long)e->lr[1],e->pid,(unsigned long long)e->when);
+    if(w<0)break;at+=(size_t)w;if(at>=cap){at=cap-1;break;}
+  }
+  return at;
+}
 void boot_progress_irq(uint64_t pc,uint64_t psr,uint64_t sp) {
   // Independent of the recorder lock. IRQ still performs no pixel stores.
   if(enabled) {
     __atomic_fetch_add(&irq_entries,1,__ATOMIC_RELAXED);
     __atomic_store_n(&irq_entry_pc,pc,__ATOMIC_RELAXED);
+    bp_cpu_record(pc,psr);
     if(started && nprocs>0) {
       const int pid=proc_selfpid();
       if(pid>0) {
@@ -1154,6 +1187,9 @@ static void touch_monitor(void *arg, wait_result_t result) {
 }
 static void monitor(void *arg, wait_result_t result) {
   (void)arg;(void)result;
+  // pcpu=/rcpu= (patches/xnu/fajita-pcpu.patch) steer threads away from CPU0, but the watchdog pet of boot_log_tick only counts
+  // on the boot CPU (ArmCpu armcpu_wdog_pet): keep this thread there. A bound thread runs even on a CPU that is not recommended.
+  if(sched_pcpu_mask||sched_rcpu_mask){thread_bind(master_processor);thread_block(THREAD_CONTINUE_NULL);}
   unsigned capture_at=0,capture_attempt=~0U,named=0;
   for (;;) {
     __atomic_fetch_add(&thread_count,1,__ATOMIC_RELAXED);
@@ -1163,6 +1199,7 @@ static void monitor(void *arg, wait_result_t result) {
     if(boot_process_snapshot)boot_process_snapshot();
     if(boot_log_tick)boot_log_tick(now);
     if(sheng_cpufreq_poll)sheng_cpufreq_poll();
+    if(native_touch_probe)native_touch_probe();
     if(boot_ui_trace_snapshot)boot_ui_trace_snapshot(now);
     if(&boot_process_attempts && &boot_process_busy) {
       unsigned attempt=__atomic_load_n(&boot_process_attempts,__ATOMIC_RELAXED);

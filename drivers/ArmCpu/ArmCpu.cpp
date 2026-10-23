@@ -4,6 +4,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSSymbol.h>
+#include <kern/clock.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 
@@ -89,6 +90,64 @@ OSDefineMetaClassAndStructors (ArmCpu, IOCPU)
 // The EL1 virtual timer's INTID: PPI 27 on most SoCs; Qualcomm SDM845 wires it to PPI 3 (INTID 19), so a board passes
 // armcpu-timer-intid=19.
 static uint32_t gTimerIntid = 27;
+// fajita-deadline=<seconds>: an unattended run must come back even when threads stop (memory exhaustion, a stuck kernel thread). The
+// timer interrupt keeps arriving then, so its handler issues PSCI SYSTEM_RESET <seconds> after ArmCpu starts; with empty boot
+// slots the OnePlus ABL lands in fastboot. 0 (default) = off.
+extern "C" { volatile uint64_t armcpu_deadline_start = 0, armcpu_deadline_ticks = 0, armcpu_deadline_seen = 0; }
+// fajita-wdog=<mode>: the SDM845 APSS watchdog (qcom,apss-wdt-sdm845, 0x17980000, kpss layout: RST 0x4, EN 0x8, STS 0xC, BARK_TIME
+// 0x10, BITE_TIME 0x14, 32768 Hz sleep clock). Every fajita run froze ~2 minutes after kernel start with even the timer interrupt
+// gone, which a watchdog left running by the bootloader would explain (Linux's qcom_wdt pets a watchdog it finds running).
+// 1 = read the registers once (armcpu_wdog[], shown by BootReset's probe text), 2 = also pet it from the timer interrupt, which
+// needs no thread, 3 = arm it as the unattended-run backstop: the bootloader leaves it disabled (EN=0 on hardware), so a freeze
+// that stops even the timer interrupt (fajita froze ~2 minutes in, every run) would otherwise need a key press. Mode 3 writes the
+// bootloader restart reason (IMEM 0x146bf65c = 0x77665500, the cookie the Qualcomm ABL reads), then enables the watchdog with
+// bark 16 s and bite 32 s (the register maxima, 32768 Hz) and pets it from every timer interrupt. A freeze bites within 32 s and the
+// ABL lands in fastboot. 0 (default) = untouched.
+extern "C" { volatile uint32_t armcpu_wdog[6] = { 0, 0, 0, 0, 0, 0 }; volatile uint64_t armcpu_wdog_pets = 0;
+             volatile uint32_t armcpu_imem[4] = { 0, 0, 0, 0 }; }   // IMEM 0x146bf000: word 0, dload_type 0x1c, restart_reason 0x65c, after write
+// Qualcomm SCM over SMC (SMCCC SIP, the calls Linux qcom_scm makes from EL1 on this firmware). Mode 3 switches off the two things
+// that turn a watchdog bite into "Qualcomm CrashDump Mode" before it arms the watchdog: the SDI debug image (0xC2000109) and the
+// download-mode bit 0x10 of TCSR_BOOT_MISC_DETECT (0x01FD3000), which the stock firmware sets every boot and the OS must clear
+// (0xC2000110, fallback secure write 0xC2000502); TCSR is read back with 0xC2000501. Sources: fajita-soc-reset-freeze-research.md.
+// armcpu_scm[]: avail(SDI) avail(dload) avail(io write) sdi-rc tcsr-before dload-rc write-rc tcsr-after
+extern "C" { volatile int64_t armcpu_scm[8] = { -99, -99, -99, -99, -99, -99, -99, -99 }; }
+struct ScmResult { uint64_t a0, a1; };
+static ScmResult scm (uint64_t fn, uint64_t info, uint64_t a2, uint64_t a3)
+{
+  register uint64_t x0 __asm__ ("x0") = fn;
+  register uint64_t x1 __asm__ ("x1") = info;
+  register uint64_t x2 __asm__ ("x2") = a2;
+  register uint64_t x3 __asm__ ("x3") = a3;
+  register uint64_t x4 __asm__ ("x4") = 0;
+  register uint64_t x5 __asm__ ("x5") = 0;
+  __asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5)
+                    :: "memory", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17");
+  return { x0, x1 };
+}
+static int64_t scmAvailable (uint32_t fn)
+{
+  ScmResult r = scm (0xC2000601, 0x1, fn, 0);   // QCOM_SCM_INFO_IS_CALL_AVAIL: a1 = 1 when available
+  return r.a0 ? -static_cast<int64_t> (r.a0 & 0xff) - 100 : static_cast<int64_t> (r.a1);
+}
+static void scmDisableCrashdump (void)
+{
+  armcpu_scm[0] = scmAvailable (0xC2000109);
+  armcpu_scm[1] = scmAvailable (0xC2000110);
+  armcpu_scm[2] = scmAvailable (0xC2000502);
+  armcpu_scm[3] = static_cast<int64_t> (scm (0xC2000109, 0x2, 1, 0).a0);                    // SDI off after a watchdog reset
+  ScmResult before = scm (0xC2000501, 0x1, 0x01FD3000, 0);
+  armcpu_scm[4] = before.a0 ? -1 : static_cast<int64_t> (before.a1);
+  armcpu_scm[5] = static_cast<int64_t> (scm (0xC2000110, 0x2, 0, 0).a0);                    // download mode off
+  ScmResult again = scm (0xC2000501, 0x1, 0x01FD3000, 0);
+  if (!again.a0 && (again.a1 & 0x10)) {
+    armcpu_scm[6] = static_cast<int64_t> (scm (0xC2000502, 0x2, 0x01FD3000, again.a1 & ~0x10ULL).a0);   // secure write fallback
+  }
+  ScmResult after = scm (0xC2000501, 0x1, 0x01FD3000, 0);
+  armcpu_scm[7] = after.a0 ? -1 : static_cast<int64_t> (after.a1);
+}
+static OSSharedPtr<IOMemoryMap> gWdogMap;
+static uintptr_t gWdog = 0;
+static unsigned gWdogMode = 0;
 // Redistributor ISENABLER0: SGIs 0..15 (only SGI 0 is used by the kernel; the others let the self-SGI probe tell which INTIDs the GIC accepts) and the timer PPI.
 #define kSgiPpiEnable (0xffffU | (1U << gTimerIntid))
 
@@ -102,6 +161,62 @@ static uint32_t read32 (uintptr_t base, unsigned offset)
 static void write32 (uintptr_t base, unsigned offset, uint32_t value)
 {
   *reinterpret_cast<volatile uint32_t *>(base + offset) = value;
+}
+
+// Also petted from the boot-progress monitor (BootLog's once-a-second tick): XNU's timer is tickless, so an idle system can go
+// longer than the 32 s bite without a timer interrupt (an idle kernel-only run bit falsely). A real freeze stops both.
+// Only the boot CPU pets: with SMP a healthy secondary kept the watchdog alive while CPU0 was frozen (fajita, 2-core run, 2026-10-22).
+// fajita-wdog-stop=<seconds>: a positive control for the bark capture. Petting stops that long after the first pet, so a healthy
+// system barks 16 s later and must show "FAJITA BARK" in the log (then the panic screen resets); a bite instead means the bark
+// does not reach the CPU. 0 (default) = pet forever.
+// armcpu_wdog_live (BootReset's probe text, refreshed every log slot): cntfrq, stop, first and last pet (mach_absolute_time), STS,
+// raw CNTVCT/CNTPCT, then IPIs sent and taken and timer interrupts (and the CPU0 debug probe). The stop runs on mach_absolute_time: an inline CNTVCT read in a kext came back as a constant (0 or 3) on
+// fajita (runH-barkctl2), so a CNTVCT-based stop never fired.
+extern "C" { volatile uint64_t armcpu_wdog_live[14] = { 0 }; }   // [10..13]: CPU0 debug CIDR1, EDDEVARCH, EDPRSR, one EDPCSR sample
+// fajita-wdog-stop-panic=1 checks the capture path alone: at the stop time the timer interrupt calls barkCapture() itself, so
+// "FAJITA BARK" in the log and a panic-screen reset prove the panic flush works from interrupt context without the watchdog.
+static uint64_t gWdogStopTicks = 0;
+static unsigned gWdogStopPanic = 0;
+static void barkCapture (void) __attribute__ ((noreturn));
+static void wdogPet (bool fromInterrupt)
+{
+  const uint64_t now = mach_absolute_time ();
+  if (!armcpu_wdog_live[2]) armcpu_wdog_live[2] = now;
+  if (gWdogStopTicks && now - armcpu_wdog_live[2] >= gWdogStopTicks) {
+    if (gWdogStopPanic && fromInterrupt) barkCapture ();
+    return;
+  }
+  write32 (gWdog, 0x4, 1);   // WDT_RST: restart the count
+  armcpu_wdog_live[3] = now;
+  armcpu_wdog_pets = armcpu_wdog_pets + 1;
+}
+
+// A cache-inhibited kernel mapping of a physical range that stays for the boot (BootDiagExport's screenshot of the boot framebuffer);
+// 0 on failure. IOKit maps through the kernel map, not the small ml_io_map submap.
+extern "C" uint64_t armcpu_map_physical (uint64_t physical, uint64_t length)
+{
+  OSSharedPtr<IOMemoryDescriptor> d (IOMemoryDescriptor::withPhysicalAddress (physical, length, kIODirectionIn), OSNoRetain);
+  IOMemoryMap *map = d ? d->map (kIOMapAnywhere | kIOMapInhibitCache) : nullptr;   // kept: never released
+  return map ? static_cast<uint64_t> (map->getVirtualAddress ()) : 0;
+}
+
+extern "C" void armcpu_wdog_sample (void)
+{
+  uint64_t vct, pct;
+  __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (vct));
+  __asm__ volatile ("isb\n\tmrs %0, cntpct_el0" : "=r" (pct));
+  armcpu_wdog_live[5] = vct;
+  armcpu_wdog_live[6] = pct;
+  armcpu_wdog_live[7] = armcpu_ipi_sent;
+  armcpu_wdog_live[8] = armcpu_ipi_interrupts;
+  armcpu_wdog_live[9] = armcpu_timer_interrupts;
+  if (gWdog) armcpu_wdog_live[4] = read32 (gWdog, 0xc);
+}
+
+extern "C" int cpu_number (void);
+extern "C" void armcpu_wdog_pet (void)
+{
+  if (gWdog && gWdogMode >= 2 && cpu_number () == 0) wdogPet (false);
 }
 
 // Distributor side of the software IPI of logical core `core`: group 1, edge-triggered, priority 0x80, routed to affinity `aff`, enabled.
@@ -128,7 +243,7 @@ static void spiIpiSend (uintptr_t dist, uint32_t core)
 static uint64_t counter (void)
 {
   uint64_t value;
-  __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r" (value));
+  __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (value));
   return value;
 }
 
@@ -150,6 +265,79 @@ static bool waitClear (uintptr_t base, unsigned offset, uint32_t mask)
 static OSSharedPtr<IOMemoryMap> gDistMap, gRedistMap;
 static uintptr_t gDist = 0, gFrames = 0;
 static uint64_t gFramesSize = 0;
+
+// fajita-wdog=3: the watchdog's bark (SPI 0, INTID 32, BARK_TIME = 16 s after the last pet, before the 32 s bite) as a normal
+// non-secure IRQ to the boot CPU. If it is taken, the CPU was alive with interrupts on while nothing petted (the timer interrupt had
+// stopped); the handler records where it interrupted (ELR_EL1/SPSR_EL1), the virtual timer and the GIC state of the timer INTID, and
+// panics so the panic screen flushes the text to the UFS log and resets. If the board bites instead, interrupts were masked or a
+// higher exception level held the CPU (fajita-soc-reset-freeze-research.md).
+static const uint32_t kBarkIntid = 32;
+static void spiConfigure (uintptr_t dist, uint32_t id, uint64_t aff)
+{
+  write32 (dist, 0x80 + (id / 32) * 4, read32 (dist, 0x80 + (id / 32) * 4) | (1U << (id % 32)));        // group 1 (non-secure)
+  write32 (dist, 0xc00 + (id / 16) * 4, read32 (dist, 0xc00 + (id / 16) * 4) & ~(3U << ((id % 16) * 2))); // level (Linux DT: level high)
+  *reinterpret_cast<volatile uint8_t *>(dist + 0x400 + id) = 0x80;
+  *reinterpret_cast<volatile uint64_t *>(dist + 0x6000 + 8ULL * id) = aff & 0xff00ffffffULL;
+  __asm__ volatile ("dsb sy" ::: "memory");
+  write32 (dist, 0x100 + (id / 32) * 4, 1U << (id % 32));
+  __asm__ volatile ("dsb sy" ::: "memory");
+}
+
+// fajita-wdog-bark-cpu=<n>: the logical CPU the bark is routed to (default 0). With SMP, 1 makes a live secondary the observer of a
+// frozen boot CPU (in a 2-core run CPU1 stayed alive while CPU0 froze). fajita-cpu0-debug=1 maps CPU0's external debug block (CoreSight
+// per-core stride 0x100000 from 0x7000000: ETM at +0x40000 is sdm845.dtsi's etm@7040000, debug assumed at +0x10000) so the capture can
+// read CPU0's PC sample register EDPCSR (0x0A0, then EDPCSRhi 0x0AC) and EDPRSR (0x314), which work while CPU0 cannot take interrupts.
+static unsigned gBarkCpu = 0;
+static OSSharedPtr<IOMemoryMap> gCpu0DebugMap;
+static uintptr_t gCpu0Debug = 0;
+static uint64_t cpu0PcSample (void)
+{
+  if (!gCpu0Debug) return 0;
+  const uint32_t lo = read32 (gCpu0Debug, 0xa0);
+  const uint32_t hi = read32 (gCpu0Debug, 0xac);
+  return (static_cast<uint64_t> (hi) << 32) | lo;
+}
+
+extern "C" size_t boot_progress_cpu_tail (int cpu, char *out, size_t cap) __attribute__ ((weak_import));
+static char gBarkTail[400];
+static void barkCapture (void)
+{
+  // The bark is level-triggered and stays asserted until the next pet: mask it at the distributor first (ICENABLER), so the panic
+  // path is not re-entered. The bite still follows 16 s later, after the panic screen has flushed this text.
+  if (gDist) { write32 (gDist, 0x180 + (kBarkIntid / 32) * 4, 1U << (kBarkIntid % 32)); __asm__ volatile ("dsb sy" ::: "memory"); }
+  // No MRS of SP_EL0: XNU runs with SPSel=0, where that read is an undefined instruction (runK-panicctl). The current SP stands in.
+  uint64_t elr, spsr, vct, cval, ctl, daif, far, esr, sp0;
+  __asm__ volatile ("mrs %0, elr_el1" : "=r" (elr));
+  __asm__ volatile ("mrs %0, spsr_el1" : "=r" (spsr));
+  __asm__ volatile ("mrs %0, far_el1" : "=r" (far));
+  __asm__ volatile ("mrs %0, esr_el1" : "=r" (esr));
+  __asm__ volatile ("mov %0, sp" : "=r" (sp0));
+  __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (vct));
+  __asm__ volatile ("mrs %0, cntv_cval_el0" : "=r" (cval));
+  __asm__ volatile ("mrs %0, cntv_ctl_el0" : "=r" (ctl));
+  __asm__ volatile ("mrs %0, daif" : "=r" (daif));
+  uint32_t timerPend = 0, timerActive = 0, timerEnable = 0;
+  if (gFrames) {
+    // The boot CPU's SGI/PPI frame: ISPENDR0 0x200, ISACTIVER0 0x300, ISENABLER0 0x100.
+    timerEnable = read32 (gFrames + 0x10000, 0x100); timerPend = read32 (gFrames + 0x10000, 0x200); timerActive = read32 (gFrames + 0x10000, 0x300);
+  }
+  uint64_t pc0[4] = { 0, 0, 0, 0 };
+  uint32_t prsr0 = 0;
+  if (gCpu0Debug) {
+    prsr0 = read32 (gCpu0Debug, 0x314);
+    for (unsigned i = 0; i < 4; i++) pc0[i] = cpu0PcSample ();
+  }
+  gBarkTail[0] = 0;
+  if (&boot_progress_cpu_tail) boot_progress_cpu_tail (0, gBarkTail, sizeof (gBarkTail));
+  panic ("FAJITA BARK cpu%d: cpu0 last irqs [%s] mach=%llx | cpu0 edpcsr=%llx %llx %llx %llx edprsr=%x | elr=%llx spsr=%llx far=%llx esr=%llx sp=%llx | vct=%llx "
+         "cval=%llx (cval-vct=%lld) ctl=%llx daif=%llx | cpu0 ppi19 en=%u pend=%u act=%u (raw %x/%x/%x) | timer irqs=%llu ipis=%llu "
+         "pets=%llu core0 timer=%llu",
+         cpu_number (), gBarkTail, (unsigned long long)mach_absolute_time (), pc0[0], pc0[1], pc0[2], pc0[3], prsr0, elr, spsr, far, esr, sp0, vct, cval, (long long)(cval - vct), ctl, daif,
+         (timerEnable >> gTimerIntid) & 1, (timerPend >> gTimerIntid) & 1, (timerActive >> gTimerIntid) & 1, timerEnable, timerPend,
+         timerActive, (unsigned long long)armcpu_timer_interrupts, (unsigned long long)armcpu_ipi_interrupts,
+         (unsigned long long)armcpu_wdog_pets, (unsigned long long)armcpu_core_timer[0]);
+}
+
 static IOCPUInterruptController *gController = nullptr;
 static volatile uint32_t gGicShared = 0;
 static uint64_t gRedistStride = 0; // DT redistributor-stride; 0 = infer from GICR_TYPER.VLPIS
@@ -324,7 +512,7 @@ void ArmCpu::enableGic (void)
   uint64_t value;
   __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (value));
   value |= 1;
-  __asm__ volatile ("msr icc_sre_el1, %0; isb" :: "r" (value) : "memory");
+  __asm__ volatile ("msr icc_sre_el1, %0\n\tisb" :: "r" (value) : "memory");
   __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (value));
   if ((value & 1) == 0) { panic ("ArmCpu: GICv3 system register interface unavailable"); }
   __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (value));
@@ -340,7 +528,7 @@ void ArmCpu::enableGic (void)
     write32 (dist, 0, read32 (dist, 0) | 0x12U);
   }
   value = 1;
-  __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
+  __asm__ volatile ("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r" (value) : "memory");
   if (!secondary) {
     uint64_t pmr, ig, sre;
     __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
@@ -376,6 +564,70 @@ bool ArmCpu::start (IOService *provider)
   unsigned timerIntid = 27;
   if (PE_parse_boot_argn ("armcpu-timer-intid", &timerIntid, sizeof (timerIntid)) && timerIntid >= 16 && timerIntid < 32) {
     gTimerIntid = timerIntid;
+  }
+  if (!gWdog && PE_parse_boot_argn ("fajita-wdog", &gWdogMode, sizeof (gWdogMode)) && gWdogMode) {
+    OSSharedPtr<IOMemoryDescriptor> wdog (IOMemoryDescriptor::withPhysicalAddress (0x17980000, 0x1000, kIODirectionInOut), OSNoRetain);
+    if (wdog) gWdogMap = OSSharedPtr<IOMemoryMap> (wdog->map (kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
+    if (gWdogMap) {
+      gWdog = static_cast<uintptr_t> (gWdogMap->getVirtualAddress ());
+      armcpu_wdog[0] = 1;
+      for (unsigned i = 1; i < 6; i++) armcpu_wdog[i] = read32 (gWdog, 4 * i);   // RST, EN, STS, BARK, BITE
+    }
+    if (gWdog && gWdogMode >= 3) {
+      scmDisableCrashdump ();
+      OSSharedPtr<IOMemoryDescriptor> imem (IOMemoryDescriptor::withPhysicalAddress (0x146bf000, 0x1000, kIODirectionInOut), OSNoRetain);
+      OSSharedPtr<IOMemoryMap> imemMap = imem ? OSSharedPtr<IOMemoryMap> (imem->map (kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain) : nullptr;
+      if (imemMap) {
+        uintptr_t base = static_cast<uintptr_t> (imemMap->getVirtualAddress ());
+        armcpu_imem[0] = read32 (base, 0x0);
+        armcpu_imem[1] = read32 (base, 0x1c);
+        armcpu_imem[2] = read32 (base, 0x65c);
+        write32 (base, 0x65c, 0x77665500);   // restart reason: bootloader (fastboot)
+        armcpu_imem[3] = read32 (base, 0x65c);
+      }
+      write32 (gWdog, 0x8, 0);         // EN off while programming
+      write32 (gWdog, 0x10, 0x7ffff);  // BARK_TIME 16 s
+      write32 (gWdog, 0x14, 0xfffff);  // BITE_TIME 32 s
+      write32 (gWdog, 0x4, 1);         // RST: restart the count
+      // EN: bit 0 counts, bit 1 raises the bark interrupt (Linux qcom_wdt: QCOM_WDT_ENABLE | QCOM_WDT_ENABLE_IRQ). With bit 0 alone a
+      // frozen run bit at 32 s without ever barking (runF-bark).
+      write32 (gWdog, 0x8, 3);
+      armcpu_wdog[2] = read32 (gWdog, 0x8);
+      armcpu_wdog[4] = read32 (gWdog, 0x10);
+      armcpu_wdog[5] = read32 (gWdog, 0x14);
+      PE_parse_boot_argn ("fajita-wdog-bark-cpu", &gBarkCpu, sizeof (gBarkCpu));
+      unsigned debug = 0;
+      if (PE_parse_boot_argn ("fajita-cpu0-debug", &debug, sizeof (debug)) && debug) {
+        // After arming: if this APB read stalls the bus, the watchdog bites.
+        OSSharedPtr<IOMemoryDescriptor> d (IOMemoryDescriptor::withPhysicalAddress (0x7010000, 0x1000, kIODirectionInOut), OSNoRetain);
+        if (d) gCpu0DebugMap = OSSharedPtr<IOMemoryMap> (d->map (kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
+        if (gCpu0DebugMap) {
+          gCpu0Debug = static_cast<uintptr_t> (gCpu0DebugMap->getVirtualAddress ());
+          armcpu_wdog_live[10] = read32 (gCpu0Debug, 0xff4);   // CIDR1: 0x90 or 0xf0 for a CoreSight/debug component
+          armcpu_wdog_live[11] = read32 (gCpu0Debug, 0xfbc);   // EDDEVARCH: 0x47706a15 (v8.0 debug) .. 0x47708a15 (v8.2)
+          armcpu_wdog_live[12] = read32 (gCpu0Debug, 0x314);   // EDPRSR
+          armcpu_wdog_live[13] = cpu0PcSample ();              // 0xffffffff: sampling prohibited (NIDEN off)
+        }
+      }
+    }
+  }
+  unsigned wdogStop = 0;
+  if (gWdog && !gWdogStopTicks && PE_parse_boot_argn ("fajita-wdog-stop", &wdogStop, sizeof (wdogStop)) && wdogStop) {
+    uint64_t ticks = 0;
+    nanoseconds_to_absolutetime (static_cast<uint64_t> (wdogStop) * NSEC_PER_SEC, &ticks);
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (armcpu_wdog_live[0]));
+    gWdogStopTicks = ticks;
+    PE_parse_boot_argn ("fajita-wdog-stop-panic", &gWdogStopPanic, sizeof (gWdogStopPanic));
+    armcpu_wdog_live[1] = ticks;
+  }
+  unsigned deadline = 0;
+  if (!armcpu_deadline_ticks && PE_parse_boot_argn ("fajita-deadline", &deadline, sizeof (deadline)) && deadline >= 60) {
+    uint64_t frequency = 0;
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (frequency));
+    // Elapsed time from the first timer interrupt (which records armcpu_deadline_start), never an absolute value: the counter keeps
+    // running across warm resets. (A start read here came back as garbage on hardware.)
+    armcpu_deadline_start = 0;
+    armcpu_deadline_ticks = (frequency >= 1000000 && frequency <= 100000000 ? frequency : 19200000) * (uint64_t)deadline;
   }
   uint32_t physical;
   OSData *reg = OSDynamicCast (OSData, provider->getProperty ("reg"));
@@ -552,6 +804,7 @@ void ArmCpu::initCPU (bool boot)
   }
   enableGic ();
   if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+  if (gWdog && gWdogMode >= 3 && gDist && logicalId == gBarkCpu) { spiConfigure (gDist, kBarkIntid, affinity); }   // see gBarkCpu
   enableCPUTimeBase (true);
   setCPUState (kIOCPUStateRunning);
   if (gSelfIpi) { signalCPU (this); }
@@ -575,9 +828,23 @@ void ArmCpu::interrupt (void)
     if ((id & 0xffffff) == gTimerIntid) {
       armcpu_timer_interrupts = armcpu_timer_interrupts + 1;
       armcpu_core_timer[logicalId & 7] = armcpu_core_timer[logicalId & 7] + 1;
+      if (gWdog && gWdogMode >= 2 && logicalId == 0) wdogPet (true);   // boot CPU only (see armcpu_wdog_pet)
+      if (armcpu_deadline_ticks) {
+        uint64_t now;
+        __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (now));
+        armcpu_deadline_seen = now;
+        if (!armcpu_deadline_start) armcpu_deadline_start = now;
+        // Unsigned difference: correct across the wrap (fajita's virtual counter starts near 2^64 and wraps ~20 minutes in).
+        if (now - armcpu_deadline_start >= armcpu_deadline_ticks) {
+          register uint64_t x0 __asm__ ("x0") = 0x84000009ULL;   // PSCI SYSTEM_RESET
+          __asm__ volatile ("smc #0" : "+r" (x0) :: "memory", "x1", "x2", "x3");
+        }
+      }
       armcpu_irq_phase=2;
       rtclock_intr (0);
       armcpu_irq_phase=3;
+    } else if ((id & 0xffffff) == kBarkIntid && gWdogMode >= 3) {
+      barkCapture ();
     } else if ((id & 0xffffff) == 0) {
       armcpu_ipi_interrupts = armcpu_ipi_interrupts + 1;
       armcpu_core_sgi[logicalId & 7] = armcpu_core_sgi[logicalId & 7] + 1;
@@ -610,7 +877,7 @@ void ArmCpu::interrupt (void)
       }
     }
     armcpu_irq_phase=6;
-    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (id) : "memory");
+    __asm__ volatile ("msr icc_eoir1_el1, %0\n\tisb" :: "r" (id) : "memory");
   }
 }
 
@@ -625,7 +892,7 @@ void ArmCpu::signalCPU (IOCPU *target)
                  ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
   armcpu_ipi_sent = armcpu_ipi_sent + 1;
   if (gSpiIpi) { spiIpiSend (gDist, peer->logicalId & 7); return; }
-  __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+  __asm__ volatile ("dsb ishst\n\tmsr icc_sgi1r_el1, %0\n\tisb" :: "r" (sgi) : "memory");
 }
 
 // Diagnostic: sends SGI 0 to the core whose MPIDR affinity is aff (the DT "reg" value, e.g. 0x100 for core 1) exactly as signalCPU
@@ -671,7 +938,7 @@ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
 {
   uint64_t mpidr, daif, v;
   __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
-  __asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r" (daif) :: "memory");
+  __asm__ volatile ("mrs %0, daif\n\tmsr daifset, #2\n\tisb" : "=r" (daif) :: "memory");
   for (unsigned i = 0; i < 10; i++) { out[i] = 0; }
   out[0] = mpidr;
   __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (v)); out[3] = v;
@@ -684,8 +951,8 @@ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
     for (uint64_t intid = 0; intid < 16; intid++) {
       const uint64_t sgi = base | (intid << 24);
       uint64_t h = 1023, ta, tb;
-      __asm__ volatile ("dsb ishst; isb; mrs %0, cntvct_el0; isb" : "=r" (ta) :: "memory");
-      __asm__ volatile ("msr icc_sgi1r_el1, %0; isb; mrs %1, cntvct_el0" : "=r" (tb) : "r" (sgi) : "memory");
+      __asm__ volatile ("dsb ishst\n\tisb\n\tmrs %0, cntvct_el0\n\tisb" : "=r" (ta) :: "memory");
+      __asm__ volatile ("msr icc_sgi1r_el1, %0\n\tisb\n\tmrs %1, cntvct_el0" : "=r" (tb) : "r" (sgi) : "memory");
       if (intid == 0) { out[8] = tb - ta; }
       for (unsigned polls = 0; polls < 400; polls++) {
         __asm__ volatile ("mrs %0, icc_hppir1_el1" : "=r" (h));
@@ -695,10 +962,10 @@ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
       if ((h & 0xffffff) == intid) {
         out[1] |= 1ULL << intid;
         __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r" (v));
-        __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (v) : "memory");
+        __asm__ volatile ("msr icc_eoir1_el1, %0\n\tisb" :: "r" (v) : "memory");
         continue;
       }
-      __asm__ volatile ("dsb ishst; msr icc_sgi0r_el1, %0; isb" :: "r" (sgi) : "memory");
+      __asm__ volatile ("dsb ishst\n\tmsr icc_sgi0r_el1, %0\n\tisb" :: "r" (sgi) : "memory");
       for (unsigned polls = 0; polls < 400; polls++) {
         __asm__ volatile ("mrs %0, icc_hppir0_el1" : "=r" (h));
         if ((h & 0xffffff) == intid) { break; }
@@ -707,16 +974,16 @@ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
       if ((h & 0xffffff) == intid) {
         out[2] |= 1ULL << intid;
         __asm__ volatile ("mrs %0, icc_iar0_el1" : "=r" (v));
-        __asm__ volatile ("msr icc_eoir0_el1, %0; isb" :: "r" (v) : "memory");
+        __asm__ volatile ("msr icc_eoir0_el1, %0\n\tisb" :: "r" (v) : "memory");
       }
     }
   }
   {
     uint64_t ta, tb;
-    __asm__ volatile ("isb; mrs %0, cntvct_el0; isb; mrs %2, icc_pmr_el1; isb; mrs %1, cntvct_el0" : "=r" (ta), "=r" (tb), "=r" (v) :: "memory");
+    __asm__ volatile ("isb\n\tmrs %0, cntvct_el0\n\tisb\n\tmrs %2, icc_pmr_el1\n\tisb\n\tmrs %1, cntvct_el0" : "=r" (ta), "=r" (tb), "=r" (v) :: "memory");
     out[9] = tb - ta;
   }
-  __asm__ volatile ("msr daif, %0; isb" :: "r" (daif) : "memory");
+  __asm__ volatile ("msr daif, %0\n\tisb" :: "r" (daif) : "memory");
 }
 
 extern "C" void armcpu_ipi_selftest (uint64_t aff)
@@ -724,13 +991,13 @@ extern "C" void armcpu_ipi_selftest (uint64_t aff)
   uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) | ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
   armcpu_ipi_selftest_sent = armcpu_ipi_selftest_sent + 1;
   if (gSpiIpi) { spiIpiSend (gDist, static_cast<uint32_t> ((aff >> 8) & 7)); return; }
-  __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+  __asm__ volatile ("dsb ishst\n\tmsr icc_sgi1r_el1, %0\n\tisb" :: "r" (sgi) : "memory");
 }
 
 void ArmCpu::enableCPUTimeBase (bool enabled)
 {
   uint64_t value = enabled ? 1 : 2;
-  __asm__ volatile ("msr cntv_ctl_el0, %0; isb" :: "r" (value) : "memory");
+  __asm__ volatile ("msr cntv_ctl_el0, %0\n\tisb" :: "r" (value) : "memory");
 }
 
 void ArmCpu::quiesceCPU (void)
@@ -739,12 +1006,24 @@ void ArmCpu::quiesceCPU (void)
   if(diagnosePower)panic("ArmCpu: unsupported quiesce requested before timer/GIC disable caller=%p halt=%u timer=%llu phase=%u",__builtin_return_address(0),armcpu_halt_calls,armcpu_timer_interrupts,armcpu_irq_phase);
   enableCPUTimeBase (false);
   uint64_t value = 0;
-  __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
+  __asm__ volatile ("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r" (value) : "memory");
 }
 
+// The boot CPU never parks: a system-sleep request (powerd after the ~2 minute idle timer) reaches IOCPUSleepKernel, which halts the
+// boot CPU last, and with no sleep/wake path here that left CPU0 with its timer, GIC and IRQs off for good: fajita's freeze ~119 s
+// after XNU started (HackiOS saw the same: hackios-xnu-kernel redwood.patch, GenericARMPE.cpp haltCPU). Returning makes the sleep
+// a no-op wake. fajita-halt-panic=1 panics instead, naming the caller.
 void ArmCpu::haltCPU (void)
 {
   armcpu_halt_calls=armcpu_halt_calls+1;
+  if (logicalId == 0) {
+    unsigned haltPanic = 0;
+    if (PE_parse_boot_argn ("fajita-halt-panic", &haltPanic, sizeof (haltPanic)) && haltPanic) {
+      panic ("FAJITA HALT: haltCPU on the boot CPU, caller=%p halts=%u timer irqs=%llu", __builtin_return_address (0),
+             armcpu_halt_calls, (unsigned long long)armcpu_timer_interrupts);
+    }
+    return;
+  }
   quiesceCPU ();
   setCPUState (kIOCPUStateStopped);
   __asm__ volatile ("msr daifset, #15" ::: "memory");
@@ -761,7 +1040,7 @@ static void cleanToMemory (const void *start, size_t length)
   uintptr_t line = static_cast<uintptr_t> (4) << ((ctr >> 16) & 15);
   uintptr_t address = reinterpret_cast<uintptr_t> (start) & ~(line - 1), end = reinterpret_cast<uintptr_t> (start) + length;
   for (; address < end; address += line) { __asm__ volatile ("dc civac, %0" :: "r" (address) : "memory"); }
-  __asm__ volatile ("dsb sy; isb" ::: "memory");
+  __asm__ volatile ("dsb sy\n\tisb" ::: "memory");
 }
 
 kern_return_t ArmCpu::startCPU (vm_offset_t, vm_offset_t)
