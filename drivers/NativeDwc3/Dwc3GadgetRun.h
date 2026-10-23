@@ -42,7 +42,10 @@ public:
   bool bulkOutArmed;
   usbdbg::Decoder rx;
   uint16_t txSeq;
-  uint64_t logOffset;
+  uint64_t logOffset;               // next msgbuf byte (monotonic) to send
+  uint64_t logProduced;             // msgbuf bytes written since first look
+  uint32_t logLastHead;
+  bool logInit;
   // Device->host byte ring of encoded frames. Any thread enqueues (queueFrame, under
   // txLock); only the poll thread moves bytes to the bulk-IN TRB (kickTx), one
   // transfer in flight at a time, advanced on its XferComplete.
@@ -370,7 +373,9 @@ inline void Gadget::onEp0DataOrStatus(unsigned ep)
 inline void Gadget::enableBulk()
 {
   if (bulkStarted) return;
-  depCmd(m, kPBulkOut, kDwc3DepCmdStartConfig | dwc3DepCmdParam(2), 0, 0, 0);
+  // DEPSTARTCFG with XferRscIdx 2 goes to physical ep 0 (dwc3_gadget_start_config(dwc, 2), issued by Linux on
+  // SET_CONFIGURATION): it resets the transfer resources of every endpoint above ep0/ep1.
+  depCmd(m, kPEp0Out, kDwc3DepCmdStartConfig | dwc3DepCmdParam(2), 0, 0, 0);
   auto cfgBulk = [&](unsigned ep) {
     uint32_t p0 = uint32_t(kDwc3EpTypeBulk << kDwc3DepCfgTypeShift) | (512u << kDwc3DepCfgMaxPktShift) | kDwc3DepCfgActionInit;
     uint32_t p1 = kDwc3DepCfgXferCompleteEn | (uint32_t(ep) << kDwc3DepCfgEpNumShift);
@@ -524,19 +529,30 @@ inline void Gadget::poll()
 
 inline void Gadget::pumpLog()
 {
-  // Mirror new kernel msgbuf bytes to the host as LOG frames (device->host).
+  // Mirror the kernel msgbuf (a ring of msg_size bytes; msg_bufx is its write index) to the host as LOG frames.
+  // logProduced counts bytes written since we first looked (wraps of msg_bufx added in), so the LOG offsets the host
+  // sees are monotonic; a backlog is streamed oldest first, one frame per poll, and an overrun skips to the oldest
+  // bytes still in the ring.
   if (!&msgbufp || !msgbufp || !bulkStarted) return;
   int size = msgbufp->msg_size, head = msgbufp->msg_bufx;
-  if (size <= 0 || head < 0 || head > size) return;
-  uint64_t total = uint64_t(head);
-  if (total <= logOffset) return;
+  if (size <= 0 || head < 0 || head >= size) return;
+  if (!logInit) {
+    logInit = true;
+    logLastHead = uint32_t(head);
+    logProduced = uint64_t(head);      // assume no wrap before boot-time init: the ring index equals the count
+  } else if (uint32_t(head) != logLastHead) {
+    logProduced += uint32_t(head) >= logLastHead ? uint32_t(head) - logLastHead : uint32_t(size) - logLastHead + uint32_t(head);
+    logLastHead = uint32_t(head);
+  }
+  if (logOffset + uint64_t(size) < logProduced) logOffset = logProduced - uint64_t(size);
+  if (logOffset >= logProduced) return;
   static uint8_t chunk[usbdbg::kMaxData - 8];
-  size_t take = size_t(total - logOffset);
-  if (take > sizeof chunk) { logOffset = total - sizeof chunk; take = sizeof chunk; }
-  for (size_t i = 0; i < take; i++) chunk[i] = uint8_t(msgbufp->msg_bufc[(logOffset + i) % size]);
+  size_t take = size_t(logProduced - logOffset);
+  if (take > sizeof chunk) take = sizeof chunk;
+  for (size_t i = 0; i < take; i++) chunk[i] = uint8_t(msgbufp->msg_bufc[(logOffset + i) % uint64_t(size)]);
   static uint8_t data[usbdbg::kMaxData];
   size_t dn = usbdbg::buildLogData(logOffset, chunk, take, data);
-  if (queueFrame(usbdbg::kChLog, data, dn)) logOffset = total;   // ring full: retry later
+  if (queueFrame(usbdbg::kChLog, data, dn)) logOffset += take;   // ring full: retry on the next poll
 }
 
 }  // namespace dwc3
