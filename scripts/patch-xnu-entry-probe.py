@@ -48,7 +48,7 @@ VINFO_VA = 0xFFFFFFF00C0A2970      # _vinfo
 PANIC_CAVE_END = 0xFFFFFFF00B9D0FF0
 CAVE_SIZE = 0x60
 CAVES = {1: 0xFFFFFFF00B9D0500, 2: 0xFFFFFFF00B9D0560, 3: 0xFFFFFFF00B9D05C0, 4: 0xFFFFFFF00B9D0620,
-         5: 0xFFFFFFF00B9D0490}   # 5: the early watchdog, in the padding between the entry branch and cave 1 (0x70 bytes)
+         5: 0}   # 5: the early watchdog, placed by early_wdog_cave()
 TIMEBASE = 19200000
 
 PAINT = """
@@ -121,12 +121,53 @@ _start:
 }
 
 # fajita: stage 5 (FAJITA_EARLY_WDOG=1), chained after stage 1 with the MMU still off: the unattended-run backstop from the kernel
-# entry on, for hangs before ArmCpu arms it (fajita-wdog=3, which reprograms and pets it). Restart reason bootloader (IMEM
-# 0x146bf65c = 0x77665500, the cookie the ABL reads), then the APSS watchdog (0x17980000) with bark 16 s and bite 32 s, counting
-# without its interrupt. x0 (the boot arguments) is preserved.
+# entry on, for hangs before ArmCpu takes it over (fajita-wdog=3 reprograms and pets it). First what ArmCpu's scmDisableCrashdump
+# does, so a bite lands in fastboot and not in Qualcomm CrashDump Mode: SCM SDI off (0xC2000109), download mode off (0xC2000110),
+# and if TCSR_BOOT_MISC_DETECT (0x01FD3000, secure read 0xC2000501) still has bit 0x10, the secure write (0xC2000502). Then the
+# restart reason bootloader (IMEM 0x146bf65c = 0x77665500, the cookie the ABL reads) and the APSS watchdog (0x17980000) with bark
+# 16 s and bite 32 s, counting without its interrupt. x0 (the boot arguments) is kept in x28 across the SMCs.
 EARLY_WDOG = """.text
 .global _start
 _start:
+  mov x28, x0
+  movz x0, #0x0109
+  movk x0, #0xc200, lsl #16
+  mov x1, #2
+  mov x2, #1
+  mov x3, xzr
+  mov x4, xzr
+  mov x5, xzr
+  smc #0
+  movz x0, #0x0110
+  movk x0, #0xc200, lsl #16
+  mov x1, #2
+  mov x2, xzr
+  mov x3, xzr
+  mov x4, xzr
+  mov x5, xzr
+  smc #0
+  movz x0, #0x0501
+  movk x0, #0xc200, lsl #16
+  mov x1, #1
+  movz x2, #0x3000
+  movk x2, #0x01fd, lsl #16
+  mov x3, xzr
+  mov x4, xzr
+  mov x5, xzr
+  smc #0
+  cbnz x0, 1f
+  tbz x1, #4, 1f
+  bic x3, x1, #0x10
+  movz x0, #0x0502
+  movk x0, #0xc200, lsl #16
+  mov x1, #2
+  movz x2, #0x3000
+  movk x2, #0x01fd, lsl #16
+  mov x4, xzr
+  mov x5, xzr
+  smc #0
+1:
+  mov x0, x28
   movz x9, #0xf65c
   movk x9, #0x146b, lsl #16
   movz w10, #0x5500
@@ -147,6 +188,20 @@ _start:
   b target
 """
 
+
+def early_wdog_cave(data, size):
+    """The first 0x100-aligned run of zero padding of `size` bytes after the panic screen's padding, within 16 KiB."""
+    va = (PANIC_CAVE_END + 0xff) & ~0xff
+    while va + size <= PANIC_CAVE_END + 0x4000:
+        try:
+            if not any(data[file_offset(va):file_offset(va) + size]) and not any(data[file_offset(va) - 4:file_offset(va)]):
+                return va
+        except SystemExit:
+            break
+        va += 0x100
+    raise SystemExit('No zero padding for the early watchdog after the panic screen padding')
+
+
 RESET_BEFORE = """.text
 .global _start
 _start:
@@ -166,6 +221,9 @@ def kernel_symbols(kernel):
     """Address -> name for the kernel's symbols, from llvm-nm."""
     nm = shutil.which('llvm-nm') or '/opt/homebrew/opt/llvm/bin/llvm-nm'
     table = {}
+    # fajita: FAJITA_SYMBOL_KERNEL names the unstripped XNU image of this kernel (same addresses) when the prelinked one has lost
+    # its function symbols (the 20H392 prelink keeps data symbols only).
+    kernel = os.environ.get('FAJITA_SYMBOL_KERNEL') or kernel
     for line in subprocess.run([nm, '-n', kernel], capture_output=True, text=True, check=True).stdout.splitlines():
         parts = line.split()
         if len(parts) == 3:
@@ -418,18 +476,26 @@ def main():
     for va, value in expected.items():
         if word(va) != value:
             raise SystemExit(f'{va:#x} holds {word(va):#010x}, expected {value:#010x}: not the kernel these probes are for')
-    for va in CAVES.values():
-        if any(data[file_offset(va):file_offset(va) + CAVE_SIZE]):
+    for stage, va in CAVES.items():
+        if stage != 5 and any(data[file_offset(va):file_offset(va) + CAVE_SIZE]):
             raise SystemExit(f'Padding at {va:#x} is not empty')
 
     early_wdog = os.environ.get('FAJITA_EARLY_WDOG') == '1'
     # fajita: FAJITA_MMU_PROBE=<seconds> places stage 3 (the timed reset right after the MMU enable) even under --no-reset, to ask
     # whether a kernel that stops after the magenta bar got through the MMU enable (reset after <seconds>) or not (watchdog, 32 s).
     mmu_probe = int(os.environ.get('FAJITA_MMU_PROBE', '0'))
+    # fajita: FAJITA_RESET_AFTER=<symbol>[:<function>] places stage 4 (reset after that call) even under --no-reset, for bisecting.
+    reset_after = os.environ.get('FAJITA_RESET_AFTER')
+    if reset_after:
+        symbol, _, function = reset_after.partition(':')
+        args.no_reset, args.reset_after, args.panic_screen = False, symbol, False
+        args.function = function or args.function
     if mmu_probe:
         # The panic screen does not fit the padding after cave 3; a probe run asks only about the MMU enable.
         args.no_reset, args.reset_after, args.reset_delay, args.panic_screen = False, None, mmu_probe, False
     # (site, cave stage, symbols the cave is linked with)
+    if early_wdog:
+        CAVES[5] = early_wdog_cave(data, 0x200)
     sites = [(ENTRY_VA, 1, {'target': CAVES[5] if early_wdog else START_FIRST_CPU}),
              (MMU_ENABLE_VA, 2, {'target': MMU_ENABLE_VA + 4})]
     if args.no_reset:
@@ -451,11 +517,10 @@ def main():
                 raise SystemExit(f'Stage {stage} code is too large')
             data[file_offset(CAVES[stage]):file_offset(CAVES[stage]) + len(code)] = code
     if early_wdog:
-        if any(data[file_offset(CAVES[5]):file_offset(CAVES[1])]):
-            raise SystemExit(f'Padding at {CAVES[5]:#x} is not empty')
+
         with tempfile.TemporaryDirectory() as tmp:
             code = assemble(EARLY_WDOG, CAVES[5], {'target': START_FIRST_CPU}, Path(tmp))
-        if CAVES[5] + len(code) > CAVES[1]:
+        if len(code) > 0x200:
             raise SystemExit('Early watchdog code is too large')
         data[file_offset(CAVES[5]):file_offset(CAVES[5]) + len(code)] = code
         description += ', early watchdog from the kernel entry'
