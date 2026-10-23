@@ -36,7 +36,7 @@ IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         if(report->output_bits>40)report->output_bits=40;
         if(!report->output_bits)status=kIOReturnUnsupported;
     }
-    if(!status)status=gmu_.allocate(NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
+    if(!status)status=gmu_.allocate(sizes_?*sizes_:NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
     if(!status) {
         step(Prepare);
         status=smmu_.prepare(&gmu_.tables(),0,0,GmuApertureBytes,NativeAdrenoSmmuContext::MaxLeaves,
@@ -89,6 +89,17 @@ IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
 }
 /* Lives for the rest of the boot: the context bank points at its tables. */
 static NativeAdrenoGmuContext *board_context;
+static NativeAdrenoGmuSizes board_sizes;
+static bool board_sizes_set;
+/* The payload sizes of another GMU than the A740's (the A630: no icache to speak of, 4 KiB dummy, 16 KiB debug, log and HFI),
+ * before the bring-up; the table pool size is the context's own. */
+extern "C" IOReturn NativeAdrenoGmuContextSetSizes(uint64_t icache,uint64_t dummy,uint64_t debug,uint64_t log,uint64_t hfi)
+{
+    if(board_context)return kIOReturnBusy;
+    board_sizes={icache,dummy,debug,log,hfi,NativeAdrenoGmuContext::TablePages*0x1000};
+    board_sizes_set=true;
+    return kIOReturnSuccess;
+}
 extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t bytes,
     unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report)
@@ -101,6 +112,7 @@ extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t 
     if(ArmSmmu4KBindMmio(&mmio,&io)!=ArmSmmu4KSuccess)return kIOReturnBadArgument;
     context=new NativeAdrenoGmuContext;
     if(!context)return kIOReturnNoMemory;
+    if(board_sizes_set)context->setSizes(&board_sizes);
     return context->bringUp(&io,bank,asid,slot,uint16_t(sid),progress,report);
 }
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5])

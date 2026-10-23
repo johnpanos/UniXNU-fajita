@@ -6,16 +6,29 @@
 extern "C" volatile uint32_t native_adreno_pool_mib;
 extern "C" volatile uint32_t native_adreno_pool_stats[8],native_adreno_pool_status;
 extern "C" volatile uint32_t native_adreno_wc_enabled,native_adreno_pool_wc;
-static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova};
-static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes};
+/* The A740 layout (below its 16 MiB GMEM window) unless the board sets its own before the bring-up: the A630's GMEM window is
+ * [1 MiB, 2 MiB), which the A740 addresses fall into (fajita, NativeAdrenoGpuContextSetLayout). */
+static uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova};
+static size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes};
+extern "C" IOReturn NativeAdrenoGpuContextSetLayout(const uint64_t iovas[GpuBufferCount],const size_t bytes[GpuBufferCount])
+{
+    if(!iovas || !bytes)return kIOReturnBadArgument;
+    for(unsigned i=0;i<GpuBufferCount;++i) {
+        if(!bytes[i] || (bytes[i]&0xfff) || (iovas[i]&0xfff) || iovas[i]+bytes[i]>GpuApertureBytes)return kIOReturnBadArgument;
+        kIovas[i]=iovas[i];kBytes[i]=bytes[i];
+    }
+    return kIOReturnSuccess;
+}
 IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
     const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
 {
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
-    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
-        slots[0]==slots[1])return kIOReturnBadArgument;
+    /* slots[1] == ~0u: one stream only (the SDM845 GPU: iommus = <&adreno_smmu 0>). */
+    const size_t routeCount=slots && slots[1]==~0u?1:2;
+    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || (routeCount==2 && (slots[1]>127 ||
+        slots[0]==slots[1])))return kIOReturnBadArgument;
     used_=true;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -60,7 +73,7 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!status) {
         step(Attach);
         const ArmSmmu4KStream routes[2]={{slots[0],sids[0]},{slots[1],sids[1]}};
-        status=smmu_.attach(routes,2);
+        status=smmu_.attach(routes,routeCount);
         const ArmSmmu4KStreamResult *s=smmu_.streamResult();
         report->route_status=smmu_.attachStatus();
         report->route_phase=s->phase;report->route_writes=s->writes;report->routes_verified=s->streams_verified;
@@ -93,12 +106,12 @@ extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t 
 {
     static ArmSmmu4KMmio mmio;
     static ArmSmmu4KIo io;
-    if(!report || board_gpu_context || !smmu || !bytes || sid0>0xffff || sid1>0xffff)return kIOReturnBadArgument;
+    if(!report || board_gpu_context || !smmu || !bytes || sid0>0xffff || (slot1!=~0u && sid1>0xffff))return kIOReturnBadArgument;
     mmio={reinterpret_cast<volatile unsigned char *>(smmu),bytes};
     if(ArmSmmu4KBindMmio(&mmio,&io)!=ArmSmmu4KSuccess)return kIOReturnBadArgument;
     board_gpu_context=new NativeAdrenoGpuContext;
     if(!board_gpu_context)return kIOReturnNoMemory;
-    const unsigned slots[2]={slot0,slot1};
+    const unsigned slots[2]={slot0,slot1};   /* slot1 ~0u: one stream */
     const uint16_t sids[2]={uint16_t(sid0),uint16_t(sid1)};
     return board_gpu_context->bringUp(&io,bank,asid,slots,sids,progress,report);
 }

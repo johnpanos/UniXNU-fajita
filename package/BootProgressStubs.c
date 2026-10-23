@@ -132,6 +132,7 @@ __attribute__((weak)) char native_touch_count[4096] __attribute__((aligned(16)))
 __attribute__((weak)) char native_touch_edge_stats[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_touch_extent[4096] __attribute__((aligned(16)));
 __attribute__((weak)) void native_touch_probe(void) {   }
+__attribute__((weak)) void fajita_gpu_probe(void) {   }
 __attribute__((weak)) char native_touch_rows[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_touch_seq[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_touch_stage_req[4096] __attribute__((aligned(16)));

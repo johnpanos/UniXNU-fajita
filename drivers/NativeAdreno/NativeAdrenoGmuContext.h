@@ -32,7 +32,9 @@ class NativeAdrenoGmuContext final {
     NativeAdrenoSmmuContext smmu_;
     NativeAdrenoVm vm_;
     bool ready_=false,used_=false;
+    const NativeAdrenoGmuSizes *sizes_=nullptr;
 public:
+    void setSizes(const NativeAdrenoGmuSizes *sizes) {sizes_=sizes;}
     /* Allocate also reads ID2 first and refuses an output size the kit cannot encode. */
     enum Step : uint32_t {Allocate=1,Prepare,Program,Attach,VmAttach,Map,Ready};
     /* Lower region: 1 L1 + 2 L2 + 1024 L3 pages for 2 GiB with a 32-bit input. */
@@ -58,4 +60,6 @@ extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t 
  * the GMU buffers without IOMMU_CACHE; the caller gives the CPU a matching non-cacheable view. */
 struct NativeAdrenoGmuPayload {uint64_t physical,bytes,iova;};
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]);
+/* Payload sizes for a GMU other than the A740's, before NativeAdrenoGmuContextBringup. */
+extern "C" IOReturn NativeAdrenoGmuContextSetSizes(uint64_t icache,uint64_t dummy,uint64_t debug,uint64_t log,uint64_t hfi);
 #endif

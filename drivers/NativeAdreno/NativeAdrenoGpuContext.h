@@ -43,6 +43,8 @@ public:
 extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
     unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report);
+/* Board layout of the five kernel buffers (GPU address, bytes; page aligned, inside the aperture), before the bring-up. */
+extern "C" IOReturn NativeAdrenoGpuContextSetLayout(const uint64_t iovas[GpuBufferCount],const size_t bytes[GpuBufferCount]);
 /* sqe, ring, memptrs, pwrup, scratch: physical base, size and GPU address, only after Ready. */
 extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]);
 /* The live VM of the ready GPU context (null before Ready), for the user-client core. */
