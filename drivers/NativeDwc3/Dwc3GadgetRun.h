@@ -296,10 +296,14 @@ inline void Gadget::ep0StartTx(const uint8_t *data, uint16_t len)
 
 inline void Gadget::ep0StartRx(uint16_t len)
 {
+  // An OUT TRB must be a multiple of the max packet (64 on ep0): Linux bounces such data stages through an aligned
+  // buffer (__dwc3_ep0_do_control_data). The 7-byte SET_LINE_CODING the host sends on every tty open lands in the
+  // first bytes of the 512-byte ep0 staging area; the rest is unused.
+  uint32_t rounded = (uint32_t(len) + 63u) & ~63u;
   Trb *t = dma.trb(GadgetDma::kEp0Trb);
   t->bpl = uint32_t(dma.pa(GadgetDma::kEp0Data));
   t->bph = uint32_t(dma.pa(GadgetDma::kEp0Data) >> 32);
-  t->size = len;
+  t->size = rounded;
   t->ctrl = kDwc3TrbCtlControlData | kDwc3TrbHwo | kDwc3TrbIspImi | kDwc3TrbIoc | kDwc3TrbLst;
   cache_flush(t, sizeof *t);
   phase = kWaitDataOut;
