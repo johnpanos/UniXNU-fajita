@@ -22,6 +22,7 @@ extern "C" void native_legacy_swap_stage(unsigned);
 extern "C" void native_legacy_client_enter(task_t,uint32_t);
 extern "C" void native_legacy_client_observed(IOReturn,IOUserClient *);
 extern "C" void native_legacy_pm_observed(unsigned,IOReturn,unsigned long);
+extern "C" void native_legacy_stop_observed(unsigned reason,unsigned detail,void *caller);
 extern "C" IOMemoryDescriptor *native_legacy_surface_descriptor(OSObject *);
 extern "C" uint64_t native_legacy_surface_width(OSObject *),native_legacy_surface_height(OSObject *);
 extern "C" uint64_t native_legacy_surface_stride(OSObject *),native_legacy_surface_allocation(OSObject *);
@@ -221,11 +222,21 @@ public:
     void free() override {releaseScale();fajita_display_logical.valid=0;
         if(shadow){IOFreeAligned(shadow,(vm_size_t)shadowBytes);shadow=nullptr;shadowBytes=0;}
         stopVsync();if(logicalPM){PMstop();logicalPM=false;}primary=false;OSSafeReleaseNULL(bootMapping);IOMobileFramebufferLegacy::free();}
+    // The original start publishes NATIVE_LEGACY_DEBUG_INFO_KEY, an OSSerializer whose callback runs the debug-info slot
+    // (NATIVE_LEGACY_DEBUG_INFO_SLOT: 289 on 20H392, 303 on 21H461) through the command gate at NATIVE_LEGACY_COMMAND_GATE, which the
+    // original init creates. The original stop releases and clears that gate but leaves the property, so the next serialization of the
+    // stopped object faulted on the cleared gate (20H392: pc IOMobileGraphicsFamily+0x2a60c, the boot log's property dump of a display
+    // stopped at start). The property goes before every original stop. reason/detail: native_legacy_stop_observed (LegacyDisplayProbe).
+    void stopOriginal(IOService *provider,unsigned reason,unsigned detail,void *caller) {
+        removeProperty(NATIVE_LEGACY_DEBUG_INFO_KEY);
+        IOMobileFramebufferLegacy::stop(provider);
+        native_legacy_stop_observed(reason,detail,caller);
+    }
     void stop(IOService *provider) override {
         stopVsync();
         transferred=false;for(auto &entry: validated)entry=nullptr;gpuRequest=nullptr;
         if(logicalPM){PMstop();logicalPM=false;}
-        primary=false;IOMobileFramebufferLegacy::stop(provider);OSSafeReleaseNULL(bootMapping);
+        primary=false;stopOriginal(provider,1,0,__builtin_return_address(0));OSSafeReleaseNULL(bootMapping);
     }
     // The panel is already lit by the firmware's GOP framebuffer, which is the one thing the original code's power-state word (display+5840
     // on 21H461, the "powered" half of the state pair next to +5836) is meant to say; the platform subclass that normally writes it is not part
@@ -249,7 +260,8 @@ public:
         if(!enabled)return true;
         unsigned phase=0;PE_parse_boot_argn("offline-legacy-phase",&phase,sizeof(phase));
         if(enabled!=1 || phase!=4 || !provider || !bootMapping || !primary) {
-            native_legacy_pm_observed(1,kIOReturnNotReady,0);IOMobileFramebufferLegacy::stop(provider);return false;
+            const unsigned refused=(enabled!=1)|(phase!=4)<<1|(!provider)<<2|(!bootMapping)<<3|(!primary)<<4;
+            native_legacy_pm_observed(1,kIOReturnNotReady,0);stopOriginal(provider,2,refused,__builtin_return_address(0));return false;
         }
         // Actual IOKit PM lifecycle for logical scanout scheduling only. GOP
         // provides no panel power switch: neither state advertises physical
@@ -258,11 +270,11 @@ public:
         states[0].version=states[1].version=1;
         states[1].capabilityFlags=kIOPMDeviceUsable;
         PMinit();logicalPM=initialized;
-        if(!logicalPM){native_legacy_pm_observed(1,kIOReturnNotReady,0);IOMobileFramebufferLegacy::stop(provider);return false;}
+        if(!logicalPM){native_legacy_pm_observed(1,kIOReturnNotReady,0);stopOriginal(provider,3,0,__builtin_return_address(0));return false;}
         provider->joinPMtree(this);
         IOReturn status=registerPowerDriver(this,states,2);native_legacy_pm_observed(1,status,0);
         if(status==kIOReturnSuccess){status=changePowerStateToPriv(1);native_legacy_pm_observed(2,status,1);}
-        if(status!=kIOReturnSuccess){PMstop();logicalPM=false;IOMobileFramebufferLegacy::stop(provider);return false;}
+        if(status!=kIOReturnSuccess){PMstop();logicalPM=false;stopOriginal(provider,4,(unsigned)status,__builtin_return_address(0));return false;}
         return true;
     }
     IOReturn setPowerState(unsigned long ordinal,IOService *device) override {

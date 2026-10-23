@@ -118,6 +118,17 @@ bool native_legacy_prepare_scanout(void) {
 __attribute__((noinline)) void native_legacy_display_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 __attribute__((noinline)) void native_legacy_gop_mapping_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 __attribute__((noinline)) void native_legacy_client_checkpoint(void) {__asm__ volatile("" ::: "memory");}
+// Every original stop of the display (NativeLegacyDisplay::stopOriginal): 1 its stop() override (IOKit termination or the failure
+// path below), 2 the start refusing the GOP scanout (detail: 1 offline-legacy-pm, 2 phase, 4 provider, 8 mapping, 16 not the primary
+// console), 3 PMinit failed, 4 the power driver registration or first change failed (detail: the IOReturn). A published display
+// (stage 10) that is stopped shows stage 11.
+volatile uint32_t native_legacy_stop_calls,native_legacy_stop_reason,native_legacy_stop_detail;
+volatile uint64_t native_legacy_stop_caller;
+void native_legacy_stop_observed(unsigned reason,unsigned detail,void *caller) {
+    native_legacy_stop_reason=reason;native_legacy_stop_detail=detail;native_legacy_stop_caller=(uintptr_t)caller;
+    native_legacy_stop_calls=native_legacy_stop_calls+1;
+    if(native_legacy_stage==10)native_legacy_stage=11;
+}
 void native_legacy_pm_observed(unsigned stage,IOReturn status,unsigned long ordinal) {
     native_legacy_pm_stage=stage;native_legacy_pm_status=status;native_legacy_pm_ordinal=(uint32_t)ordinal;
     native_legacy_pm_calls=native_legacy_pm_calls+1;
@@ -270,6 +281,13 @@ __attribute__((noinline)) void native_legacy_retirement_observed(IOService *disp
     native_legacy_retired_generation=completed;native_legacy_presented_generation=presented;native_legacy_retired_frames=frames;
     native_legacy_retirement_calls=native_legacy_retirement_calls+1;
 }
+// The original "IOMFB Debug Info" property (NATIVE_LEGACY_DEBUG_INFO_KEY) serializes through the command gate, which the original stop
+// releases and clears: serializing a display without its gate faults (20H392: ldr x8, [x0] at IOMobileGraphicsFamily+0x2a60c, x0
+// the cleared gate). NativeLegacyDisplay removes the property before every original stop; this is the probe's own guard.
+static bool hasCommandGate(const IOService *display) {
+    const void *gate=nullptr;memcpy(&gate,reinterpret_cast<const unsigned char *>(display)+NATIVE_LEGACY_COMMAND_GATE,sizeof(gate));
+    return gate;
+}
 // The display object's properties as they are now (the registration copy above predates setDisplayRefreshProperties and the rest): for the
 // UFS log. Returns the bytes written (NUL-terminated).
 extern "C" unsigned native_legacy_properties_now(char *out,unsigned cap) {
@@ -277,6 +295,11 @@ extern "C" unsigned native_legacy_properties_now(char *out,unsigned cap) {
     out[0]=0;
     IOService *display=reinterpret_cast<IOService *>(native_legacy_object);
     if(!display)return 0;
+    if(!hasCommandGate(display)) {
+        int n=snprintf(out,cap,"(stopped display, not serialized: stop reason %u detail %#x caller %llx)",native_legacy_stop_reason,
+            native_legacy_stop_detail,(unsigned long long)native_legacy_stop_caller);
+        return n<0?0:(unsigned)n>=cap?cap-1:(unsigned)n;
+    }
     OSSerialize *xml=OSSerialize::withCapacity(8192);
     unsigned size=0;
     if(xml && display->serializeProperties(xml)) {
@@ -288,6 +311,7 @@ extern "C" unsigned native_legacy_properties_now(char *out,unsigned cap) {
 }
 void native_legacy_registration_observed(IOService *display) {
     native_legacy_registration_calls=native_legacy_registration_calls+1;
+    if(!hasCommandGate(display))return;
     OSSerialize *xml=OSSerialize::withCapacity(2048);
     if(xml && display->serializeProperties(xml)) {
         unsigned size=xml->getLength();if(size>=sizeof(native_legacy_properties))size=sizeof(native_legacy_properties)-1;
@@ -479,7 +503,8 @@ void native_legacy_display_probe(void) {
         // Retain this actual object until that normal lifecycle boundary.
         pendingLegacyDisplay=display;return;
     }
-    native_legacy_stage=7;display->release();native_legacy_released=1;native_legacy_stage=8;
+    // The boot log serializes and dumps native_legacy_object every round: never leave it naming a display this probe released.
+    native_legacy_stage=7;native_legacy_object=0;display->release();native_legacy_released=1;native_legacy_stage=8;
     native_legacy_display_checkpoint();
 }
 void native_legacy_display_late_probe(void);
@@ -567,7 +592,8 @@ void native_legacy_display_late_probe(void) {
         OSSafeReleaseNULL(ranges);OSSafeReleaseNULL(memory);OSSafeReleaseNULL(nub);
         OSSafeReleaseNULL(displayTreeParent);
     }
-    native_legacy_stage=7;display->release();native_legacy_released=1;native_legacy_stage=8;
+    // The boot log serializes and dumps native_legacy_object every round: never leave it naming a display this probe released.
+    native_legacy_stage=7;native_legacy_object=0;display->release();native_legacy_released=1;native_legacy_stage=8;
     native_legacy_display_checkpoint();
 }
 }
