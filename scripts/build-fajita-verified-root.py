@@ -13,6 +13,7 @@ over the cached table, then check the signature and the cached samples with the 
 the IPSW cache (fetch "OS" and "Cryptex1,SystemOS" first); UDIF images
 are expanded from their block table, as the userdata step does, so no image is attached or written out.
 """
+import argparse
 import ctypes
 import hashlib
 import importlib.util
@@ -194,7 +195,21 @@ def host_verifier(host):
     return library
 
 
+def parse_arguments():
+    # The board's builder line may name another IPSW build and its two images (the iOS 16 board: ios16/board.toml).
+    global IPSW, IMAGES
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--ipsw-build', default='21H461', help='the IPSW build whose members are read (ipsw/<build>)')
+    parser.add_argument('--image', action='append', default=[],
+                        help='component:member:volume UUID:expanded sha256:4096-byte blocks, in place of the 21H461 pair')
+    args = parser.parse_args()
+    IPSW = ROOT.parents[1] / 'ipsw' / args.ipsw_build
+    if args.image:
+        IMAGES = [(c, m, u, h, int(b)) for c, m, u, h, b in (image.split(':') for image in args.image)]
+
+
 def main():
+    parse_arguments()
     host = ROOT / 'build/verified-root-host'
     library = host_verifier(host)
     spec = importlib.util.spec_from_file_location('verified_manifest', ROOT / 'kits/VerifiedRoot/tools/manifest.py')

@@ -8,6 +8,7 @@ on:
   push:
     paths:
       - data-seed.json
+      - ios16/data-seed.json
       - scripts/make-data-seed-macos.py
       - .github/workflows/data-seed.yml
 
@@ -17,6 +18,11 @@ permissions:
 jobs:
   seed:
     runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - { spec: data-seed.json, artifact: data-seed }              # iPadOS 17.7.11 (21H461)
+          - { spec: ios16/data-seed.json, artifact: data-seed-ios16 }  # iOS 16.7.16 (20H392)
     steps:
       - uses: actions/checkout@v4
       - name: Fetch the DBRDISK1 packer from UniXNU
@@ -26,10 +32,10 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/UniXNU/DarwinBoot/d099354/Test/packed_ramdisk.py -o tools/packed_ramdisk.py
           head -3 tools/packed_ramdisk.py
       - name: Build the seed
-        run: python3 scripts/make-data-seed-macos.py --packer tools/packed_ramdisk.py --out out
+        run: python3 scripts/make-data-seed-macos.py --packer tools/packed_ramdisk.py --spec ${{ matrix.spec }} --out out
       - uses: actions/upload-artifact@v4
         with:
-          name: data-seed
+          name: ${{ matrix.artifact }}
           path: |
             out/data-macos.dbr
             out/data-macos.json

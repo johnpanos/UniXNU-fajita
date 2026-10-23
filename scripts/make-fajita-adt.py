@@ -33,6 +33,17 @@ GIC_REDIST_STRIDE = 0x20000
 TIMEBASE = 19200000
 
 
+# The devices the tree can describe (MobileGestalt reads the root model and target-type and the /product artwork traits).
+# ipad7,1: the unchanged iPad7,1 tree (iPadOS 17.7.11 board). iphone10,6: the iPhone X (D221AP) of the iOS 16.7.16 board,
+# 1125x2436 at scale 3.
+IDENTITIES = {
+    'ipad7,1': {'model': b'iPad7,1\0', 'target-type': b'J120\0', 'product-name': b'iPad Pro (12.9-inch) (2nd generation)\0',
+                'idiom': b'pad\0', 'subtype': 2732, 'scale': 2, 'fallback': b'iPad6,7\0'},
+    'iphone10,6': {'model': b'iPhone10,6\0', 'target-type': b'D221\0', 'product-name': b'iPhone X\0',
+                   'idiom': b'phone\0', 'subtype': 2436, 'scale': 3, 'fallback': b'iPhone10,3\0'},
+}
+
+
 def node(name, properties=(), children=()):
     properties = [('name', name.encode() + b'\0'), *properties]
     result = struct.pack('<II', len(properties), len(children))
@@ -80,6 +91,8 @@ def main():
     parser.add_argument('--ipad-identity', action='store_true',
                         help='/product and /buttons describe an iPad-class device without a Home button (MobileGestalt reads these from the tree); '
                              'values follow the unchanged iPad7,1 tree')
+    parser.add_argument('--identity', choices=sorted(IDENTITIES), default=None,
+                        help='the device the tree describes; ipad7,1 is --ipad-identity, iphone10,6 the iPhone X of the iOS 16 board')
     parser.add_argument('--cpu-regs', default='0',
                         help='Comma-separated CPU MPIDR affinity values (the /cpus reg of each core); the first is the running boot CPU. '
                              'SDM845 numbers its cores 0x000..0x700 in Affinity1 (sdm845.dtsi). More than one adds /psci')
@@ -95,6 +108,9 @@ def main():
     parser.add_argument('--text-fixup', action='append', default=[],
                         help='/chosen/text-fixups entry <file name>,<file offset>,<original>,<replacement> for the kernel\'s signed-text fixups')
     args = parser.parse_args()
+    if args.ipad_identity:
+        args.identity = args.identity or 'ipad7,1'
+    identity = IDENTITIES.get(args.identity)
     if (args.unique_chip_id is None) != (args.chip_id is None):
         parser.error('--unique-chip-id and --chip-id must be supplied together')
     if args.unique_chip_id is not None and not (0 < args.unique_chip_id < 1 << 64 and 0 < args.chip_id < 1 << 32):
@@ -119,8 +135,8 @@ def main():
     tree = node('device-tree', [
         # hw.product/hw.machine/hw.target come from the root 'model'/'target-type' (IODTPlatformExpert);
         # libMobileGestalt prefix-matches hw.product against iPhone/iPod/iPad, so the iPad identity needs both here.
-        ('model', b'iPad7,1\0' if args.ipad_identity else b'fajita-first-boot\0'),
-        *([('target-type', b'J120\0')] if args.ipad_identity else []),
+        ('model', identity['model'] if identity else b'fajita-first-boot\0'),
+        *([('target-type', identity['target-type'])] if identity else []),
         # Root compatible strings of sdm845-oneplus-fajita.dts.
         ('compatible', b'oneplus,fajita\0qcom,sdm845\0'),
         ('#address-cells', struct.pack('<I', 2)),
@@ -139,7 +155,7 @@ def main():
                         # baseband). Values established on hardware by github.com/dipa-studio/ios-sweet (tools/mkadt.py).
                         *([('certificate-production-status', struct.pack('<I', 0)), ('effective-production-status-ap', struct.pack('<I', 0)),
                            ('certificate-security-mode', struct.pack('<I', 1)), ('effective-security-mode-sep', struct.pack('<I', 1))]
-                          if args.ipad_identity else []),
+                          if identity else []),
                         # This property describes the actual volatile Data RAM disk. A persistent one is not ephemeral: with the property
                         # datamigrator skips every migration (os_variant_uses_ephemeral_storage), so the staged system apps never install.
                         *([('ephemeral-storage', struct.pack('<I', 1))]
@@ -179,16 +195,16 @@ def main():
         *( [node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                              # No 'menu' entry: fajita has no Home button. 2 = the non-mechanical answer BSPlatform passes through.
                              ('button-names', b'hold\0voldown\0volup\0'),
-                             ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity else [] ),
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'OnePlus 6T\0'),
+                             ('home-button-type', struct.pack('<I', 2))])] if identity else [] ),
+        node('product', [('product-name', identity['product-name'] if identity else b'OnePlus 6T\0'),
                          ('model', b'oneplus,fajita\0'),
-                         *( [('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
-                             ('artwork-device-idiom', b'pad\0'),
-                             ('artwork-device-subtype', struct.pack('<I', 2732)),
-                             ('artwork-scale-factor', struct.pack('<I', 2)),
+                         *( [('product-description', identity['product-name']),
+                             ('artwork-device-idiom', identity['idiom']),
+                             ('artwork-device-subtype', struct.pack('<I', identity['subtype'])),
+                             ('artwork-scale-factor', struct.pack('<I', identity['scale'])),
                              ('artwork-display-gamut', b'P3\0'),
-                             ('compatible-device-fallback', b'iPad6,7\0'),
-                             ('thin-bezel', struct.pack('<I', 1))] if args.ipad_identity else [] )]),
+                             ('compatible-device-fallback', identity['fallback']),
+                             ('thin-bezel', struct.pack('<I', 1))] if identity else [] )]),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
