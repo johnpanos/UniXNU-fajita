@@ -148,6 +148,10 @@ static void scmDisableCrashdump (void)
 static OSSharedPtr<IOMemoryMap> gWdogMap;
 static uintptr_t gWdog = 0;
 static unsigned gWdogMode = 0;
+// wdog-irq=0 (with fajita-wdog=3): pet only from the boot progress monitor (armcpu_wdog_pet), not from every timer interrupt. A system that
+// deadlocks with its timer still running then still bites, so the unattended run recovers (iOS 16, 2026-10-23: a boot that never
+// returned in 900 s; timer-interrupt pets had kept the watchdog fed). 1 (default) = also pet from the timer interrupt.
+static bool gWdogIrqPet = true;
 // Redistributor ISENABLER0: SGIs 0..15 (only SGI 0 is used by the kernel; the others let the self-SGI probe tell which INTIDs the GIC accepts) and the timer PPI.
 #define kSgiPpiEnable (0xffffU | (1U << gTimerIntid))
 
@@ -596,6 +600,8 @@ bool ArmCpu::start (IOService *provider)
       armcpu_wdog[4] = read32 (gWdog, 0x10);
       armcpu_wdog[5] = read32 (gWdog, 0x14);
       PE_parse_boot_argn ("fajita-wdog-bark-cpu", &gBarkCpu, sizeof (gBarkCpu));
+      unsigned irqPet = 1;
+      if (PE_parse_boot_argn ("wdog-irq", &irqPet, sizeof (irqPet))) gWdogIrqPet = irqPet != 0;
       unsigned debug = 0;
       if (PE_parse_boot_argn ("fajita-cpu0-debug", &debug, sizeof (debug)) && debug) {
         // After arming: if this APB read stalls the bus, the watchdog bites.
@@ -828,7 +834,7 @@ void ArmCpu::interrupt (void)
     if ((id & 0xffffff) == gTimerIntid) {
       armcpu_timer_interrupts = armcpu_timer_interrupts + 1;
       armcpu_core_timer[logicalId & 7] = armcpu_core_timer[logicalId & 7] + 1;
-      if (gWdog && gWdogMode >= 2 && logicalId == 0) wdogPet (true);   // boot CPU only (see armcpu_wdog_pet)
+      if (gWdog && gWdogMode >= 2 && logicalId == 0 && gWdogIrqPet) wdogPet (true);   // boot CPU only (see armcpu_wdog_pet)
       if (armcpu_deadline_ticks) {
         uint64_t now;
         __asm__ volatile ("isb\n\tmrs %0, cntvct_el0" : "=r" (now));
