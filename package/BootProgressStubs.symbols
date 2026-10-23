@@ -141,3 +141,4 @@ sheng_cpufreq_poll
 native_fjdbg_agent_stage
 native_fjdbg_agent_status
 native_fjdbg_agent_write
+native_hid_button_stats
