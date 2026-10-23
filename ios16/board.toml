@@ -63,12 +63,14 @@ archives = [
   # owner keys, OS and SystemOS policies over the 20H392 images, libVerifiedRootProbe.a
   { run = "build-fajita-verified-root.py --ipsw-build 20H392 --image os:087-86698-044.dmg:DADD93F8-DBBF-4B17-A1DF-0F11E64172F7:6e87bfcaa8eca952e00b719f333d1f1060715a63566112267ad8730e1ed98906:1375753 --image systemos:087-86593-047.dmg:96096B28-B6DC-4BC7-9D3A-2632A0FE53F1:9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849:669696", when = "XNU_VERIFIED_ROOT_PROBE" },
   { run = "build-arm-driver.py NativeUfs", when = "XNU_NATIVE_UFS" },
+  { run = "build-native-spmi.py", when = "XNU_BOOT_PROGRESS" },   # libNativeSpmi.a: SPMI PMIC arbiter v5 bus (drivers/NativeSpmi); idle until called
   { run = "build-fajita-dwc3.py", when = "XNU_BOOT_PROGRESS" },   # NativeDwc3 (personality: patches/xnu/zzv-native-dwc3-personality.patch via ios16/patches; default off, native-dwc3-probe=1); BootLog reads its state words
   { run = "build-sheng-platform-power.py", when = "XNU_SHENG_PMGR" },
   { run = "build-boot-progress.py", when = "XNU_BOOT_PROGRESS" },
   { run = "build-native-legacy-display.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },   # CPU-rendered display, HID input, keystore stub
   { run = "build-fajita-touch.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },            # libFajitaTouch.a (fajita-touch=<stage>), NOTES-touch.md
   { run = "build-fajita-cpufreq.py", when = "XNU_BOOT_PROGRESS" },                  # libFajitaCpuFreq.a (fajita-cpufreq=<n>)
+  { run = "build-fajita-pmic.py", when = "XNU_BOOT_PROGRESS" },                     # libFajitaPmic.a (fajita-pmic=<stage>): charger, keys, battery
   { run = "build-fajita-gpu.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },              # libFajitaGpu.a (fajita-gpu=<stage>, Adreno 630), NOTES-gpu.md
 ]
 
@@ -173,6 +175,9 @@ board_args = [
   # Touch edge zone of NativeHidInput (thousandths of the screen): HackiOS's iPhone X zone, 16/375 at the sides, 16/812 at the top,
   # 34/812 (the home bar strip) at the bottom. A contact that begins there is marked as coming in over the edge (0x800).
   "native-touch-edge-side=43","native-touch-edge-top=20","native-touch-edge-bottom=42",
+  # PMI8998 charging (package/FajitaPmic.cpp): the pmOS qcom_smbx charger setup, fast charge 1.0 A, USB input limit 1.5 A, a status
+  # row (charger, fuel-gauge voltage/current) every 30 s, no register dump. fajita-pmic=1 on the command line makes a run read only.
+  "fajita-pmic=2","fajita-pmic-dump=0","fajita-pmic-period=30",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,
