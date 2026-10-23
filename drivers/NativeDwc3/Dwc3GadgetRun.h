@@ -26,7 +26,12 @@ namespace dwc3 {
 // Physical endpoint numbers: ep0 OUT = 0, ep0 IN = 1, bulk OUT = 4, bulk IN = 5.
 enum { kPEp0Out = 0, kPEp0In = 1, kPBulkOut = 4, kPBulkIn = 5 };
 
-enum Ep0Phase { kWaitSetup, kWaitDataIn, kWaitDataOut, kWaitStatus };
+// ep0 control-transfer phases (dwc3/ep0.c): after the SETUP (and the data stage, if any) the status stage is started
+// only when the controller reports XferNotReady(control-status), on the endpoint that event names
+// (dwc3_ep0_xfernotready -> __dwc3_ep0_do_control_status). Starting it earlier is not accepted reliably (hardware
+// usb-enum8: a0c2 = NotReady(status) with TRANSFER_ACTIVE, never completed; usb-enum11/12: ep0 wedged after some
+// SET_LINE_CODING, so tty opens blocked and bulk traffic stopped).
+enum Ep0Phase { kWaitSetup, kWaitDataIn, kWaitDataOut, kWaitStatusNrdy, kWaitStatus };
 
 // Plain-old-data so it can live in a zeroed static without a C++ guard variable
 // (the kernel forbids those). Maps and the DMA buffer are held raw for the driver's
@@ -81,7 +86,9 @@ private:
   void ep0QueueSetup();
   void ep0StartTx(const uint8_t *data, uint16_t len);
   void ep0StartRx(uint16_t len);
-  void ep0Status(bool threeStage);
+  void ep0Status(unsigned ep);
+  void onEp0NotReady(unsigned ep, unsigned status);
+  bool ep0ThreeStage;
   void onSetupComplete();
   void onEp0DataOrStatus(unsigned ep);
   void enableBulk();
@@ -310,19 +317,23 @@ inline void Gadget::ep0StartRx(uint16_t len)
   depCmd(m, kPEp0Out, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kEp0Trb) >> 32), uint32_t(dma.pa(GadgetDma::kEp0Trb)), 0);
 }
 
-inline void Gadget::ep0Status(bool threeStage)
+inline void Gadget::ep0Status(unsigned ep)
 {
-  // Status direction is opposite the data stage. For our no-data (host->device)
-  // requests, status is IN (ep0 IN). For a control-read, status is OUT (ep0 OUT).
-  unsigned ep = (pending.kind == acmep0::kTxData) ? kPEp0Out : kPEp0In;
   Trb *t = dma.trb(GadgetDma::kEp0Trb);
   t->bpl = uint32_t(dma.pa(GadgetDma::kEp0Data));
   t->bph = uint32_t(dma.pa(GadgetDma::kEp0Data) >> 32);
   t->size = 0;
-  t->ctrl = (threeStage ? kDwc3TrbCtlControlStatus3 : kDwc3TrbCtlControlStatus2) | kDwc3TrbHwo | kDwc3TrbIspImi | kDwc3TrbIoc | kDwc3TrbLst;
+  t->ctrl = (ep0ThreeStage ? kDwc3TrbCtlControlStatus3 : kDwc3TrbCtlControlStatus2) | kDwc3TrbHwo | kDwc3TrbIspImi |
+            kDwc3TrbIoc | kDwc3TrbLst;
   cache_flush(t, sizeof *t);
   phase = kWaitStatus;
   depCmd(m, ep, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kEp0Trb) >> 32), uint32_t(dma.pa(GadgetDma::kEp0Trb)), 0);
+}
+
+// XferNotReady on ep0 OUT/IN: the host is ready for the stage named in the event's status (1 data, 2 status).
+inline void Gadget::onEp0NotReady(unsigned ep, unsigned status)
+{
+  if ((status & 3) == 2 && phase == kWaitStatusNrdy) ep0Status(ep);
 }
 
 inline void Gadget::onSetupComplete()
@@ -344,10 +355,12 @@ inline void Gadget::onSetupComplete()
     ep0QueueSetup();
     break;
   case acmep0::kTxData:
-    if (pending.len) ep0StartTx(pending.buf, pending.len); else ep0Status(false);
+    ep0ThreeStage = pending.len != 0;
+    if (pending.len) ep0StartTx(pending.buf, pending.len); else phase = kWaitStatusNrdy;
     break;
   case acmep0::kRxData:
-    if (pending.len) ep0StartRx(pending.len); else ep0Status(false);
+    ep0ThreeStage = pending.len != 0;
+    if (pending.len) ep0StartRx(pending.len); else phase = kWaitStatusNrdy;
     break;
   case acmep0::kSetAddressAck: {
     // dwc3_ep0_set_address: program DCFG.DEVADDR while handling the SETUP; the controller switches to it when the
@@ -358,12 +371,14 @@ inline void Gadget::onSetupComplete()
     dcfg |= uint32_t(pending.value & 0x7f) << 3;
     m.core_wr(kDwc3DCFG, dcfg);
     native_dwc3_addr = pending.value;
-    ep0Status(false);
+    ep0ThreeStage = false;
+    phase = kWaitStatusNrdy;
     break;
   }
   case acmep0::kStatusOnly:
   case acmep0::kSetConfigAck:
-    ep0Status(false);
+    ep0ThreeStage = false;
+    phase = kWaitStatusNrdy;
     break;
   }
 }
@@ -372,7 +387,7 @@ inline void Gadget::onEp0DataOrStatus(unsigned ep)
 {
   (void)ep;
   if (phase == kWaitDataIn || phase == kWaitDataOut) {
-    ep0Status(true);                       // data stage done -> status stage
+    phase = kWaitStatusNrdy;               // data stage done; the status stage starts on XferNotReady(status)
     return;
   }
   if (phase == kWaitStatus) {              // status done -> apply post-action, next setup
@@ -556,7 +571,9 @@ inline void Gadget::poll()
       }
     } else {
       unsigned ep = dwc3DepEvtEp(e), etype = dwc3DepEvtType(e);
-      if (etype == kDwc3DepEvtXferComplete || etype == kDwc3DepEvtXferInProgress) {
+      if (etype == kDwc3DepEvtXferNotReady && (ep == kPEp0Out || ep == kPEp0In)) {
+        onEp0NotReady(ep, dwc3DepEvtStatus(e));
+      } else if (etype == kDwc3DepEvtXferComplete || etype == kDwc3DepEvtXferInProgress) {
         if (ep == kPEp0Out && phase == kWaitSetup) onSetupComplete();
         else if (ep == kPEp0Out || ep == kPEp0In) onEp0DataOrStatus(ep);
         else if (ep == kPBulkOut) {
