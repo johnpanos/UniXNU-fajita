@@ -187,9 +187,28 @@ static void fjdbgCreateNode()
 // The polled service thread: drains the DWC3 event buffer, mirrors the kernel log to
 // the host and moves queued frames to the bulk-IN endpoint. Only this thread touches
 // the controller. Once the root (and with it devfs) is mounted it creates /dev/fjdbg.
+#ifndef MAXPRI_KERNEL
+#define MAXPRI_KERNEL 95   // osfmk/kern/sched.h: BASEPRI_REALTIME - 1, the highest non-realtime kernel priority
+#endif
+extern "C" {
+struct processor;
+struct processor *cpu_to_processor(int cpu);
+struct processor *thread_bind(struct processor *processor);
+// osfmk/kern/thread.h (behind MACH_KERNEL_PRIVATE in this TU's view; the kernel exports it)
+kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void *parameter, integer_t priority,
+    thread_t *new_thread);
+}
+
 static void dwc3GadgetThread(void *, wait_result_t)
 {
   thread_set_thread_name(current_thread(), "native_dwc3");
+  // ep0 has tight host timeouts and Linux services it from the interrupt; this thread runs at MAXPRI_KERNEL and is
+  // bound to CPU 1 (a little core: pcpu=0xf0 crowds the Gold cores, CPU 0 carries the monitor and watchdog pets), so
+  // a busy userland boot cannot starve it. A bound thread runs even on a CPU that is not recommended.
+  if (struct processor *cpu1 = cpu_to_processor(1)) {
+    thread_bind(cpu1);
+    thread_block(THREAD_CONTINUE_NULL);
+  }
   for (;;) {
     if (gGadget) {
       gGadget->poll();
@@ -280,7 +299,7 @@ void NativeDwc3::startGadget()
   }
   gGadget->bringUp(gGadgetMode);
   thread_t t;
-  if (kernel_thread_start(dwc3GadgetThread, nullptr, &t) == KERN_SUCCESS) {
+  if (kernel_thread_start_priority(dwc3GadgetThread, nullptr, MAXPRI_KERNEL, &t) == KERN_SUCCESS) {
     thread_deallocate(t);
   }
 }
