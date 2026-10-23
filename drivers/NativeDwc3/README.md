@@ -31,6 +31,29 @@ Register offsets and field positions in `Dwc3Registers.h` / `Dwc3Phy.h` are
 architectural facts of the Synopsys DWC3 IP and the Qualcomm QUSB2 PHY (the same
 numbers mainline Linux records); no driver code is copied.
 
+## The debug channel protocol (fjdbg)
+
+The gadget will carry a bi-directional debug channel, not only SSH. Its
+hardware-independent half is written and host-tested:
+
+- `UsbDbgProto.h`: framing over the CDC-ACM byte stream. A frame is `0xFC`, then the
+  escaped payload and its CRC-32, then `0xFB`. Frames are multiplexed into channels:
+  LOG, CMD/RSP and KDP. Console text and XNU serial-KDP frames (`0xFA`) can share the
+  same stream.
+- `UsbDbgDevice.h`: the command layer. It covers hello and state, fault-safe virtual
+  and physical memory reads, MMIO reads, replaying the log from an offset, named
+  kernel commands, and panic, reset and watchdog. Anything that changes the machine
+  is refused unless the session allows writes.
+- `../../scripts/fajita-usbdbg.py`: the host tool. It uses only the Python standard
+  library and works on `/dev/ttyACM*`. It includes a `kdp-proxy` that bridges lldb's
+  `kdp-remote` over UDP.
+- `tests/UsbDbgSim.cpp`: the device-side code running over stdin/stdout. The host
+  tool's `selftest` drives it from `tests/run.sh`.
+
+Both headers are freestanding and contain no locks or allocation, so the polled
+gadget can use them from the panic and debugger paths. They compile with the
+kernel's IOKit flags.
+
 The CDC-ACM/-ECM gadget itself (event buffer, TRB rings, DEPCMDs, enumeration,
 `ifnet`) is **stage B** and is not built yet. `NOTES-ssh.md` has the plan.
 
@@ -42,6 +65,8 @@ The CDC-ACM/-ECM gadget itself (event buffer, TRB rings, DEPCMDs, enumeration,
 - `Dwc3Decode.cpp` — the register decode helpers.
 - `Dwc3Smmu.cpp` — the `apps_smmu` plan for the dwc3 stream `0x740`, reusing
   `../NativeUfs/SmmuTakeover.h`.
+- `UsbDbgProto.cpp` — fjdbg framing (every byte value, CRC, resync) and the command layer.
+- `UsbDbgSim.cpp` + `fajita-usbdbg.py selftest` — the host tool end to end against the device code.
 
 ## Build
 
