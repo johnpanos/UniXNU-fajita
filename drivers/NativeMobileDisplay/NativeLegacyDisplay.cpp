@@ -79,7 +79,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     OSDeclareDefaultStructors(NativeLegacyDisplay)
     IOMemoryMap *bootMapping=nullptr;
     // fajita: the real scanout size, and with fajita-display-logical the scaling of each logical frame onto it. Every size userland
-    // sees (the original dimension fields at +5808/+5812, hence the IOMFB properties, modes and swap validation) is the logical one.
+    // sees (the original dimension fields, NATIVE_LEGACY_WIDTH/HEIGHT, hence the IOMFB properties, modes and swap validation) is the logical one.
     uint32_t panelWidth=0,panelHeight=0;
     bool logical=false,letterboxValid=false;
     native_legacy_scale_map scaleMap={};
@@ -160,13 +160,13 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     uint64_t gpuLength=0;
     bool gpuBypass=false;
     // The refresh tick runs on the family's work loop, the loop of the command gate that registers and removes the vsync clients, so the
-    // client queue at +5592 never changes while the sender walks it.
+    // client queue (NATIVE_LEGACY_VSYNC_CLIENTS) never changes while the sender walks it.
     IOTimerEventSource *vsyncTimer=nullptr;
     uint64_t vsyncInterval=0,vsyncNext=0;
     unsigned vsyncHz=0;
     bool vsyncArmed=false;
     bool vsyncWanted() const {
-        const void *head=nullptr;memcpy(&head,reinterpret_cast<const unsigned char *>(this)+5592,sizeof(head));return head;
+        const void *head=nullptr;memcpy(&head,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_VSYNC_CLIENTS,sizeof(head));return head;
     }
     // Selector 72's registration of a vsync client ends in kickSwapQueue (slot 290), which arms the tick; the tick stops by itself once
     // the last client is removed.
@@ -227,14 +227,15 @@ public:
         if(logicalPM){PMstop();logicalPM=false;}
         primary=false;IOMobileFramebufferLegacy::stop(provider);OSSafeReleaseNULL(bootMapping);
     }
-    // The panel is already lit by the firmware's GOP framebuffer, which is the one thing the original code's power-state word (display+5840,
-    // the "powered" half of the state pair next to +5836) is meant to say; the platform subclass that normally writes it is not part of this
-    // port, so without it the user client's wait (selector 6) answers kIOReturnBusy forever and the compositor never presents. This is the
-    // original state setter (virtual 354, the one the original code calls with this same request shape) with only the powered word named.
+    // The panel is already lit by the firmware's GOP framebuffer, which is the one thing the original code's power-state word (display+5840
+    // on 21H461, the "powered" half of the state pair next to +5836) is meant to say; the platform subclass that normally writes it is not part
+    // of this port, so without it the user client's wait (selector 6) answers kIOReturnBusy forever and the compositor never presents. This is
+    // the original state setter (virtual 354 on 21H461, NATIVE_LEGACY_STATE_SETTER_SLOT, the one the original code calls with this same
+    // request shape) with only the powered word named.
     void announcePoweredByFirmware() {
         struct StateRequest {uint32_t skipRequested,requested,skipPowered,powered;uint8_t changed;uint8_t pad[11];} request={1,0,0,1,1,{}};
         typedef int (*Setter)(void *,StateRequest *,bool);
-        Setter setter=reinterpret_cast<Setter *>(*reinterpret_cast<void **>(this))[354];
+        Setter setter=reinterpret_cast<Setter *>(*reinterpret_cast<void **>(this))[NATIVE_LEGACY_STATE_SETTER_SLOT];
         setter(this,&request,false);
     }
     bool start(IOService *provider) override {
@@ -325,7 +326,7 @@ public:
         // The separate original software-renderer experiment uses completed
         // synchronous CPU surfaces, with no GPU or display fence fabricated.
         OSObject *surface=nullptr;
-        memcpy(&surface,reinterpret_cast<const unsigned char *>(request)+2624,sizeof(surface));
+        memcpy(&surface,reinterpret_cast<const unsigned char *>(request)+NATIVE_LEGACY_REQUEST_SURFACES,sizeof(surface));
         if(!surface) {
             // Validated blank swap (all layers disabled over black): solid-fill the actual GOP.
             PE_Video blank={};
@@ -504,7 +505,7 @@ public:
         OSObject *surface=nullptr;unsigned reason=1;bool accepted=false;
         unsigned enabled=0;PE_parse_boot_argn("offline-legacy-validate",&enabled,sizeof(enabled));
         if(enabled==1 && logicalPM && primary && bootMapping && request) {
-            reason=2;OSObject *surfaces[4]={};memcpy(surfaces,bytes+2624,sizeof(surfaces));surface=surfaces[0];
+            reason=2;OSObject *surfaces[4]={};memcpy(surfaces,bytes+NATIVE_LEGACY_REQUEST_SURFACES,sizeof(surfaces));surface=surfaces[0];
             uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
             if(surface && surface->metaCast("IOSurface") && !surfaces[1] && !surfaces[2] && !surfaces[3] &&
                native_legacy_single_layer_state(word(792),word(796),word(800))) {
@@ -536,7 +537,7 @@ public:
         }
         if(!accepted && reason==2 && !surface && enabled==1) {
             // No surface in any slot and every updated layer disabled over black: present a blank screen.
-            OSObject *none[4]={};memcpy(none,bytes+2624,sizeof(none));
+            OSObject *none[4]={};memcpy(none,bytes+NATIVE_LEGACY_REQUEST_SURFACES,sizeof(none));
             uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
             bool options=true;for(unsigned offset=804;offset<=812;offset+=4)options=options && word(offset)==0;
             if(!none[0] && !none[1] && !none[2] && !none[3] && width && height && options &&
@@ -566,10 +567,18 @@ public:
     }
     // Selector 74 enumerates optional frame-info trace keys, not display
     // modes. This backend implements no trace-key subscription contract.
+    // 20H392 has no mask output (its caller passes index, count and the 64-byte key).
+#if NATIVE_LEGACY_FRAME_INFO_MASK
     IOReturn supportedFrameInfo(uint32_t,uint32_t *count,char *key,uint32_t *mask) override {
         if(!count || !key || !mask)return kIOReturnBadArgument;
         *count=0;*mask=0;bzero(key,64);return kIOReturnUnsupported;
     }
+#else
+    IOReturn supportedFrameInfo(uint32_t,uint32_t *count,char *key) override {
+        if(!count || !key)return kIOReturnBadArgument;
+        *count=0;bzero(key,64);return kIOReturnUnsupported;
+    }
+#endif
     IOReturn newUserClient(task_t task,void *security,UInt32 type,IOUserClient **client) override {
         native_legacy_client_enter(task,type);
         IOReturn status=IOMobileFramebufferLegacy::newUserClient(task,security,type,client);
@@ -613,13 +622,8 @@ public:
         OSSafeReleaseNULL(mapping);return valid;
     }
 #define LEAF(n) __attribute__((noreturn,noinline)) void opaque##n() override { native_legacy_backend_guard(n,this,__builtin_return_address(0)); }
-    LEAF(211)
-    LEAF(245)
-    LEAF(246)
-    LEAF(306)
-    LEAF(307)
-    LEAF(338)
-    LEAF(345)
+    // 211, 245, 246, 306, 307, 338 and 345 on 21H461 (OriginalLegacyLayout.h).
+    NATIVE_LEGACY_GUARDED_LEAVES(LEAF)
 #undef LEAF
 };
 OSDefineMetaClassAndStructors(NativeLegacyDisplay,IOMobileFramebufferLegacy)

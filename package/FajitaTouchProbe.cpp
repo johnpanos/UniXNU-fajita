@@ -610,7 +610,7 @@ static void touchThread(void *, wait_result_t) {
     thread_set_thread_name(current_thread(), "fajita-touch");
     Session *s = static_cast<Session *>(IOMallocType(Session));
     if (!s) {fail(0, -12); return;}
-    bzero(s, sizeof *s);
+    bzero(static_cast<void *>(s), sizeof *s);   // Session has member initializers: clang 19+ -Wnontrivial-memcall wants the cast
     s->ackRc = 1;   // not probed
     s->opt.stage = native_touch_stage_req;
     readOptions(s->opt);
