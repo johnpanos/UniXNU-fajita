@@ -78,6 +78,7 @@ extern volatile uint32_t native_dwc3_dev_major __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_opens __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_stage __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_status __attribute__((weak_import));
+extern volatile int native_fjdbg_agent_write __attribute__((weak_import));
 extern volatile int native_gpu_addon_files __attribute__((weak_import));
 extern volatile int native_gpu_addon_written __attribute__((weak_import));
 extern volatile int native_gpu_addon_same __attribute__((weak_import));
@@ -383,9 +384,9 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     at = put(out, at, cap, row, sizeof row);
     // The userland bridge: /dev/fjdbg major and opens, and the agent mount over /usr/sbin (kern_exec.c, stage 5 = mounted
     // and the agent visible through it; status 0 ok or an errno).
-    snprintf(row, sizeof row, "V dev=%u opens=%u agent=%d/%d", &native_dwc3_dev_major ? native_dwc3_dev_major : 0,
+    snprintf(row, sizeof row, "V dev=%u opens=%u agent=%d/%d wr=%d", &native_dwc3_dev_major ? native_dwc3_dev_major : 0,
              &native_dwc3_dev_opens ? native_dwc3_dev_opens : 0, &native_fjdbg_agent_stage ? native_fjdbg_agent_stage : -9,
-             &native_fjdbg_agent_status ? native_fjdbg_agent_status : -9);
+             &native_fjdbg_agent_status ? native_fjdbg_agent_status : -9, &native_fjdbg_agent_write ? native_fjdbg_agent_write : -9);
     at = put(out, at, cap, row, sizeof row);
     if (native_dwc3_gadget_failure) {
       snprintf(row, sizeof row, "V fail: %.100s", native_dwc3_gadget_failure);

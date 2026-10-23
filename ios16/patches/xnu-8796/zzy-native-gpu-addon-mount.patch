@@ -7,7 +7,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index a5ff474..4704203 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7193,6 +7193,335 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+@@ -7193,6 +7193,360 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
  uint8_t native_owner_data_seed_sha256[32];
  char native_owner_data_device_path[64];
  
@@ -300,6 +300,9 @@ index a5ff474..4704203 100644
 +/* The usb-debug agent mount over /usr/sbin (stage/status as native_gpu_addon_mount records them; BootLog row V). */
 +volatile int native_fjdbg_agent_stage = 0;
 +volatile int native_fjdbg_agent_status = -1;
++volatile int native_fjdbg_agent_write = -1;
++/* The agent binary travels inside the kernel (NativeDwc3 embeds the CI-signed fjdbg-agent; 0 when built without it). */
++extern int native_dwc3_agent_blob(const uint8_t **data, uint64_t *bytes) __attribute__((weak_import));
 +static void
 +native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
 +{
@@ -314,6 +317,28 @@ index a5ff474..4704203 100644
 +	 * Without the boot argument nothing changes; a missing source directory only records its status. */
 +	uint32_t native_usb_debug = 0;
 +	if (PE_parse_boot_argn("usb-debug", &native_usb_debug, sizeof(native_usb_debug)) && native_usb_debug >= 3) {
++		/* Write the embedded agent into Data as /private/var/ngpu/sbin/wifid (+ the marker the mount checks); an equal
++		 * file is left alone. Status for BootLog: 0 written/equal, else the errno, -1 no embedded agent. */
++		const uint8_t *agent = NULL;
++		uint64_t agent_bytes = 0;
++		if (native_dwc3_agent_blob && native_dwc3_agent_blob(&agent, &agent_bytes) && agent_bytes) {
++			static const char marker[] = "fajita usb-debug agent\n";
++			struct mkdir_args request = {.path = scratch + 0xc00, .mode = 0755};
++			int32_t result = 0;
++			if (!copyout("/private/var/ngpu", request.path, sizeof("/private/var/ngpu"))) {
++				(void)mkdir(p, &request, &result);
++			}
++			vfs_context_t ctx = vfs_context_current();
++			int error = native_gpu_addon_parents(p, scratch, "/private/var/ngpu/sbin/wifid");
++			if (!error) {
++				error = native_gpu_addon_write("/private/var/ngpu/sbin/wifid", agent, agent_bytes, 0755, ctx);
++			}
++			if (error <= 0) {
++				error = native_gpu_addon_write("/private/var/ngpu/sbin/fjdbg-agent.txt", (const uint8_t *)marker, sizeof(marker) - 1,
++				    0644, ctx);
++			}
++			native_fjdbg_agent_write = error < 0 ? 0 : error;
++		}
 +		static const char agent_source[] = "/private/var/ngpu/sbin", agent_point[] = "/usr/sbin";
 +		native_gpu_addon_mount(p, scratch, 0xa00, agent_source, sizeof(agent_source), agent_point, sizeof(agent_point),
 +		    "/usr/sbin/mDNSResponder", "/usr/sbin/fjdbg-agent.txt", &native_fjdbg_agent_stage, &native_fjdbg_agent_status);

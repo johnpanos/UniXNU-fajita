@@ -136,3 +136,4 @@ native_wifi_stats
 sheng_cpufreq_poll
 native_fjdbg_agent_stage
 native_fjdbg_agent_status
+native_fjdbg_agent_write

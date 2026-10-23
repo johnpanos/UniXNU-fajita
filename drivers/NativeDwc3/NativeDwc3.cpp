@@ -36,6 +36,16 @@ extern "C" {
 #include "Dwc3Phy.h"
 #include "../NativeUfs/SmmuTakeover.h"   // generic ARM SMMUv2 stream planner (read-only use here)
 #include "Dwc3Gadget.h"                  // stage B: the DWC3 CDC-ACM device controller (usb-debug=N)
+#include "AgentBlob.h"                   // generated: the CI-signed fjdbg-agent (empty without FAJITA_USBDBG_AGENT)
+
+// The embedded userland agent, for the kernel's boot-time write into Data (kern_exec.c, usb-debug=3).
+extern "C" int native_dwc3_agent_blob(const uint8_t **data, uint64_t *bytes)
+{
+  if (!data || !bytes || kAgentBlobBytes < 16) return 0;
+  *data = kAgentBlob;
+  *bytes = kAgentBlobBytes;
+  return 1;
+}
 
 extern "C" {
 // Counters the boot log reads (package/BootLog.c), all weak so a board without the

@@ -144,3 +144,4 @@ __attribute__((weak)) void sheng_cpufreq_poll(void) {   }
 // The usb-debug agent mount status (the fajita 8796 zzy-native-gpu-addon-mount.patch defines the real ones; BootLog row V).
 __attribute__((weak)) volatile int native_fjdbg_agent_stage = 0;
 __attribute__((weak)) volatile int native_fjdbg_agent_status = -1;
+__attribute__((weak)) volatile int native_fjdbg_agent_write = -1;
