@@ -96,6 +96,9 @@ def main():
     parser.add_argument('--vmm-present', action='store_true',
                         help='/defaults vmm-present = 1 (kern.hv_vmm_present): the 20H392 AMFI then skips its ApplePMGRNub wait and '
                              'PMGRAON latch (it panics after 30 s without a PMGR), so the iOS 16 board needs no PMGR stub')
+    parser.add_argument('--manifest-bnch', action='store_true',
+                        help='/chosen/manifest-properties BNCH (48 zero bytes): the 20H392 AppleImage4 pmap runtime reads the boot nonce hash '
+                             'there and panics without it ("failed to read boot nonce hash") at secure boot level 0')
     parser.add_argument('--cpu-regs', default='0',
                         help='Comma-separated CPU MPIDR affinity values (the /cpus reg of each core); the first is the running boot CPU. '
                              'SDM845 numbers its cores 0x000..0x700 in Affinity1 (sdm845.dtsi). More than one adds /psci')
@@ -183,7 +186,7 @@ def main():
                                  ([('TrustCache', bytes(16))] if args.trust_cache else []) +
                                  ([('GpuAddon', bytes(16))] if args.gpu_addon else [])),
               # Read by the original AppleImage4 at start-up; present and empty here.
-              node('manifest-properties')]),
+              node('manifest-properties', [('BNCH', bytes(48))] if args.manifest_bnch else [])]),
         node('cpus', children=cpus),
         *([node('psci', [('compatible', b'arm,psci-1.0\0'), ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
         # Suspend/resume is not implemented for this board. Use the original

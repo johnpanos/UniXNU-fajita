@@ -171,7 +171,7 @@ owned_memory_size = "0x130000000"
 packed_data_ramdisk = true
 persistent_data = true
 # --vmm-present: AMFI skips the PMGR (scripts/make-fajita-adt.py), so CONFIG_XNU_SHENG_PMGR is off for this board.
-args = ["--identity", "iphone10,6", "--vmm-present"]
+args = ["--identity", "iphone10,6", "--vmm-present", "--manifest-bnch"]
 chip_id = "207"
 unique_chip_id = "required"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"

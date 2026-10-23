@@ -31,6 +31,7 @@ expected original instruction first, and the tool refuses a kernel that does
 not match. Offsets are specific to the kernel built by build-xnu-4k-baseline.sh.
 """
 import argparse
+import json
 import os
 import shutil
 import struct
@@ -187,6 +188,53 @@ _start:
   dsb sy
   b target
 """
+
+
+def amfi_skip_pmgr(data, plan):
+    """fajita iOS 16: set the 20H392 AMFI's 'running on a VMM' byte, so it skips its ApplePMGRNub wait and PMGRAON latch.
+
+    AMFI's early initializer sets the byte when sysctlbyname("kern.hv_vmm_present") answers nonzero, but it runs before
+    the sysctl tree exists, so the lookup fails and the byte stays 0; the PMGR wait (30 s, then panic) follows. The byte is
+    found from the code that sets it (ldr w8,[sp,#0xc]; cbz w8; adrp x8; mov w9,#1; strb w9,[x8,#imm]) in AMFI's text.
+    """
+    text = next(e for e in plan['extents']
+                if e['module'] == 'com.apple.driver.AppleMobileFileIntegrity' and e['segment'] == '__TEXT_EXEC')
+    found = []
+    for va in range(text['va'], text['va'] + text['size'] - 20, 4):
+        ldr, cbz, adrp, mov, strb = struct.unpack_from('<5I', data, file_offset(va))
+        if (ldr == 0xb9400fe8 and cbz & 0xff00001f == 0x34000008 and adrp & 0x9f00001f == 0x90000008 and mov == 0x52800029
+                and strb & 0xffc003ff == 0x39000109):
+            immediate = ((adrp >> 5) & 0x7ffff) << 2 | ((adrp >> 29) & 3)
+            if immediate & (1 << 20):
+                immediate -= 1 << 21
+            found.append(((va + 8) & ~4095) + (immediate << 12) + ((strb >> 10) & 4095))
+    if len(found) != 1 or data[file_offset(found[0])] != 0:
+        raise SystemExit(f'AMFI vmm byte not uniquely found unset: {[hex(v) for v in found]}')
+    data[file_offset(found[0])] = 1
+    return found[0]
+
+
+def img4_skip_pmap_cs(data, plan):
+    """fajita iOS 16: leave out the 20H392 AppleImage4's "pmap cs" image4 runtime (the PPL code signing runtime).
+
+    Its init asks the pmap for a mix-n-match policy, which this kernel (no PPL) does not answer, and panics ("failed to get
+    mix-n-match policy"). The runtimes are the __DATA_CONST,__img4_rt entries {version, name, init, ...}; the start skips an
+    entry whose init is NULL (as it does for "pmap dtless"), so the init pointer of "pmap cs" is cleared.
+    """
+    extent = lambda segment: next(e for e in plan['extents']
+                                  if e['module'] == 'com.apple.security.AppleImage4' and e['segment'] == segment)
+    text, const = extent('__TEXT'), extent('__DATA_CONST')
+    blob = bytes(data[file_offset(text['va']):file_offset(text['va']) + text['size']])
+    at = blob.find(b'\0pmap cs\0')
+    if at < 0 or blob.find(b'\0pmap cs\0', at + 1) >= 0:
+        raise SystemExit('AppleImage4 "pmap cs" name not found once')
+    name = text['va'] + at + 1
+    entries = [va for va in range(const['va'], const['va'] + const['size'] - 24, 8)
+               if struct.unpack_from('<Q', data, file_offset(va + 8))[0] == name]
+    if len(entries) != 1 or not struct.unpack_from('<Q', data, file_offset(entries[0] + 16))[0]:
+        raise SystemExit(f'AppleImage4 "pmap cs" runtime not found once with an init: {[hex(v) for v in entries]}')
+    struct.pack_into('<Q', data, file_offset(entries[0] + 16), 0)
+    return entries[0]
 
 
 def early_wdog_cave(data, size):
@@ -445,6 +493,7 @@ def assemble(source, va, symbols, workdir):
 
 
 PANIC_RESET_SECONDS = 0
+BLR_REGISTER = [None]   # fajita: the register of a raw blr call site (FAJITA_RESET_AFTER=0x...)
 
 
 def main():
@@ -487,7 +536,9 @@ def main():
     # fajita: FAJITA_RESET_AFTER=<symbol>[:<function>] places stage 4 (reset after that call) even under --no-reset, for bisecting.
     reset_after = os.environ.get('FAJITA_RESET_AFTER')
     if reset_after:
-        symbol, _, function = reset_after.partition(':')
+        # A leading '<' places the reset before the call instead (--reset-before).
+        args.reset_before = reset_after.startswith('<')
+        symbol, _, function = reset_after.lstrip('<').partition(':')
         args.no_reset, args.reset_after, args.panic_screen = False, symbol, False
         args.function = function or args.function
     if mmu_probe:
@@ -500,6 +551,22 @@ def main():
              (MMU_ENABLE_VA, 2, {'target': MMU_ENABLE_VA + 4})]
     if args.no_reset:
         description = 'no reset probe'
+    elif args.reset_after and args.reset_after.startswith('0x'):
+        # fajita: a raw call site (code without symbols, such as a prelinked kext): the `bl` at that address.
+        call_va = int(args.reset_after, 16)
+        word = struct.unpack_from('<I', data, file_offset(call_va))[0]
+        if word & 0xFFFFFC1F == 0xD63F0000:
+            # blr xN: the cave re-executes the indirect call (stage 4 with blr in place of bl callee).
+            BLR_REGISTER[0] = (word >> 5) & 31
+            callee = call_va
+        elif word >> 26 == 0b100101:
+            delta = word & 0x3FFFFFF
+            delta -= (1 << 26) if delta & (1 << 25) else 0
+            callee = call_va + delta * 4
+        else:
+            raise SystemExit(f'{call_va:#x} holds {word:#010x}, not a bl or blr')
+        sites.append((call_va, 4, {'callee': callee, 'target': call_va + 4}))
+        description = f'stage 4 reset {"before" if args.reset_before else "after"} the bl at {call_va:#x} (to {callee:#x})'
     elif args.reset_after:
         symbols = kernel_symbols(args.kernel)
         call_va, callee = find_call(data, symbols, args.function, args.reset_after, args.occurrence)
@@ -512,8 +579,23 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         for site, stage, symbols in sites:
             source = RESET_BEFORE if (stage == 4 and args.reset_before) else SOURCES[stage].format(ticks=TIMEBASE * args.reset_delay)
+            if stage == 4 and BLR_REGISTER[0] is not None and args.reset_before and os.environ.get('FAJITA_RESET_IF'):
+                # fajita: reset at once when this indirect call is about to go to that address; others pass through.
+                source = (f'.text\n.global _start\n_start:\n  ldr x16, ={os.environ["FAJITA_RESET_IF"]}\n'
+                          f'  cmp x{BLR_REGISTER[0]}, x16\n  b.eq 3f\n  blr x{BLR_REGISTER[0]}\n  b target\n3:\n'
+                          + RESET_BEFORE.split('_start:\n', 1)[1] + '.ltorg\n')
+            elif stage == 4 and BLR_REGISTER[0] is not None:
+                call = f'  blr x{BLR_REGISTER[0]}\n'
+                only = os.environ.get('FAJITA_RESET_IF')
+                if only:
+                    # fajita: reset only when the indirect call goes to this address (one kext's start routine at the
+                    # blr in OSKext::start); every other call passes straight through.
+                    call = (f'  ldr x16, ={only}\n  cmp x{BLR_REGISTER[0]}, x16\n  b.eq 3f\n{call}  b target\n3:\n{call}')
+                source = source.replace('  bl callee\n', call)
             code = assemble(source, CAVES[stage], symbols, Path(tmp))
-            if len(code) > CAVE_SIZE:
+            # The last cave (stage 4) may use the padding up to the panic screen's when that is not placed.
+            room = PANIC_CAVE_END - CAVES[stage] if stage == 4 and not args.panic_screen else CAVE_SIZE
+            if len(code) > room or (room > CAVE_SIZE and any(data[file_offset(CAVES[stage]):file_offset(CAVES[stage]) + len(code)])):
                 raise SystemExit(f'Stage {stage} code is too large')
             data[file_offset(CAVES[stage]):file_offset(CAVES[stage]) + len(code)] = code
     if early_wdog:
@@ -526,6 +608,12 @@ def main():
         description += ', early watchdog from the kernel entry'
     for site, stage, _ in sites:
         struct.pack_into('<I', data, file_offset(site), branch(site, CAVES[stage]))
+    if os.environ.get('FAJITA_AMFI_SKIP_PMGR') == '1':
+        plan = json.loads(args.kernel.with_name('kernel.json').read_text()) if args.kernel.with_name('kernel.json').is_file() else \
+            json.loads(Path(os.environ['FAJITA_KERNEL_PLAN']).read_text())
+        description += f', AMFI vmm byte at {amfi_skip_pmgr(data, plan):#x}'
+        if os.environ.get('FAJITA_IMG4_SKIP_PMAP_CS') == '1':
+            description += f', AppleImage4 pmap cs runtime off at {img4_skip_pmap_cs(data, plan):#x}'
     if args.panic_screen:
         # Right after the last probe cave in use, so the padding is shared as tightly as possible.
         PANIC_CAVE = max(CAVES[stage] for _, stage, _ in sites) + CAVE_SIZE
