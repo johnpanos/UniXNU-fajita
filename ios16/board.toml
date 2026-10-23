@@ -136,7 +136,7 @@ trust_cache_sha256 = [
 kernel_args = [
   "debug=0x14e",
   "kt_fixed_zones=120",
-  "armcpu-timer-intid=19","-apfs_shared_datavolume","ml-timeout-lock-panic-scale=40","sheng-staged-apps=1","sheng-disable-watchdogd=1","sheng-lite=1","sheng-data-persist=2","boot-progress=2","sheng-log=1","sheng-autoreset=1200","fajita-wdog=3","wdog-irq=0","sheng-smp=1","cpus=8","armcpu-self-ipi=1","fajita-cpufreq=2","native-data-writeback=1",
+  "armcpu-timer-intid=19","-apfs_shared_datavolume","ml-timeout-lock-panic-scale=40","sheng-staged-apps=1","sheng-disable-watchdogd=1","sheng-lite=1","sheng-data-persist=2","boot-progress=2","sheng-log=1","fajita-wdog=3","wdog-irq=0","sheng-smp=1","cpus=8","armcpu-self-ipi=1","fajita-cpufreq=2","native-data-writeback=1",
   "-no_slto_panic",
   "native-ufs-root=1",
   "native-ufs-root-base=16384",       # the 20H392 root image starts 16 GiB into userdata, after the iPadOS one
@@ -154,7 +154,7 @@ kernel_args = [
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   # The iPhone X screen, 1125x2436 at scale 3 (375x812 points), fitted onto the 1080x2340 panel (0.96, nearly edge to edge).
-  "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
+  "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-display-ppi=458","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
   "sheng-vsync=60",
   "sheng-banner=0",
   "offline-hid-input=1",
@@ -171,7 +171,7 @@ owned_memory_size = "0x130000000"
 packed_data_ramdisk = true
 persistent_data = true
 # --vmm-present: AMFI skips the PMGR (scripts/make-fajita-adt.py), so CONFIG_XNU_SHENG_PMGR is off for this board.
-args = ["--identity", "iphone10,6", "--vmm-present", "--manifest-bnch"]
+args = ["--identity", "iphone10,6", "--vmm-present", "--manifest-bnch", "--chosen-display-scale"]
 chip_id = "207"
 unique_chip_id = "required"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"

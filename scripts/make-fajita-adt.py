@@ -99,6 +99,10 @@ def main():
     parser.add_argument('--manifest-bnch', action='store_true',
                         help='/chosen/manifest-properties BNCH (48 zero bytes): the 20H392 AppleImage4 pmap runtime reads the boot nonce hash '
                              'there and panics without it ("failed to read boot nonce hash") at secure boot level 0')
+    parser.add_argument('--chosen-display-scale', action='store_true',
+                        help='/chosen/display-scale = the identity\'s scale from the start. MobileGestalt\'s main-screen scale comes from it and '
+                             'iOS 16 FrontBoardServices asserts on scale 0 (SpringBoard died at once, 2026-10-23); the display probe accepts an '
+                             'equal value it finds there (publishOrMatchWord)')
     parser.add_argument('--cpu-regs', default='0',
                         help='Comma-separated CPU MPIDR affinity values (the /cpus reg of each core); the first is the running boot CPU. '
                              'SDM845 numbers its cores 0x000..0x700 in Affinity1 (sdm845.dtsi). More than one adds /psci')
@@ -156,6 +160,7 @@ def main():
                         # This boots the normal target OS. Volatile Data is
                         # described separately by ephemeral-storage below.
                         ('osenvironment', b'main\0'),
+                        *([('display-scale', struct.pack('<I', identity['scale']))] if args.chosen_display_scale and identity else []),
                         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1), as read by MobileGestalt: mobileactivationd's
                         # DeviceType then takes its native "Hactivation" branch (Activated without an activation record; no SEP or
                         # baseband). Values established on hardware by github.com/dipa-studio/ios-sweet (tools/mkadt.py).

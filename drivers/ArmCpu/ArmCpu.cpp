@@ -620,7 +620,7 @@ bool ArmCpu::start (IOService *provider)
     }
   }
   unsigned wdogStop = 0;
-  if (gWdog && !gWdogStopTicks && PE_parse_boot_argn ("fajita-wdog-stop", &wdogStop, sizeof (wdogStop)) && wdogStop) {
+  if (gWdog && !gWdogStopTicks && (PE_parse_boot_argn ("fajita-wdog-stop", &wdogStop, sizeof (wdogStop)) || PE_parse_boot_argn ("wdstop", &wdogStop, sizeof (wdogStop))) && wdogStop) {   // wdstop: short alias
     uint64_t ticks = 0;
     nanoseconds_to_absolutetime (static_cast<uint64_t> (wdogStop) * NSEC_PER_SEC, &ticks);
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (armcpu_wdog_live[0]));
