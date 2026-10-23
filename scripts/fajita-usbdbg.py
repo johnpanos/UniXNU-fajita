@@ -372,6 +372,11 @@ def selftest(sim):
     assert b'resets=1' in out
     link.close()
     print('selftest: request/reply against UsbDbgSim OK')
+    # `run`: one agent command, output up to its exit marker, its status as our exit code.
+    me = [sys.executable, '-I', os.path.abspath(__file__), '--exec', sim, 'run']
+    r = subprocess.run(me + ['hidutil', 'list'], capture_output=True, timeout=20)
+    assert r.returncode == 2 and r.stdout == b'sim ran: hidutil list\n', (r.returncode, r.stdout, r.stderr)
+    print('selftest: run (SHELL channel, exit marker) against UsbDbgSim OK')
 
 
 def main():
@@ -382,6 +387,8 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('console')
     sub.add_parser('shell')
+    p = sub.add_parser('run', help='run one userland command through the agent and wait for its exit')
+    p.add_argument('--timeout', type=float, default=60.0); p.add_argument('command', nargs='+')
     sub.add_parser('hello')
     sub.add_parser('state')
     p = sub.add_parser('read'); p.add_argument('space', choices=['virt', 'phys']); p.add_argument('addr'); p.add_argument('length')
@@ -426,6 +433,44 @@ def main():
 
     if a.cmd == 'kdp-proxy':
         return kdp_proxy(make, a.listen, a.target_ip, a.mode)
+    if a.cmd == 'run':
+        # One command through the agent: print its output, return its exit status (the agent ends every command
+        # with a line `fjdbg: exit N`). Earlier commands' late output is skipped up to our own marker line.
+        import re
+        transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
+        buf = bytearray()
+        got = threading.Event()
+        state = {'code': None}
+        marker = ('fjdbg-run-%d' % os.getpid()).encode()
+        def on_shell(b):
+            buf.extend(b)
+            text = bytes(buf)
+            at = text.find(marker)
+            if at < 0:
+                return
+            m = re.search(rb'fjdbg: exit (-?[0-9]+)\n', text[at:])
+            if m:
+                state['code'] = int(m.group(1))
+                got.set()
+        link = Link(transport, on_shell=on_shell)
+        try:
+            # `echo` is not a builtin of the agent; /bin/echo does not exist on iOS: mark our start with a failing
+            # lookup of a name that cannot exist, whose error line the agent prints before our command runs.
+            link.send_frame(CH_SHELL, marker + b'\n' + ' '.join(a.command).encode() + b'\n')
+            if not got.wait(a.timeout):
+                sys.stderr.write('fajita-usbdbg: no exit marker within %.0f s\n' % a.timeout)
+                code = 124
+            else:
+                code = state['code']
+            text = bytes(buf)
+            at = text.find(marker)
+            body = text[at:].split(b'\n', 1)[1] if at >= 0 and b'\n' in text[at:] else b''
+            body = re.sub(rb'fjdbg: exit -?[0-9]+\n$', b'', body)
+            sys.stdout.buffer.write(body)
+            sys.stdout.flush()
+        finally:
+            link.close()
+        return code
     if a.cmd == 'shell':
         transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
         # Only the agent's output: the kernel log keeps streaming on its own channel (use `console` for it).

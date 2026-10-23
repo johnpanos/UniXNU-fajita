@@ -88,9 +88,31 @@ int main(int argc, char **argv)
     ssize_t n = read(0, buf, sizeof buf);
     if (n <= 0) return 0;
     for (ssize_t i = 0; i < n; i++) {
-      if (d.feed(buf[i]) == Decoder::kFrame && d.channel() == kChCmd) {
+      if (d.feed(buf[i]) != Decoder::kFrame) continue;
+      if (d.channel() == kChCmd) {
         size_t len = handleCommand(t, d.data(), d.length(), rsp);
         emit(kChRsp, d.seq(), rsp, len);
+      } else if (d.channel() == kChShell) {
+        // Emulate fjdbg-agent: one command per line; an unknown program prints an error line without an exit
+        // marker, anything else "runs" and ends with `fjdbg: exit N` (N = the argument count, to test parsing).
+        static char line[512];
+        static size_t ll = 0;
+        for (size_t k = 0; k < d.length(); k++) {
+          char c = char(d.data()[k]);
+          if (c != '\n') { if (ll < sizeof line - 1) line[ll++] = c; continue; }
+          line[ll] = 0;
+          char out[700];
+          int n;
+          if (strncmp(line, "fjdbg-run", 9) == 0) {
+            n = snprintf(out, sizeof out, "fjdbg: cannot run %s: No such file or directory\n", line);
+          } else {
+            int args = 1;
+            for (char *q = line; *q; q++) args += *q == ' ';
+            n = snprintf(out, sizeof out, "sim ran: %s\nfjdbg: exit %d\n", line, args);
+          }
+          emit(kChShell, 0, reinterpret_cast<uint8_t *>(out), size_t(n));
+          ll = 0;
+        }
       }
     }
   }
