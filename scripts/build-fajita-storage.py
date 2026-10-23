@@ -33,6 +33,11 @@ def main():
     candidate = os.environ.get('FAJITA_STORAGE_CANDIDATE')
     if not candidate or not Path(candidate).is_file() or not Path(candidate).with_suffix('.json').is_file():
         raise SystemExit('FAJITA_STORAGE_CANDIDATE must name a prelinked fajita kernel.macho with its kernel.json beside it')
+    # The candidate must be of the original kernelcache the kernel is prelinked with (unixnu: board.toml [kernel.prelink]).
+    original_sha256 = json.loads(Path(candidate).with_suffix('.json').read_text())['original_sha256']
+    pinned = os.environ.get('UNIXNU_KERNELCACHE_SHA256')
+    if pinned and original_sha256 != pinned:
+        raise SystemExit(f'FAJITA_STORAGE_CANDIDATE is prelinked from original kernelcache {original_sha256}, the board pins {pinned}')
     prelink = ROOT / 'build/native-prelink'
     prelink.mkdir(parents=True, exist_ok=True)
     for suffix in ('.macho', '.json'):

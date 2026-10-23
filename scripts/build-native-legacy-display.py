@@ -166,6 +166,10 @@ ORIGINAL_KERNELCACHES = {'f18b4df865405f2a287b84977d7aca745e056d656d9fc9df166297
                          '2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221': '20H392'}
 build = ORIGINAL_KERNELCACHES.get(json.loads(candidate.with_suffix('.json').read_text())['original_sha256'])
 require(build, 'The candidate is not prelinked from an accepted original kernelcache (21H461 or 20H392)')
+# ... and from the one the kernel is prelinked with (unixnu: board.toml [kernel.prelink] kernelcache_sha256).
+pinned = os.environ.get('UNIXNU_KERNELCACHE_SHA256')
+require(not pinned or json.loads(candidate.with_suffix('.json').read_text())['original_sha256'] == pinned,
+        f'The candidate is not prelinked from the pinned original kernelcache {pinned}')
 legacy = LEGACY[build]
 if build == '21H461' and not analysis.exists():
     analysis.parent.mkdir(parents=True, exist_ok=True)
