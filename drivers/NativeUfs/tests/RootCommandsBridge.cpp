@@ -46,7 +46,7 @@ extern "C" {
 void ufs_test_reset(Callback cb, uint64_t physical) {
   callback=cb; memset(memory,0,sizeof(memory));
   gHost={memory,physical,true,false,0,nullptr}; gRootDiagnostic=UfsRootDiagnostics{};
-  gStoreOpen=gLogOpen=false; gStoreFirst=gStoreBlocks=gLogFirst=gLogBlocks=0;
+  gStoreOpen=gLogOpen=gRtcOpen=false; gStoreFirst=gStoreBlocks=gLogFirst=gLogBlocks=gRtcFirst=gRtcBlocks=0;
 }
 uint8_t *ufs_test_memory() { return memory; }
 bool ufs_test_poisoned() { return gHost.poisoned; }
@@ -59,6 +59,7 @@ uint32_t ufs_test_scsi(uint8_t lun,const uint8_t *cdb,unsigned length,bool read,
 uint32_t ufs_test_read(uint8_t lun,uint64_t lba,uint32_t blocks,void *out) { return hostRead4k(lun,lba,blocks,out); }
 uint32_t ufs_test_store_open(uint64_t first,uint64_t blocks) { return hostStoreOpen(first,blocks) ? 1 : 0; }
 uint32_t ufs_test_log_open(uint64_t first,uint64_t blocks) { return hostLogOpen(first,blocks) ? 1 : 0; }
+uint32_t ufs_test_rtc_open(uint64_t first,uint64_t blocks) { return hostRtcOpen(first,blocks) ? 1 : 0; }
 uint32_t ufs_test_write(uint8_t lun,uint64_t lba,uint32_t blocks,const void *src) { return hostWrite4k(lun,lba,blocks,src); }
 uint32_t ufs_test_sync() { return hostSyncCache(); }
 uint32_t ufs_test_nop() {
