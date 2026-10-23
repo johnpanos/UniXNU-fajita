@@ -68,6 +68,7 @@ public:
   void poll();                     // drain the event buffer once
   void pumpLog();                  // mirror new kernel-log bytes to the host
   void kickTx();                   // poll thread: start the next bulk-IN transfer if idle
+  bool eventsPending() const { return m.core && (m.core_rd(kDwc3GEVNTCOUNT0) & 0xffff) != 0; }
   bool queueFrame(uint8_t channel, const uint8_t *data, size_t len);   // any thread
 
 private:
@@ -343,8 +344,19 @@ inline void Gadget::onSetupComplete()
   case acmep0::kRxData:
     if (pending.len) ep0StartRx(pending.len); else ep0Status(false);
     break;
+  case acmep0::kSetAddressAck: {
+    // dwc3_ep0_set_address: program DCFG.DEVADDR while handling the SETUP; the controller switches to it when the
+    // status stage completes. Writing it only after that completion (on the next poll) misses the 2 ms the host
+    // allows before it talks to the new address (hardware usb-enum7: SET_ADDRESS retried, then bus resets).
+    uint32_t dcfg = m.core_rd(kDwc3DCFG);
+    dcfg &= ~(0x7fu << 3);
+    dcfg |= uint32_t(pending.value & 0x7f) << 3;
+    m.core_wr(kDwc3DCFG, dcfg);
+    native_dwc3_addr = pending.value;
+    ep0Status(false);
+    break;
+  }
   case acmep0::kStatusOnly:
-  case acmep0::kSetAddressAck:
   case acmep0::kSetConfigAck:
     ep0Status(false);
     break;
@@ -359,13 +371,7 @@ inline void Gadget::onEp0DataOrStatus(unsigned ep)
     return;
   }
   if (phase == kWaitStatus) {              // status done -> apply post-action, next setup
-    if (pending.kind == acmep0::kSetAddressAck) {
-      uint32_t dcfg = m.core_rd(kDwc3DCFG);
-      dcfg &= ~(0x7fu << 3);
-      dcfg |= uint32_t(pending.value) << 3;
-      m.core_wr(kDwc3DCFG, dcfg);
-      native_dwc3_addr = pending.value;
-    } else if (pending.kind == acmep0::kSetConfigAck) {
+    if (pending.kind == acmep0::kSetConfigAck) {
       ep0.config = pending.value;
       native_dwc3_configured = pending.value;
       if (pending.value) enableBulk();

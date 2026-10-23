@@ -200,7 +200,9 @@ static void dwc3GadgetThread(void *, wait_result_t)
         fjdbgCreateNode();
       }
     }
-    IOSleep(2);   // 2 ms: fast enough for enumeration, light on the CPU
+    // Control transfers have tight host timeouts: keep the poll period at 1 ms, and do not sleep at all while the
+    // controller still has events queued.
+    if (!gGadget || !gGadget->eventsPending()) IOSleep(1);
   }
 }
 
