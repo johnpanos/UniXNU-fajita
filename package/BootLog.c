@@ -87,6 +87,10 @@ extern volatile uint32_t native_dwc3_cmd_fails __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_cmd_last_fail __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_major __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_opens __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dev_rd __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dev_wr __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_dev_drop __attribute__((weak_import));
+extern volatile int32_t native_dwc3_dev_rderr __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_stage __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_status __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_write __attribute__((weak_import));
@@ -399,6 +403,9 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     snprintf(row, sizeof row, "V dev=%u opens=%u agent=%d/%d wr=%d", &native_dwc3_dev_major ? native_dwc3_dev_major : 0,
              &native_dwc3_dev_opens ? native_dwc3_dev_opens : 0, &native_fjdbg_agent_stage ? native_fjdbg_agent_stage : -9,
              &native_fjdbg_agent_status ? native_fjdbg_agent_status : -9, &native_fjdbg_agent_write ? native_fjdbg_agent_write : -9);
+    at = put(out, at, cap, row, sizeof row);
+    snprintf(row, sizeof row, "V agentio rd=%u wr=%u drop=%u rderr=%d", native_dwc3_dev_rd, native_dwc3_dev_wr, native_dwc3_dev_drop,
+             native_dwc3_dev_rderr);
     at = put(out, at, cap, row, sizeof row);
     snprintf(row, sizeof row, "V polls=%u oxf=%u ixf=%u infl=%u cmdfail=%u last=%08x", native_dwc3_polls, native_dwc3_out_xfers,
              native_dwc3_in_xfers, native_dwc3_in_flight, native_dwc3_cmd_fails, native_dwc3_cmd_last_fail);

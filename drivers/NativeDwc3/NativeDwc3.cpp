@@ -122,6 +122,9 @@ static volatile uint32_t gDevOpen = 0;
 static bool gDevCreated = false;
 extern "C" vnode_t rootvnode __attribute__((weak_import));
 extern "C" volatile uint32_t native_dwc3_dev_major = 0, native_dwc3_dev_opens = 0;
+// /dev/fjdbg I/O for the boot log: bytes the agent read, bytes it wrote, bytes dropped on a full ring, last read error.
+extern "C" volatile uint32_t native_dwc3_dev_rd = 0, native_dwc3_dev_wr = 0, native_dwc3_dev_drop = 0;
+extern "C" volatile int32_t native_dwc3_dev_rderr = 0;
 
 static int fjdbgOpen(dev_t, int, int, struct proc *)
 {
@@ -143,7 +146,7 @@ static int fjdbgRead(dev_t, struct uio *uio, int)
   while (g->shHead == g->shTail) {
     struct timespec ts = {1, 0};
     int err = msleep(const_cast<uint32_t *>(&g->shHead), nullptr, PZERO | PCATCH, "fjdbg", &ts);
-    if (err && err != EWOULDBLOCK) return err;   // EINTR/ERESTART: a signal
+    if (err && err != EWOULDBLOCK) { native_dwc3_dev_rderr = err; return err; }   // EINTR/ERESTART: a signal
   }
   int err = 0;
   while (!err && g->shHead != g->shTail && uio_resid(uio) > 0) {
@@ -153,7 +156,8 @@ static int fjdbgRead(dev_t, struct uio *uio, int)
     uint32_t n = avail < run ? avail : run;
     if (n > uint32_t(uio_resid(uio))) n = uint32_t(uio_resid(uio));
     err = uiomove(reinterpret_cast<const char *>(g->shRx + off), int(n), uio);
-    if (!err) g->shTail = tail + n;
+    if (!err) { g->shTail = tail + n; native_dwc3_dev_rd = native_dwc3_dev_rd + n; }
+    else native_dwc3_dev_rderr = err;
   }
   return err;
 }
@@ -167,9 +171,13 @@ static int fjdbgWrite(dev_t, struct uio *uio, int)
     int err = uiomove(buf, n, uio);
     if (err) return err;
     // The TX ring may be full while the host is slow: wait up to ~2 s, then drop.
-    for (int tries = 0; tries < 400 && !g->queueFrame(usbdbg::kChShell, reinterpret_cast<uint8_t *>(buf), size_t(n)); tries++) {
+    bool queued = false;
+    for (int tries = 0; tries < 400 && !(queued = g->queueFrame(usbdbg::kChShell, reinterpret_cast<uint8_t *>(buf), size_t(n)));
+         tries++) {
       IOSleep(5);
     }
+    if (queued) native_dwc3_dev_wr = native_dwc3_dev_wr + uint32_t(n);
+    else native_dwc3_dev_drop = native_dwc3_dev_drop + uint32_t(n);
   }
   return 0;
 }

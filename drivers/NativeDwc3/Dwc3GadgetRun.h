@@ -512,12 +512,15 @@ inline void Gadget::onBulkOut(uint32_t remaining)
         Gadget *g = static_cast<Gadget *>(ctx);
         int n = snprintf(out, cap,
                          "stage=%u\nspeed=%u\naddr=%u\nconfig=%u\nsetups=%u\nevents=%u\nresets=%u\nbulk_out=%llu\nbulk_in=%llu\n"
-                         "tx_queued=%u\nlog_offset=%llu\nlog_produced=%llu\nshell_rx=%u\nshell_overflow=%u\n",
+                         "tx_queued=%u\nlog_offset=%llu\nlog_produced=%llu\nshell_rx=%u\nshell_overflow=%u\n"
+                         "shell_in_total=%u\nagent_read=%u\nagent_wrote=%u\nagent_dropped=%u\nagent_read_err=%d\n"
+                         "in_flight=%u\nin_xfers=%u\nout_xfers=%u\n",
                          native_dwc3_gadget_stage, native_dwc3_link_speed, native_dwc3_addr, native_dwc3_configured,
                          native_dwc3_setups, native_dwc3_events, native_dwc3_resets,
                          (unsigned long long)native_dwc3_bulk_out, (unsigned long long)native_dwc3_bulk_in,
                          g->txHead - g->txTail, (unsigned long long)g->logOffset, (unsigned long long)g->logProduced,
-                         g->shHead - g->shTail, g->shOverflow);
+                         g->shHead - g->shTail, g->shOverflow, g->shHead, native_dwc3_dev_rd, native_dwc3_dev_wr, native_dwc3_dev_drop,
+                         native_dwc3_dev_rderr, native_dwc3_in_flight, native_dwc3_in_xfers, native_dwc3_out_xfers);
         return n < 0 ? 0 : (size_t(n) < cap ? size_t(n) : cap);
       };
       alignas(4) static uint8_t rsp[usbdbg::kMaxData];
