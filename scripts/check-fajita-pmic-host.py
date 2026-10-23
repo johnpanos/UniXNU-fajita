@@ -17,9 +17,9 @@ SPMI = ROOT / 'drivers/NativeSpmi'
 PKG = ROOT / 'package'
 TESTS = [
     ('spmi-test', [SPMI / 'tests/spmi-test.cpp'], ['Spmi']),
-    ('fajita-pmic-board-test', [PKG / 'tests/fajita-pmic-board-test.cpp'], []),
+    ('fajita-pmic-board-test', [PKG / 'tests/fajita-pmic-board-test.cpp'], ['FajitaPmicBoard']),
 ]
-SOURCES = {'Spmi': SPMI / 'Spmi.c'}
+SOURCES = {'Spmi': SPMI / 'Spmi.c', 'FajitaPmicBoard': PKG / 'FajitaPmicBoard.c'}
 
 
 def sanitizers(cxx, out):
