@@ -144,6 +144,13 @@ Bugs found on hardware, each from a BootLog `V` row:
   to CPU 1 (Linux services ep0 from the interrupt).
 - The boot addon never reaches the iOS 16 kernel (BootLog `A files=-1` on every run, the
   touch board's too), so the kernel embeds the CI-signed agent and writes it itself.
+- Kernel replies carried the device's running seq; the host matches on the request's.
+- ep0 status stage: it must start on XferNotReady(control-status), on the endpoint the
+  event names (dwc3_ep0_xfernotready). Starting it right after the SETUP/data stage
+  wedged ep0 now and then (usb-enum8, 11, 12): later tty opens then blocked on cdc_acm's
+  SET_LINE_CODING/SET_CONTROL_LINE_STATE and the shell frames never went out. ep0 OUT
+  data TRBs are also rounded up to the max packet (the 7-byte SET_LINE_CODING).
+- The log may fill only half the TX ring, so replies and agent output are never starved.
 
 ## How to use
 
@@ -163,17 +170,26 @@ Host (no root; Python stdlib only):
 T=scripts/fajita-usbdbg.py
 python3 $T console                 # kernel log, live
 python3 $T hello | state           # kernel command layer
-python3 $T shell                   # type: ps -A | ioreg -l | hidutil list | @read /path
+python3 $T shell                   # interactive: ps -A | ioreg -l | hidutil list | @read /path
+python3 $T run ioreg -c IOService -d 2   # one command: its output, exit status = the command's
 ```
+`run` is the scripting interface (touch-driver iteration: `run ioreg -r -c FajitaTouch -l`,
+`run hidutil list`, `run @read /some/file`); a cold first command can take several seconds.
+Only one process can own the tty at a time (`cycle.sh CYCLE_USBLOG=1` is one such reader).
 The agent: `package/usb-debug-tools/fjdbg-agent.c`, built and 4 KiB ad-hoc signed by
 `.github/workflows/usb-debug-agent.yml`; download with
 `gh run download <id> -n fjdbg-agent -D /home/john/src/UniXNU-fajita/.cache/usbdbg-agent`.
 
 ## Left
 
-- ep0 status stage: start it on XferNotReady(status), as Linux does, rather than right
-  after the SETUP (works today when serviced promptly; the Linux order is more robust).
 - Interrupt-driven ep0 (GIC SPI 133) instead of the 1 ms poll.
 - Kernel memory/MMIO read hooks for the command layer (the protocol has them).
 - KDP over the KDP channel (`kdp-proxy` on the host is written).
 - Why the boot addon never arrives on the iOS 16 board (`A files=-1`).
+
+## Phone-side note
+
+The pmOS log reader's reboot helper (`/tmp/rb`) can hang in D state in the pmOS kernel's
+shutdown path (seen after usb-enum12: nine `/tmp/rb` stuck, phone left in pmOS).
+`echo b > /proc/sysrq-trigger` over the telnet shell resets at once and lands in fastboot;
+`cycle.sh` could fall back to it.
