@@ -24,6 +24,8 @@ extern volatile uint32_t native_dwc3_setups, native_dwc3_configured, native_dwc3
 extern volatile int32_t native_dwc3_gadget_status;
 extern volatile uint64_t native_dwc3_bulk_out, native_dwc3_bulk_in;
 extern const char *volatile native_dwc3_gadget_failure;
+extern volatile int32_t native_dwc3_smmu_slot_g, native_dwc3_smmu_bank_g;
+extern volatile uint32_t native_dwc3_smmu_banks;
 }
 
 namespace dwc3 {

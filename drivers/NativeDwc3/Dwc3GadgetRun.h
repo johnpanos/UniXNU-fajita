@@ -124,6 +124,13 @@ inline bool Gadget::setupEventBuffer()
   return true;
 }
 
+// Give the dwc3 stream (0x740) a VA64 bypass context bank so the controller's event
+// buffer and TRBs DMA with physical addresses. The NativeUfs planner assumes the top
+// banks are free and collides with UFS's stream-0x100 bank ("reserved context bank
+// already used"); here we instead scan for a bank that NO valid stream points to and
+// a free stream-match group, and install the same bypass recipe configureUfsSmmu uses
+// (SCTLR=0, CBA2R VA64=1, CBAR S1-trans/S2-bypass, S2CR->bank, SMR valid|0x740). UFS's
+// own bank and groups are left untouched. ARM SMMUv2 register layout.
 inline bool Gadget::smmuMap740()
 {
   IODeviceMemory *mem = IODeviceMemory::withRange(kAppsSmmuBase, kAppsSmmuSize);
@@ -133,12 +140,53 @@ inline bool Gadget::smmuMap740()
   if (!map) return false;
   uintptr_t smmu = uintptr_t(map->getVirtualAddress());
   if (!smmu) return false;
-  auto rd = [smmu](unsigned off) { return *reinterpret_cast<volatile uint32_t *>(smmu + off); };
+  auto rd = [smmu](unsigned off) -> uint32_t { return *reinterpret_cast<volatile uint32_t *>(smmu + off); };
   auto wr = [smmu](unsigned off, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(smmu + off) = v; __asm__ volatile("dsb sy" ::: "memory"); };
-  UfsSmmuPlan plan = planUfsSmmu(kDwc3SmmuStream, kDwc3SmmuMask, kAppsSmmuSize, dma.phys, GadgetDma::kTotal, rd, true);
-  if (plan.error) { native_dwc3_gadget_failure = plan.error; return false; }
-  const char *err = configureUfsSmmu(plan, kDwc3SmmuStream, kDwc3SmmuMask, rd, wr);
-  if (err) { native_dwc3_gadget_failure = err; return false; }
+
+  uint32_t idr0 = rd(0x20), idr1 = rd(0x24), idr2 = rd(0x28);
+  if (!(idr0 & (1u << 30)) || !(idr2 & (1u << 12))) { native_dwc3_gadget_failure = "smmu: no AArch64 s1"; return false; }
+  unsigned numSmr = idr0 & 0xff, banks = idr1 & 0xff, pages = 1u << (((idr1 >> 28) & 7) + 1);
+  if (numSmr > 128) numSmr = 128;
+  if (!numSmr || banks < 2 || (pages + banks) * 4096ull > kAppsSmmuSize) { native_dwc3_gadget_failure = "smmu geometry"; return false; }
+  native_dwc3_smmu_banks = banks;
+
+  const uint32_t wantSmr = 0x80000000u | (kDwc3SmmuStream & 0xffff);   // valid, mask 0, id 0x740
+  // Scan the stream-match table: note which banks are in use, whether 0x740 already has
+  // a group, and the first free group.
+  unsigned freeSlot = 0xffffffff, ourSlot = 0xffffffff;
+  bool bankUsed[128] = {false};
+  for (unsigned i = 0; i < numSmr; i++) {
+    uint32_t smr = rd(0x800 + 4 * i);
+    if (!(smr & 0x80000000u)) { if (freeSlot == 0xffffffff) freeSlot = i; continue; }
+    uint32_t s2cr = rd(0xc00 + 4 * i);
+    unsigned type = (s2cr >> 16) & 3, cbndx = s2cr & 0xff;
+    if (type == 0 && cbndx < 128) bankUsed[cbndx] = true;   // a translation/bypass context bank in use
+    if ((smr & 0xffff) == (kDwc3SmmuStream & 0xffff)) ourSlot = i;   // a prior group for our stream
+  }
+  unsigned slot = ourSlot != 0xffffffff ? ourSlot : freeSlot;
+  if (slot == 0xffffffff) { native_dwc3_gadget_failure = "smmu: no free stream group"; return false; }
+  // Pick a free context bank, scanning from the bottom (firmware tends to use the top).
+  unsigned bank = 0xffffffff;
+  for (unsigned b = 0; b < banks && b < 128; b++) {
+    if (bankUsed[b]) continue;
+    if (rd((pages + b) * 4096) & 1) continue;   // SCTLR.M set: a live translation context
+    bank = b;
+    break;
+  }
+  if (bank == 0xffffffff) { native_dwc3_gadget_failure = "smmu: no free context bank"; return false; }
+  native_dwc3_smmu_slot_g = int32_t(slot);
+  native_dwc3_smmu_bank_g = int32_t(bank);
+
+  // Install the bypass bank, then point our stream at it.
+  wr((pages + bank) * 4096, 0);          // SCTLR = 0 (translation disabled -> passthrough)
+  wr(0x1800 + 4 * bank, 1);              // CBA2R.VA64 = 1 (inputs may exceed 32 bits)
+  wr(0x1000 + 4 * bank, 0x10000);        // CBAR TYPE = S1_TRANS_S2_BYPASS
+  wr(0xc00 + 4 * slot, bank);            // S2CR: TYPE=translation-context, CBNDX = bank
+  wr(0x800 + 4 * slot, wantSmr);         // SMR: valid, id 0x740
+  if (rd(0x800 + 4 * slot) != wantSmr || (rd(0xc00 + 4 * slot) & 0xff) != bank ||
+      (rd((pages + bank) * 4096) & 1) || !(rd(0x1800 + 4 * bank) & 1)) {
+    native_dwc3_gadget_failure = "smmu readback"; return false;
+  }
   return true;
 }
 

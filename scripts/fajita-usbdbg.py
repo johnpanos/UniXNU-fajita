@@ -189,13 +189,14 @@ class ExecTransport:
 
 # ---- Link: reader thread + request/reply ------------------------------------------
 class Link:
-    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None):
+    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None, on_shell=None):
         self.t = transport
         self.demux = Demux()
         self.replies = queue.Queue()
         self.on_text = on_text or (lambda b: None)
         self.on_log = on_log or (lambda off, b: None)
         self.on_kdp = on_kdp or (lambda kind, pkt: None)
+        self.on_shell = on_shell or (lambda b: None)
         self.seq = 0
         self.lock = threading.Lock()
         self.stop = False
@@ -218,6 +219,8 @@ class Link:
                         self.on_log(struct.unpack_from('<Q', data)[0], data[8:])
                     elif ch == CH_KDP:
                         self.on_kdp('frame', data)
+                    elif ch == CH_SHELL:
+                        self.on_shell(data)
 
     def send_frame(self, channel, data):
         with self.lock:
@@ -378,6 +381,7 @@ def main():
     ap.add_argument('--log-file', help='also append the kernel log stream here')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('console')
+    sub.add_parser('shell')
     sub.add_parser('hello')
     sub.add_parser('state')
     p = sub.add_parser('read'); p.add_argument('space', choices=['virt', 'phys']); p.add_argument('addr'); p.add_argument('length')
@@ -412,14 +416,33 @@ def main():
         sys.stdout.buffer.write(data)
         sys.stdout.flush()
 
+    def on_shell(data):
+        sys.stdout.buffer.write(data)
+        sys.stdout.flush()
+
     def make(**kw):
         transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
         return Link(transport, **kw)
 
     if a.cmd == 'kdp-proxy':
         return kdp_proxy(make, a.listen, a.target_ip, a.mode)
+    if a.cmd == 'shell':
+        transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
+        link = Link(transport, on_text=on_text, on_log=on_log,
+                    on_shell=lambda b: (sys.stdout.buffer.write(b), sys.stdout.flush()))
+        print('fjdbg shell: type a command (ioreg -l, ps, hidutil, @read PATH); Ctrl-D to quit', file=sys.stderr)
+        try:
+            for raw in sys.stdin:
+                link.send_frame(CH_SHELL, raw.encode())
+        except KeyboardInterrupt:
+            pass
+        finally:
+            time.sleep(0.3)
+            link.close()
+        return
     streaming = a.cmd in ('console', 'log')
-    link = make(on_text=on_text if streaming else None, on_log=on_log if streaming else None)
+    link = make(on_text=on_text if streaming else None, on_log=on_log if streaming else None,
+                on_shell=on_shell if streaming else None)
     try:
         if a.cmd == 'console':
             while True:

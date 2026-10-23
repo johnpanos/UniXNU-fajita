@@ -71,6 +71,9 @@ extern volatile uint32_t native_dwc3_addr __attribute__((weak_import));
 extern volatile uint64_t native_dwc3_bulk_out __attribute__((weak_import));
 extern volatile uint64_t native_dwc3_bulk_in __attribute__((weak_import));
 extern const char *volatile native_dwc3_gadget_failure __attribute__((weak_import));
+extern volatile int32_t native_dwc3_smmu_slot_g __attribute__((weak_import));
+extern volatile int32_t native_dwc3_smmu_bank_g __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_smmu_banks __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_major __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_opens __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_stage __attribute__((weak_import));
@@ -375,6 +378,8 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              native_dwc3_gadget_stage, native_dwc3_gadget_status, native_dwc3_clocks_up, native_dwc3_phy_up,
              native_dwc3_link_speed, native_dwc3_addr, native_dwc3_setups, native_dwc3_configured, native_dwc3_events,
              (unsigned long long)native_dwc3_bulk_out, (unsigned long long)native_dwc3_bulk_in);
+    at = put(out, at, cap, row, sizeof row);
+    snprintf(row, sizeof row, "V smmu=%d/%d banks=%u", native_dwc3_smmu_slot_g, native_dwc3_smmu_bank_g, native_dwc3_smmu_banks);
     at = put(out, at, cap, row, sizeof row);
     // The userland bridge: /dev/fjdbg major and opens, and the agent mount over /usr/sbin (kern_exec.c, stage 5 = mounted
     // and the agent visible through it; status 0 ok or an errno).
