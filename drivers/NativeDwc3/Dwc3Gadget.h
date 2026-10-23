@@ -29,6 +29,8 @@ extern volatile uint32_t native_dwc3_smmu_banks, native_dwc3_resets;
 extern volatile uint8_t native_dwc3_setup_trace[8][8];
 extern volatile uint32_t native_dwc3_event_trace[36];
 extern volatile uint32_t native_dwc3_trace_setups, native_dwc3_trace_events;
+extern volatile uint32_t native_dwc3_polls, native_dwc3_out_xfers, native_dwc3_in_xfers, native_dwc3_in_flight;
+extern volatile uint32_t native_dwc3_cmd_fails, native_dwc3_cmd_last_fail;
 }
 
 namespace dwc3 {
@@ -161,9 +163,18 @@ static int depCmd(const Mmio &m, unsigned ep, uint32_t cmd, uint32_t p0, uint32_
   m.core_wr(dwc3DepCmd(ep), cmd | kDwc3DepCmdAct);
   for (int i = 0; i < 5000; i++) {
     uint32_t r = m.core_rd(dwc3DepCmd(ep));
-    if (!(r & kDwc3DepCmdAct)) return int(dwc3DepCmdStatus(r));
+    if (!(r & kDwc3DepCmdAct)) {
+      int st = int(dwc3DepCmdStatus(r));
+      if (st) {   // record ep, command and status of the last refused command (BootLog V row)
+        native_dwc3_cmd_fails = native_dwc3_cmd_fails + 1;
+        native_dwc3_cmd_last_fail = (uint32_t(ep) << 24) | ((cmd & 0xf) << 16) | uint32_t(st);
+      }
+      return st;
+    }
     gdelay(100);
   }
+  native_dwc3_cmd_fails = native_dwc3_cmd_fails + 1;
+  native_dwc3_cmd_last_fail = (uint32_t(ep) << 24) | ((cmd & 0xf) << 16) | 0xffffu;   // timeout
   return -1;
 }
 

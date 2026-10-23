@@ -455,9 +455,11 @@ inline void Gadget::kickTx()
   t->ctrl = kDwc3TrbCtlNormal | kDwc3TrbHwo | kDwc3TrbIoc | kDwc3TrbLst;
   cache_flush(t, sizeof *t);
   inFlight = true;
+  native_dwc3_in_flight = 1;
   inFlightLen = chunk;
   if (depCmd(m, kPBulkIn, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kBulkInTrb) >> 32), uint32_t(dma.pa(GadgetDma::kBulkInTrb)), 0) != 0) {
     inFlight = false;   // command refused: retry on the next poll
+    native_dwc3_in_flight = 0;
   }
 }
 
@@ -468,7 +470,9 @@ inline void Gadget::onBulkInDone()
   txTail += inFlightLen;
   IOSimpleLockUnlock(txLock);
   native_dwc3_bulk_in = native_dwc3_bulk_in + inFlightLen;
+  native_dwc3_in_xfers = native_dwc3_in_xfers + 1;
   inFlight = false;
+  native_dwc3_in_flight = 0;
 }
 
 inline void Gadget::onBulkOut(uint32_t remaining)
@@ -476,6 +480,7 @@ inline void Gadget::onBulkOut(uint32_t remaining)
   cache_flush(dma.at(GadgetDma::kBulkOutData), kBulkOutBytes);
   uint32_t got = remaining <= kBulkOutBytes ? kBulkOutBytes - remaining : 0;   // TRB size counts down
   native_dwc3_bulk_out = native_dwc3_bulk_out + got;
+  native_dwc3_out_xfers = native_dwc3_out_xfers + 1;
   const uint8_t *in = dma.at(GadgetDma::kBulkOutData);
   for (uint32_t i = 0; i < got; i++) {
     if (rx.feed(in[i]) != usbdbg::Decoder::kFrame) continue;

@@ -85,6 +85,9 @@ volatile uint32_t native_dwc3_smmu_banks = 0, native_dwc3_resets = 0;
 volatile uint8_t native_dwc3_setup_trace[8][8];
 volatile uint32_t native_dwc3_event_trace[36];
 volatile uint32_t native_dwc3_trace_setups = 0, native_dwc3_trace_events = 0;
+// Data-path health: poll-loop heartbeat, bulk transfer completions, the IN in-flight flag, endpoint-command failures.
+volatile uint32_t native_dwc3_polls = 0, native_dwc3_out_xfers = 0, native_dwc3_in_xfers = 0, native_dwc3_in_flight = 0;
+volatile uint32_t native_dwc3_cmd_fails = 0, native_dwc3_cmd_last_fail = 0;
 }
 
 static bool gProbeEnabled = false;
@@ -211,6 +214,7 @@ static void dwc3GadgetThread(void *, wait_result_t)
   }
   for (;;) {
     if (gGadget) {
+      native_dwc3_polls = native_dwc3_polls + 1;
       gGadget->poll();
       gGadget->pumpLog();
       gGadget->kickTx();
