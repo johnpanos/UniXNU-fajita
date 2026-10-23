@@ -29,7 +29,7 @@ spec = importlib.util.spec_from_file_location('fjdbg', HERE / 'fajita-usbdbg.py'
 fj = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fj)
 
-DEFAULT_SOCK = os.environ.get('FAJITA_USBDBG_HUB', '/tmp/claude-1000/fjdbg-hub.sock')
+DEFAULT_SOCK = os.environ.get('FAJITA_USBDBG_HUB', os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'fjdbg-hub.sock'))
 
 
 def find_tty():
