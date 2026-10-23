@@ -164,6 +164,27 @@ kernel_args = [
   "sheng-gpu-addon=1",
 ]
 
+# Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,
+# <original>,<replacement> in hex, located in 20H392 by the same symbols and instruction patterns and checked against its bytes
+# (dyld_shared_cache_arm64.11 and .13 of the 20H392 SystemOS, BTAudioHALPlugin of its OS volume).
+text_fixups = [
+  # +[AWAttentionAwarenessConfiguration initialize] (20H392: the same adrp/ldr/b, a tail call of [AWClientPreferences
+  # initializePreferences], an empty method that only forces +[AWClientPreferences initialize], which dispatch_syncs onto its
+  # preferences queue from inside class initialization, the ABBA of the iPad's SpringBoard and Siri's SASMyriadController); it
+  # returns at once instead.
+  "dyld_shared_cache_arm64.13,1cd5a9c,684a19d0004d47f9,c0035fd6004d47f9",
+  # PosterBoardServices: PRSPosterPathFileAttributes ({NSFilePosixPermissions, NSFileProtectionKey: NSFileProtectionNone}, the
+  # attributes PosterBoard creates its store directories with) keeps only its first entry, as on the iPad. 20H392 has no
+  # PRSPosterPathURLResourceValues and no data store viability check or migrator: its counterpart,
+  # +[PBFPosterModelStoreCoordinator expectedURLResourceValuesForAllPaths], only feeds the best-effort
+  # _accessQueue_fixupResourceValues pass (it sets values and logs failures), so nothing there keeps the store from being made.
+  "dyld_shared_cache_arm64.11,10cbca8,44008052,24008052",
+  # BTAudioHALPlugin's factory (AudioServerPlugIn_Create, 20H392 at 0x356f8 with the same prologue) returns NULL, so the audio server
+  # (mediaserverd: iOS 16 has no audiomxd) skips it. bluetoothd is disabled here too (sheng-lite=1), and the plugin has the same
+  # connection code to com.apple.BTAudioHALPlugin.xpc that looped on the iPad.
+  "BTAudioHALPlugin,356f8,ffc300d1f44f01a9,000080d2c0035fd6",
+]
+
 [payload.adt]
 tool = "scripts/make-fajita-adt.py"
 root_match_volume_uuid = "DADD93F8-DBBF-4B17-A1DF-0F11E64172F7"   # the 20H392 OS volume

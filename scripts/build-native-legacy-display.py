@@ -132,6 +132,35 @@ LEGACY = {
 }
 
 
+# The original IOHIDFamily ABI the edge-tip wrapper of drivers/NativeHidInput (fajita's copy) uses, per accepted kernelcache: the
+# IOHIDEventDriver vtable (its own entry count) and the dispatchEvent slot it wraps, the IOHIDEvent vtable with the getType,
+# getIntegerValue, setIntegerValue and getFixedValue slots it calls, and IOHIDEvent's _children field, which free() loads and clears.
+# Each slot is (index, original function, its first instruction bytes). 21H461 is sheng's set (IOHIDFamily-2031.120.4). 20H392 was
+# matched against it slot by slot (the IOHIDEvent tables are identical, 37 entries; the IOHIDEventDriver table has 219 entries, one
+# fewer, past slot 216; IOHIDFamily calls slot 198 indirectly 37 times in both): the numbers are the same.
+HID_EVENT = {
+    '21H461': dict(
+        driver_vtable=0xfffffff005d06a68, driver_metaclass=0xfffffff006ae72f0, driver_slots=220,
+        dispatch=(198, 0xfffffff004aface8, 'f85fbca9f65701a9f44f02a9fd7b03a9fdc30091f30302aaf40301aaf50300aa'),
+        event_vtable=0xfffffff005d07318, event_metaclass=0xfffffff006ae7318, event_slots=37,
+        get_type=(18, 0xfffffff004afcf90, '080840f9000540b9c0035fd6'),
+        get_integer=(23, 0xfffffff004afcfb8, 'f44fbea9fd7b01a9fd430091f30301aae80300aa347c1053600000b47f424071'),
+        set_integer=(24, 0xfffffff004afefdc, 'f657bda9f44f01a9fd7b02a9fd830091f30302aaf40301aa357c1053600000b4'),
+        get_fixed=(25, 0xfffffff004afe4c4, 'f44fbea9fd7b01a9fd430091f30301aae80300aa347c1053600000b47f424071'),
+        # free (slot 14, its address): ldr x0, [x19, #0x18] (the children array it releases), then str xzr, [x19, #0x18].
+        children=(24, 14, 0xfffffff004afb424, ((0xfffffff004afb460, '600e40f9'), (0xfffffff004afb474, '7f0e00f9')))),
+    '20H392': dict(
+        driver_vtable=0xfffffff005cc0770, driver_metaclass=0xfffffff006a12c30, driver_slots=219,
+        dispatch=(198, 0xfffffff004747ff8, 'f85fbca9f65701a9f44f02a9fd7b03a9fdc30091f30302aaf40301aaf50300aa'),
+        event_vtable=0xfffffff005cc1018, event_metaclass=0xfffffff006a12c58, event_slots=37,
+        get_type=(18, 0xfffffff00474a208, '080840f9000540b9c0035fd6'),
+        get_integer=(23, 0xfffffff00474a230, 'f44fbea9fd7b01a9fd430091f30301aae80300aa347c1053600000b47f424071'),
+        set_integer=(24, 0xfffffff00474c09c, 'f657bda9f44f01a9fd7b02a9fd830091f30302aaf40301aa357c1053600000b4'),
+        get_fixed=(25, 0xfffffff00474b620, 'f44fbea9fd7b01a9fd430091f30301aae80300aa347c1053600000b47f424071'),
+        children=(24, 14, 0xfffffff004748734, ((0xfffffff004748770, '600e40f9'), (0xfffffff004748784, '7f0e00f9')))),
+}
+
+
 def run(cmd, **kw):
     return subprocess.check_output([str(x) for x in cmd], timeout=300, **kw)
 
@@ -570,6 +599,55 @@ probe_objs = [compile_with(cpp, r, source) for source in probes]
 c_sources = [KIT / 'BootProcessProbe.c', KIT / 'BootUiTraceProbe.c']
 probe_objs += [compile_with(c, pr, source) for source in c_sources]
 
+# The IOHIDFamily layout of the edge-tip wrapper (HID_EVENT above), qualified against the candidate and generated for the driver
+# (drivers/NativeHidInput includes it from build/native-hid-input, the include directory build-arm-driver.py gives it).
+hid = HID_EVENT[build]
+
+
+def slot_target(vtable, index):
+    return struct.unpack('<Q', read(vtable + index * 8, 8))[0]
+
+
+def returns_metaclass(function, metaclass):
+    """getMetaClass: adrp x0, page; add x0, x0, offset; ret."""
+    page, add, ret = struct.unpack('<3I', read(function, 12))
+    if page & 0x9f00001f != 0x90000000 or add & 0xffc003ff != 0x91000000 or ret != 0xd65f03c0:
+        return False
+    pages = ((page >> 5) & 0x7ffff) << 2 | (page >> 29) & 3
+    return (function & ~4095) + ((pages - (1 << 21) if pages >> 20 else pages) << 12) + (add >> 10 & 4095) == metaclass
+
+
+for table, metaclass, count, what in ((hid['driver_vtable'], hid['driver_metaclass'], hid['driver_slots'], 'IOHIDEventDriver'),
+                                      (hid['event_vtable'], hid['event_metaclass'], hid['event_slots'], 'IOHIDEvent')):
+    require(returns_metaclass(slot_target(table, 7), metaclass), f'Original {what} vtable (getMetaClass returns its metaclass)')
+    require(all(slot_target(table, i) for i in range(count)) and slot_target(table, count) == 0, f'Original {count}-entry {what} vtable')
+for name, table in (('dispatch', 'driver_vtable'), ('get_type', 'event_vtable'), ('get_integer', 'event_vtable'),
+                    ('set_integer', 'event_vtable'), ('get_fixed', 'event_vtable')):
+    index, function, expected = hid[name]
+    require(slot_target(hid[table], index) == function and read(function, len(expected) // 2) == bytes.fromhex(expected),
+            f'Original HID {name} slot {index}')
+children, free_slot, free, children_checks = hid['children']
+require(slot_target(hid['event_vtable'], free_slot) == free and all(0 < va - free < 0x80 for va, _ in children_checks),
+        'Original IOHIDEvent free')
+instructions(children_checks, 'IOHIDEvent free releases and clears the children array')
+require(all(struct.unpack('<I', read(va, 4))[0] >> 10 & 0xfff == children // 8 for va, _ in children_checks), 'Children offset')
+hid_layout = f'''// Generated by scripts/build-native-legacy-display.py: the original {build} IOHIDFamily ABI of NativeHidInput's edge-tip wrapper.
+#pragma once
+#define NATIVE_HID_EVENT_ORIGINAL_BUILD "{build}"
+// The IOHIDEventDriver vtable entries (the wrapper copies 256) and its dispatchEvent slot.
+#define NATIVE_HID_EVENT_DRIVER_SLOTS {hid['driver_slots']}
+#define NATIVE_HID_DISPATCH_EVENT_SLOT {hid['dispatch'][0]}
+// IOHIDEvent: getType, getIntegerValue, setIntegerValue and getFixedValue slots, and the _children array.
+#define NATIVE_HID_EVENT_GET_TYPE_SLOT {hid['get_type'][0]}
+#define NATIVE_HID_EVENT_GET_INTEGER_SLOT {hid['get_integer'][0]}
+#define NATIVE_HID_EVENT_SET_INTEGER_SLOT {hid['set_integer'][0]}
+#define NATIVE_HID_EVENT_GET_FIXED_SLOT {hid['get_fixed'][0]}
+#define NATIVE_HID_EVENT_CHILDREN {children}
+'''
+hid_out = ROOT / 'build/native-hid-input'
+hid_out.mkdir(parents=True, exist_ok=True)
+(hid_out / 'OriginalHidEventLayout.h').write_text(hid_layout)
+
 # The drivers: NativeHidInput through UniXNU's qualification of the original IOHIDDevice, then NativeKeyStoreEvents and the presenter.
 print(run(['python3', ROOT / 'scripts/build-native-hid-input.py'], text=True, env=env), end='')
 hid_dir = ROOT / 'build/native-hid-input'
@@ -610,6 +688,7 @@ report = dict(
     source_sha256={str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(p): sha(p) for p in sources},
     original_build=build, generated_abi_sha256=sha(OUT / 'OriginalLegacyFramebufferABI.h'),
     generated_layout_sha256=sha(OUT / 'OriginalLegacyLayout.h'),
+    generated_hid_event_layout_sha256=sha(hid_out / 'OriginalHidEventLayout.h'),
     original_candidate_sha256=sha(reference), original_audit_sha256=sha(analysis),
     compiled_object_sha256=sha(obj), late_object_sha256=sha(late), archive_sha256=sha(archive),
     members=[m.name for m in members],
