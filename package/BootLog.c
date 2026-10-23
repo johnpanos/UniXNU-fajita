@@ -75,6 +75,10 @@ extern volatile int32_t native_dwc3_smmu_slot_g __attribute__((weak_import));
 extern volatile int32_t native_dwc3_smmu_bank_g __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_smmu_banks __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_resets __attribute__((weak_import));
+extern volatile uint8_t native_dwc3_setup_trace[8][8] __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_event_trace[36] __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_trace_setups __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_trace_events __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_major __attribute__((weak_import));
 extern volatile uint32_t native_dwc3_dev_opens __attribute__((weak_import));
 extern volatile int native_fjdbg_agent_stage __attribute__((weak_import));
@@ -390,6 +394,24 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              &native_dwc3_dev_opens ? native_dwc3_dev_opens : 0, &native_fjdbg_agent_stage ? native_fjdbg_agent_stage : -9,
              &native_fjdbg_agent_status ? native_fjdbg_agent_status : -9, &native_fjdbg_agent_write ? native_fjdbg_agent_write : -9);
     at = put(out, at, cap, row, sizeof row);
+    // The first SETUP packets of the run (bmRequestType bRequest wValue wIndex wLength) and its first raw events.
+    {
+      unsigned n = native_dwc3_trace_setups, shown = n < 8 ? n : 8, at2;
+      at2 = (unsigned)snprintf(row, sizeof row, "V sx%u:", n);
+      for (unsigned i = 0; i < shown && at2 + 14 < sizeof row; i++) {
+        volatile uint8_t *t = native_dwc3_setup_trace[i];
+        at2 += (unsigned)snprintf(row + at2, sizeof row - at2, " %02x%02x%02x%02x%02x%02x", t[0], t[1], t[3], t[2], t[7], t[6]);
+      }
+      at = put(out, at, cap, row, sizeof row);
+      n = native_dwc3_trace_events; shown = n < 36 ? n : 36;
+      for (unsigned base = 0; base < shown; base += 12) {
+        at2 = (unsigned)snprintf(row, sizeof row, "V ex%u+%u:", n, base);
+        for (unsigned i = base; i < shown && i < base + 12 && at2 + 10 < sizeof row; i++) {
+          at2 += (unsigned)snprintf(row + at2, sizeof row - at2, " %x", native_dwc3_event_trace[i]);
+        }
+        at = put(out, at, cap, row, sizeof row);
+      }
+    }
     if (native_dwc3_gadget_failure) {
       snprintf(row, sizeof row, "V fail: %.100s", native_dwc3_gadget_failure);
       at = put(out, at, cap, row, sizeof row);

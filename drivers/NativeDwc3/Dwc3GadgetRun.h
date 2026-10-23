@@ -322,6 +322,11 @@ inline void Gadget::ep0Status(bool threeStage)
 inline void Gadget::onSetupComplete()
 {
   cache_flush(dma.at(GadgetDma::kEp0Data), 8);
+  {
+    unsigned k = native_dwc3_trace_setups;
+    if (k < 8) for (unsigned b = 0; b < 8; b++) native_dwc3_setup_trace[k][b] = dma.at(GadgetDma::kEp0Data)[b];
+    native_dwc3_trace_setups = native_dwc3_trace_setups + 1;
+  }
   acmep0::Setup s = acmep0::parseSetup(dma.at(GadgetDma::kEp0Data));
   native_dwc3_setups = native_dwc3_setups + 1;
   pending = acmep0::handleSetup(ep0, s);
@@ -500,6 +505,8 @@ inline void Gadget::poll()
     uint32_t e = ev[pos];
     pos = (pos + 1) % (GadgetDma::kEventBytes / 4);
     native_dwc3_events = native_dwc3_events + 1;
+    if (native_dwc3_trace_events < 36) native_dwc3_event_trace[native_dwc3_trace_events] = e;
+    native_dwc3_trace_events = native_dwc3_trace_events + 1;
     if (dwc3EvtIsDevSpec(e)) {
       if (!dwc3EvtIsDevice(e)) continue;   // carkit/i2c classes: not used
       unsigned type = dwc3DevEvtType(e);

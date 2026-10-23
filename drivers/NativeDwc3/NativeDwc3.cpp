@@ -81,6 +81,10 @@ volatile uint64_t native_dwc3_bulk_out = 0, native_dwc3_bulk_in = 0;
 const char *volatile native_dwc3_gadget_failure = nullptr;
 volatile int32_t native_dwc3_smmu_slot_g = -1, native_dwc3_smmu_bank_g = -1;
 volatile uint32_t native_dwc3_smmu_banks = 0, native_dwc3_resets = 0;
+// Traces for the boot log: the first 8 SETUP packets (8 bytes each) and the first 36 raw events of the run.
+volatile uint8_t native_dwc3_setup_trace[8][8];
+volatile uint32_t native_dwc3_event_trace[36];
+volatile uint32_t native_dwc3_trace_setups = 0, native_dwc3_trace_events = 0;
 }
 
 static bool gProbeEnabled = false;
