@@ -21,6 +21,16 @@
 #include <pexpert/pexpert.h>
 #include <kern/debug.h>
 #include <kern/thread.h>
+#include <libkern/OSAtomic.h>
+extern "C" {
+#include <sys/types.h>
+#include <sys/conf.h>
+#include <sys/uio.h>
+#include <sys/systm.h>
+#include <sys/errno.h>
+#include <sys/vnode.h>
+#include <miscfs/devfs/devfs.h>
+}
 #define NATIVE_DWC3_KERNEL 1
 #include "Dwc3Registers.h"
 #include "Dwc3Phy.h"
@@ -86,8 +96,81 @@ static uintptr_t dwc3MapPhys(uint64_t phys, uint64_t length, OSSharedPtr<IOMemor
 // correct initial state. It lives for the driver's life.
 static dwc3::Gadget *gGadget = nullptr;
 
-// The polled service thread: drains the DWC3 event buffer and mirrors the kernel log
-// to the host. No IRQ, no locks, so it is safe this early and from the debug path.
+// ---- /dev/fjdbg: the userland end of the SHELL channel ---------------------------
+// A userland agent opens /dev/fjdbg; read() returns bytes the host sent on the SHELL
+// channel, write() sends bytes back to the host as SHELL frames. One opener at a time.
+static volatile uint32_t gDevOpen = 0;
+static bool gDevCreated = false;
+extern "C" vnode_t rootvnode __attribute__((weak_import));
+extern "C" volatile uint32_t native_dwc3_dev_major = 0, native_dwc3_dev_opens = 0;
+
+static int fjdbgOpen(dev_t, int, int, struct proc *)
+{
+  if (!gGadget) return ENXIO;
+  if (!OSCompareAndSwap(0, 1, &gDevOpen)) return EBUSY;
+  native_dwc3_dev_opens = native_dwc3_dev_opens + 1;
+  return 0;
+}
+
+static int fjdbgClose(dev_t, int, int, struct proc *)
+{
+  gDevOpen = 0;
+  return 0;
+}
+
+static int fjdbgRead(dev_t, struct uio *uio, int)
+{
+  dwc3::Gadget *g = gGadget;
+  while (g->shHead == g->shTail) {
+    struct timespec ts = {1, 0};
+    int err = msleep(const_cast<uint32_t *>(&g->shHead), nullptr, PZERO | PCATCH, "fjdbg", &ts);
+    if (err && err != EWOULDBLOCK) return err;   // EINTR/ERESTART: a signal
+  }
+  int err = 0;
+  while (!err && g->shHead != g->shTail && uio_resid(uio) > 0) {
+    uint32_t tail = g->shTail, avail = g->shHead - tail;
+    uint32_t off = tail & (dwc3::Gadget::kShRing - 1);
+    uint32_t run = dwc3::Gadget::kShRing - off;   // contiguous bytes before the wrap
+    uint32_t n = avail < run ? avail : run;
+    if (n > uint32_t(uio_resid(uio))) n = uint32_t(uio_resid(uio));
+    err = uiomove(reinterpret_cast<const char *>(g->shRx + off), int(n), uio);
+    if (!err) g->shTail = tail + n;
+  }
+  return err;
+}
+
+static int fjdbgWrite(dev_t, struct uio *uio, int)
+{
+  dwc3::Gadget *g = gGadget;
+  char buf[1024];
+  while (uio_resid(uio) > 0) {
+    int n = int(uio_resid(uio) < int(sizeof buf) ? uio_resid(uio) : sizeof buf);
+    int err = uiomove(buf, n, uio);
+    if (err) return err;
+    // The TX ring may be full while the host is slow: wait up to ~2 s, then drop.
+    for (int tries = 0; tries < 400 && !g->queueFrame(usbdbg::kChShell, reinterpret_cast<uint8_t *>(buf), size_t(n)); tries++) {
+      IOSleep(5);
+    }
+  }
+  return 0;
+}
+
+static struct cdevsw gFjdbgSw = {
+  fjdbgOpen, fjdbgClose, fjdbgRead, fjdbgWrite, eno_ioctl, eno_stop, eno_reset, nullptr,
+  eno_select, eno_mmap, eno_strat, eno_getc, eno_putc, 0,
+};
+
+static void fjdbgCreateNode()
+{
+  int major = cdevsw_add(-1, &gFjdbgSw);
+  if (major < 0) return;
+  native_dwc3_dev_major = uint32_t(major);
+  devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "fjdbg");
+}
+
+// The polled service thread: drains the DWC3 event buffer, mirrors the kernel log to
+// the host and moves queued frames to the bulk-IN endpoint. Only this thread touches
+// the controller. Once the root (and with it devfs) is mounted it creates /dev/fjdbg.
 static void dwc3GadgetThread(void *, wait_result_t)
 {
   thread_set_thread_name(current_thread(), "native_dwc3");
@@ -95,6 +178,11 @@ static void dwc3GadgetThread(void *, wait_result_t)
     if (gGadget) {
       gGadget->poll();
       gGadget->pumpLog();
+      gGadget->kickTx();
+      if (!gDevCreated && &rootvnode && rootvnode) {
+        gDevCreated = true;
+        fjdbgCreateNode();
+      }
     }
     IOSleep(2);   // 2 ms: fast enough for enumeration, light on the CPU
   }
@@ -161,6 +249,14 @@ void NativeDwc3::startGadget()
   gGadget = IONewZero(dwc3::Gadget, 1);
   if (!gGadget) {
     native_dwc3_gadget_failure = "gadget alloc";
+    native_dwc3_gadget_status = -1;
+    return;
+  }
+  gGadget->txLock = IOSimpleLockAlloc();
+  gGadget->txRing = static_cast<uint8_t *>(IOMallocZeroData(dwc3::Gadget::kTxRing));
+  gGadget->shRx = static_cast<uint8_t *>(IOMallocZeroData(dwc3::Gadget::kShRing));
+  if (!gGadget->txLock || !gGadget->txRing || !gGadget->shRx) {
+    native_dwc3_gadget_failure = "gadget rings";
     native_dwc3_gadget_status = -1;
     return;
   }

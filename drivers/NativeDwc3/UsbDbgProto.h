@@ -18,6 +18,7 @@
 //   CMD  2  host -> device: a request (UsbDbgDevice.h); the reply echoes seq
 //   RSP  3  device -> host: the reply
 //   KDP  4  both ways: one Ethernet frame of the KDP UDP link (kdp_register_send_receive)
+//   SHELL 5 both ways: raw bytes to/from the userland agent behind /dev/fjdbg
 //
 // The host side is scripts/fajita-usbdbg.py, which mirrors these constants; the host
 // tests (tests/UsbDbgProto.cpp, tests/run.sh) check that both agree byte for byte.
@@ -41,7 +42,7 @@ enum : uint8_t {
   kProtoVersion = 1,
 };
 
-enum Channel : uint8_t { kChCtrl = 0, kChLog = 1, kChCmd = 2, kChRsp = 3, kChKdp = 4 };
+enum Channel : uint8_t { kChCtrl = 0, kChLog = 1, kChCmd = 2, kChRsp = 3, kChKdp = 4, kChShell = 5 };
 
 enum : size_t {
   kHeaderBytes = 4,

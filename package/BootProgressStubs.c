@@ -141,3 +141,6 @@ __attribute__((weak)) char native_touch_xs[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_touch_ys[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_wifi_stats[4096] __attribute__((aligned(16)));
 __attribute__((weak)) void sheng_cpufreq_poll(void) {   }
+// The usb-debug agent mount status (the fajita 8796 zzy-native-gpu-addon-mount.patch defines the real ones; BootLog row V).
+__attribute__((weak)) volatile int native_fjdbg_agent_stage = 0;
+__attribute__((weak)) volatile int native_fjdbg_agent_status = -1;

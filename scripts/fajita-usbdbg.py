@@ -40,7 +40,7 @@ from pathlib import Path
 FRAME_START, FRAME_END, FRAME_ESC, KDP_START = 0xFC, 0xFB, 0xFE, 0xFA
 ESCAPED = {KDP_START, FRAME_END, FRAME_START, FRAME_ESC, 0x0A}
 PROTO_VERSION, MAX_DATA = 1, 1536
-CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP = range(5)
+CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP, CH_SHELL = range(6)
 OPS = dict(hello=0x0001, state=0x0002, read_virt=0x0010, write_virt=0x0011, read_phys=0x0012, write_phys=0x0013,
            read32=0x0014, write32=0x0015, log_from=0x0020, kcmd=0x0030, panic=0x0040, reset=0x0041, wdog=0x0042)
 REPLY_BIT = 0x8000

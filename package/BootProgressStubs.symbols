@@ -134,3 +134,5 @@ native_touch_xs
 native_touch_ys
 native_wifi_stats
 sheng_cpufreq_poll
+native_fjdbg_agent_stage
+native_fjdbg_agent_status

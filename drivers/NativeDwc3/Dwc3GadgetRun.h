@@ -18,6 +18,7 @@
 extern "C" {
 struct dwc3_msgbuf { int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc; };
 extern struct dwc3_msgbuf *msgbufp __attribute__((weak_import));
+void wakeup(void *chan);   // bsd/sys/systm.h
 }
 
 namespace dwc3 {
@@ -42,10 +43,29 @@ public:
   usbdbg::Decoder rx;
   uint16_t txSeq;
   uint64_t logOffset;
+  // Device->host byte ring of encoded frames. Any thread enqueues (queueFrame, under
+  // txLock); only the poll thread moves bytes to the bulk-IN TRB (kickTx), one
+  // transfer in flight at a time, advanced on its XferComplete.
+  static constexpr uint32_t kTxRing = 32768;   // power of two
+  static constexpr uint32_t kTxChunk = 16384;  // max bytes per bulk-IN transfer
+  IOSimpleLock *txLock;
+  uint32_t txHead, txTail;          // free-running indices (mod kTxRing)
+  bool inFlight;
+  uint32_t inFlightLen;
+  uint8_t encBuf[usbdbg::kMaxEncoded];
+  uint8_t *txRing;                  // kTxRing bytes, IOMallocZeroData
+  // Host->agent SHELL bytes for /dev/fjdbg (single producer: poll thread; single
+  // consumer: the agent's read()).
+  static constexpr uint32_t kShRing = 8192;   // power of two
+  volatile uint32_t shHead, shTail;
+  uint8_t *shRx;                    // kShRing bytes, IOMallocZeroData
+  volatile uint32_t shOverflow;
 
   bool bringUp(unsigned mode);
   void poll();                     // drain the event buffer once
   void pumpLog();                  // mirror new kernel-log bytes to the host
+  void kickTx();                   // poll thread: start the next bulk-IN transfer if idle
+  bool queueFrame(uint8_t channel, const uint8_t *data, size_t len);   // any thread
 
 private:
   void fail(GadgetStage st, const char *why) { native_dwc3_gadget_stage = st; native_dwc3_gadget_status = -int(st); native_dwc3_gadget_failure = why; }
@@ -61,8 +81,8 @@ private:
   void onEp0DataOrStatus(unsigned ep);
   void enableBulk();
   void armBulkOut();
-  void onBulkOut(uint32_t transferred);
-  void sendFrame(uint8_t channel, const uint8_t *data, size_t len);
+  void onBulkOut(uint32_t remaining);
+  void onBulkInDone();
 };
 
 // ---- bring-up ---------------------------------------------------------------------
@@ -256,7 +276,9 @@ inline void Gadget::onSetupComplete()
   pending = acmep0::handleSetup(ep0, s);
   switch (pending.kind) {
   case acmep0::kStall:
-    depCmd(m, kPEp0In, kDwc3DepCmdStartXfer, 0, 0, 0);   // (a real stall uses SETSTALL; re-arm setup instead)
+    // Protocol stall on ep0 (dwc3_ep0_stall_and_restart): SETSTALL on ep0 OUT, then a
+    // fresh SETUP; the controller clears the ep0 stall on the next SETUP by itself.
+    depCmd(m, kPEp0Out, 0x04 /* DEPCMD_SETSTALL */, 0, 0, 0);
     ep0QueueSetup();
     break;
   case acmep0::kTxData:
@@ -303,7 +325,7 @@ inline void Gadget::enableBulk()
   depCmd(m, kPBulkOut, kDwc3DepCmdStartConfig | dwc3DepCmdParam(2), 0, 0, 0);
   auto cfgBulk = [&](unsigned ep) {
     uint32_t p0 = uint32_t(kDwc3EpTypeBulk << kDwc3DepCfgTypeShift) | (512u << kDwc3DepCfgMaxPktShift) | kDwc3DepCfgActionInit;
-    uint32_t p1 = kDwc3DepCfgXferCompleteEn | kDwc3DepCfgXferInProgressEn | (uint32_t(ep) << kDwc3DepCfgEpNumShift);
+    uint32_t p1 = kDwc3DepCfgXferCompleteEn | (uint32_t(ep) << kDwc3DepCfgEpNumShift);
     if (ep & 1) p0 |= (uint32_t(ep >> 1) << kDwc3DepCfgFifoNumShift);
     depCmd(m, ep, kDwc3DepCmdSetEpConfig, p0, p1, 0);
     depCmd(m, ep, kDwc3DepCmdSetXferResource, kDwc3DepXferCfgNumXferRes1, 0, 0);
@@ -313,55 +335,100 @@ inline void Gadget::enableBulk()
   m.core_wr(kDwc3DALEPENA, m.core_rd(kDwc3DALEPENA) | (1u << kPBulkOut) | (1u << kPBulkIn));
   bulkStarted = true;
   armBulkOut();
-  // Greet the host so a round-trip is visible without any host command.
-  const char hello[] = "fajita usb-debug: gadget up\r\n";
-  sendFrame(usbdbg::kChLog, nullptr, 0);   // no-op guard; real log via pumpLog
-  (void)hello;
+  // Greet the host so a device->host frame is visible without any host command.
+  static const char hello[] = "fajita usb-debug: gadget up\n";
+  queueFrame(usbdbg::kChShell, reinterpret_cast<const uint8_t *>(hello), sizeof hello - 1);
 }
+
+enum : uint32_t { kBulkOutBytes = 4096 };   // a multiple of the 512-byte max packet
 
 inline void Gadget::armBulkOut()
 {
   Trb *t = dma.trb(GadgetDma::kBulkOutTrb);
   t->bpl = uint32_t(dma.pa(GadgetDma::kBulkOutData));
   t->bph = uint32_t(dma.pa(GadgetDma::kBulkOutData) >> 32);
-  t->size = 512;
+  t->size = kBulkOutBytes;
   t->ctrl = kDwc3TrbCtlNormal | kDwc3TrbHwo | kDwc3TrbIspImi | kDwc3TrbIoc | kDwc3TrbLst;
   cache_flush(t, sizeof *t);
   depCmd(m, kPBulkOut, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kBulkOutTrb) >> 32), uint32_t(dma.pa(GadgetDma::kBulkOutTrb)), 0);
   bulkOutArmed = true;
 }
 
-inline void Gadget::sendFrame(uint8_t channel, const uint8_t *data, size_t len)
+inline bool Gadget::queueFrame(uint8_t channel, const uint8_t *data, size_t len)
 {
-  if (!bulkStarted || len == 0) return;
+  if (!txLock || !txRing || !len) return false;
+  IOSimpleLockLock(txLock);
+  size_t n = usbdbg::encodeFrame(channel, txSeq++, data, len, encBuf, sizeof encBuf);
+  bool ok = n && (kTxRing - (txHead - txTail)) >= n;
+  if (ok) {
+    for (size_t i = 0; i < n; i++) txRing[(txHead + i) & (kTxRing - 1)] = encBuf[i];
+    txHead += uint32_t(n);
+  }
+  IOSimpleLockUnlock(txLock);
+  return ok;
+}
+
+inline void Gadget::kickTx()
+{
+  if (!bulkStarted || inFlight || !txLock) return;
+  IOSimpleLockLock(txLock);
+  uint32_t avail = txHead - txTail;
+  uint32_t chunk = avail < kTxChunk ? avail : kTxChunk;
   uint8_t *out = dma.at(GadgetDma::kBulkInData);
-  size_t n = usbdbg::encodeFrame(channel, txSeq++, data, len, out, 4096);
-  if (!n) return;
-  cache_flush(out, n);
+  for (uint32_t i = 0; i < chunk; i++) out[i] = txRing[(txTail + i) & (kTxRing - 1)];
+  IOSimpleLockUnlock(txLock);
+  if (!chunk) return;
+  // A transfer that is an exact multiple of the max packet would leave the host's read
+  // pending until more data (no short packet); send one byte less, the rest follows.
+  if (chunk % 512 == 0) chunk -= 1;
+  cache_flush(out, chunk);
   Trb *t = dma.trb(GadgetDma::kBulkInTrb);
   t->bpl = uint32_t(dma.pa(GadgetDma::kBulkInData));
   t->bph = uint32_t(dma.pa(GadgetDma::kBulkInData) >> 32);
-  t->size = uint32_t(n);
-  t->ctrl = kDwc3TrbCtlNormal | kDwc3TrbHwo | kDwc3TrbIspImi | kDwc3TrbIoc | kDwc3TrbLst;
+  t->size = chunk;
+  t->ctrl = kDwc3TrbCtlNormal | kDwc3TrbHwo | kDwc3TrbIoc | kDwc3TrbLst;
   cache_flush(t, sizeof *t);
-  depCmd(m, kPBulkIn, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kBulkInTrb) >> 32), uint32_t(dma.pa(GadgetDma::kBulkInTrb)), 0);
-  native_dwc3_bulk_in = native_dwc3_bulk_in + n;
+  inFlight = true;
+  inFlightLen = chunk;
+  if (depCmd(m, kPBulkIn, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kBulkInTrb) >> 32), uint32_t(dma.pa(GadgetDma::kBulkInTrb)), 0) != 0) {
+    inFlight = false;   // command refused: retry on the next poll
+  }
 }
 
-inline void Gadget::onBulkOut(uint32_t transferred)
+inline void Gadget::onBulkInDone()
 {
-  cache_flush(dma.at(GadgetDma::kBulkOutData), 512);
-  uint32_t got = transferred <= 512 ? 512 - transferred : 512;   // TRB size counts down
+  if (!inFlight) return;
+  IOSimpleLockLock(txLock);
+  txTail += inFlightLen;
+  IOSimpleLockUnlock(txLock);
+  native_dwc3_bulk_in = native_dwc3_bulk_in + inFlightLen;
+  inFlight = false;
+}
+
+inline void Gadget::onBulkOut(uint32_t remaining)
+{
+  cache_flush(dma.at(GadgetDma::kBulkOutData), kBulkOutBytes);
+  uint32_t got = remaining <= kBulkOutBytes ? kBulkOutBytes - remaining : 0;   // TRB size counts down
   native_dwc3_bulk_out = native_dwc3_bulk_out + got;
   const uint8_t *in = dma.at(GadgetDma::kBulkOutData);
   for (uint32_t i = 0; i < got; i++) {
-    if (rx.feed(in[i]) == usbdbg::Decoder::kFrame && rx.channel() == usbdbg::kChCmd) {
+    if (rx.feed(in[i]) != usbdbg::Decoder::kFrame) continue;
+    if (rx.channel() == usbdbg::kChCmd) {
       usbdbg::Target t{};
       t.ident = "fajita-usb-debug";
       t.features = usbdbg::kFeatLog;
-      alignas(4) uint8_t rsp[usbdbg::kMaxData];
+      alignas(4) static uint8_t rsp[usbdbg::kMaxData];
       size_t rn = usbdbg::handleCommand(t, rx.data(), rx.length(), rsp);
-      sendFrame(usbdbg::kChRsp, rsp, rn);
+      queueFrame(usbdbg::kChRsp, rsp, rn);
+    } else if (rx.channel() == usbdbg::kChShell) {
+      const uint8_t *d = rx.data();
+      for (size_t k = 0; k < rx.length(); k++) {
+        if (shHead - shTail >= kShRing) { shOverflow = shOverflow + 1; break; }
+        shRx[shHead & (kShRing - 1)] = d[k];
+        __asm__ volatile("dmb ish" ::: "memory");
+        shHead = shHead + 1;
+      }
+      wakeup(const_cast<uint32_t *>(&shHead));
     }
   }
   armBulkOut();
@@ -397,7 +464,10 @@ inline void Gadget::poll()
       if (etype == kDwc3DepEvtXferComplete || etype == kDwc3DepEvtXferInProgress) {
         if (ep == kPEp0Out && phase == kWaitSetup) onSetupComplete();
         else if (ep == kPEp0Out || ep == kPEp0In) onEp0DataOrStatus(ep);
-        else if (ep == kPBulkOut) onBulkOut(dma.trb(GadgetDma::kBulkOutTrb)->size & kDwc3TrbSizeMask);
+        else if (ep == kPBulkOut) {
+          cache_flush(dma.trb(GadgetDma::kBulkOutTrb), sizeof(Trb));
+          onBulkOut(dma.trb(GadgetDma::kBulkOutTrb)->size & kDwc3TrbSizeMask);
+        } else if (ep == kPBulkIn) onBulkInDone();
       }
     }
   }
@@ -412,14 +482,13 @@ inline void Gadget::pumpLog()
   if (size <= 0 || head < 0 || head > size) return;
   uint64_t total = uint64_t(head);
   if (total <= logOffset) return;
-  uint8_t chunk[usbdbg::kMaxData - 8];
+  static uint8_t chunk[usbdbg::kMaxData - 8];
   size_t take = size_t(total - logOffset);
   if (take > sizeof chunk) { logOffset = total - sizeof chunk; take = sizeof chunk; }
   for (size_t i = 0; i < take; i++) chunk[i] = uint8_t(msgbufp->msg_bufc[(logOffset + i) % size]);
-  uint8_t data[usbdbg::kMaxData];
+  static uint8_t data[usbdbg::kMaxData];
   size_t dn = usbdbg::buildLogData(logOffset, chunk, take, data);
-  sendFrame(usbdbg::kChLog, data, dn);
-  logOffset = total;
+  if (queueFrame(usbdbg::kChLog, data, dn)) logOffset = total;   // ring full: retry later
 }
 
 }  // namespace dwc3
