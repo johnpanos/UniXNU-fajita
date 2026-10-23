@@ -220,7 +220,9 @@ extern "C" void armcpu_wdog_sample (void)
 extern "C" int cpu_number (void);
 extern "C" void armcpu_wdog_pet (void)
 {
-  if (gWdog && gWdogMode >= 2 && cpu_number () == 0) wdogPet (false);
+  // With wdog-irq=0 this monitor pet is the only one, and the monitor thread runs on any CPU: pet from wherever it runs (the boot CPU
+  // rule is for the timer-interrupt pets, where a healthy secondary kept the watchdog alive for a frozen CPU0).
+  if (gWdog && gWdogMode >= 2 && (cpu_number () == 0 || !gWdogIrqPet)) wdogPet (false);
 }
 
 // Distributor side of the software IPI of logical core `core`: group 1, edge-triggered, priority 0x80, routed to affinity `aff`, enabled.
