@@ -174,6 +174,9 @@ board_args = [
   # Touch edge zone of NativeHidInput (thousandths of the screen): HackiOS's iPhone X zone, 16/375 at the sides, 16/812 at the top,
   # 34/812 (the home bar strip) at the bottom. A contact that begins there is marked as coming in over the edge (0x800).
   "native-touch-edge-side=43","native-touch-edge-top=20","native-touch-edge-bottom=42",
+  # PMI8998 charging (package/FajitaPmic.cpp): the pmOS qcom_smbx charger setup, fast charge 1.0 A, USB input limit 1.5 A, a status
+  # row (charger, fuel-gauge voltage/current) every 30 s, no register dump. fajita-pmic=1 on the command line makes a run read only.
+  "fajita-pmic=2","fajita-pmic-dump=0","fajita-pmic-period=30",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,
