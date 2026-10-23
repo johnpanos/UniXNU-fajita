@@ -12,6 +12,14 @@
 // including TU (NativeDwc3.cpp) before this header; it maps the gadget DMA behind
 // stream 0x740 (adopt the firmware bypass or plan a free bank).
 
+// The kernel message buffer (bsd/sys/msgbuf.h), referenced to stream the log to the
+// host. Declared weak + extern "C" so it resolves to the global symbol `_msgbufp` and
+// the driver still links on a kernel without it. Only the leading fields are read.
+extern "C" {
+struct dwc3_msgbuf { int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc; };
+extern struct dwc3_msgbuf *msgbufp __attribute__((weak_import));
+}
+
 namespace dwc3 {
 
 // Physical endpoint numbers: ep0 OUT = 0, ep0 IN = 1, bulk OUT = 4, bulk IN = 5.
@@ -399,7 +407,6 @@ inline void Gadget::poll()
 inline void Gadget::pumpLog()
 {
   // Mirror new kernel msgbuf bytes to the host as LOG frames (device->host).
-  extern struct { int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc; } *msgbufp __attribute__((weak_import));
   if (!&msgbufp || !msgbufp || !bulkStarted) return;
   int size = msgbufp->msg_size, head = msgbufp->msg_bufx;
   if (size <= 0 || head < 0 || head > size) return;
