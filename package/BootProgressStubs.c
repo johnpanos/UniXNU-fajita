@@ -22,6 +22,7 @@ __attribute__((weak)) char boot_ui_trace_ready[4096] __attribute__((aligned(16))
 __attribute__((weak)) unsigned boot_ui_trace_role_rows(unsigned p0, char p1[][120], unsigned p2, unsigned p3) { (void)p0; (void)p1; (void)p2; (void)p3; return 0; }
 __attribute__((weak)) char boot_ui_trace_rows[4096] __attribute__((aligned(16)));
 __attribute__((weak)) void boot_ui_trace_snapshot(unsigned p0) { (void)p0;  }
+__attribute__((weak)) void fajita_pmic_poll(void) {   }
 __attribute__((weak)) char fajita_touch_rows[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_adreno_audit_attr[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_adreno_audit_ticks[4096] __attribute__((aligned(16)));
