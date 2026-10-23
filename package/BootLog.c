@@ -807,6 +807,9 @@ static void writer(void *arg, wait_result_t result) {
   // sheng-diag-export=<seconds of log time>: export the diagnostic files once then (set it shortly before sheng-autoreset).
   uint32_t diag_at = 0;
   if (&boot_diag_scan && &boot_diag_stream) PE_parse_boot_argn("sheng-diag-export", &diag_at, sizeof diag_at);
+  // fajita: without sheng-diag-export, a run with sheng-autoreset exports 60 s before the reset (the iOS 16 command line has no
+  // room for both arguments); sheng-diag-export=0 is not distinguishable from absent and gets the default too.
+  if (!diag_at && autoreset > 90 && &boot_diag_scan && &boot_diag_stream) diag_at = autoreset - 60;
   uint32_t errors = 0;
   boot_log_state = 2;
   for (;;) {
