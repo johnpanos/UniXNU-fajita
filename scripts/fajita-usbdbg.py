@@ -428,8 +428,8 @@ def main():
         return kdp_proxy(make, a.listen, a.target_ip, a.mode)
     if a.cmd == 'shell':
         transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
-        link = Link(transport, on_text=on_text, on_log=on_log,
-                    on_shell=lambda b: (sys.stdout.buffer.write(b), sys.stdout.flush()))
+        # Only the agent's output: the kernel log keeps streaming on its own channel (use `console` for it).
+        link = Link(transport, on_shell=lambda b: (sys.stdout.buffer.write(b), sys.stdout.flush()))
         print('fjdbg shell: type a command (ioreg -l, ps, hidutil, @read PATH); Ctrl-D to quit', file=sys.stderr)
         try:
             for raw in sys.stdin:

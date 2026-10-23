@@ -69,7 +69,7 @@ public:
   void pumpLog();                  // mirror new kernel-log bytes to the host
   void kickTx();                   // poll thread: start the next bulk-IN transfer if idle
   bool eventsPending() const { return m.core && (m.core_rd(kDwc3GEVNTCOUNT0) & 0xffff) != 0; }
-  bool queueFrame(uint8_t channel, const uint8_t *data, size_t len);   // any thread
+  bool queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree = 0);   // any thread
 
 private:
   void fail(GadgetStage st, const char *why) { native_dwc3_gadget_stage = st; native_dwc3_gadget_status = -int(st); native_dwc3_gadget_failure = why; }
@@ -418,12 +418,12 @@ inline void Gadget::armBulkOut()
   bulkOutArmed = true;
 }
 
-inline bool Gadget::queueFrame(uint8_t channel, const uint8_t *data, size_t len)
+inline bool Gadget::queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree)
 {
   if (!txLock || !txRing || !len) return false;
   IOSimpleLockLock(txLock);
   size_t n = usbdbg::encodeFrame(channel, txSeq++, data, len, encBuf, sizeof encBuf);
-  bool ok = n && (kTxRing - (txHead - txTail)) >= n;
+  bool ok = n && (kTxRing - (txHead - txTail)) >= n + keepFree;   // keepFree: room left for replies / SHELL
   if (ok) {
     for (size_t i = 0; i < n; i++) txRing[(txHead + i) & (kTxRing - 1)] = encBuf[i];
     txHead += uint32_t(n);
@@ -481,6 +481,19 @@ inline void Gadget::onBulkOut(uint32_t remaining)
       usbdbg::Target t{};
       t.ident = "fajita-usb-debug";
       t.features = usbdbg::kFeatLog;
+      t.ctx = this;
+      t.state = [](void *ctx, char *out, size_t cap) -> size_t {
+        Gadget *g = static_cast<Gadget *>(ctx);
+        int n = snprintf(out, cap,
+                         "stage=%u\nspeed=%u\naddr=%u\nconfig=%u\nsetups=%u\nevents=%u\nresets=%u\nbulk_out=%llu\nbulk_in=%llu\n"
+                         "tx_queued=%u\nlog_offset=%llu\nlog_produced=%llu\nshell_rx=%u\nshell_overflow=%u\n",
+                         native_dwc3_gadget_stage, native_dwc3_link_speed, native_dwc3_addr, native_dwc3_configured,
+                         native_dwc3_setups, native_dwc3_events, native_dwc3_resets,
+                         (unsigned long long)native_dwc3_bulk_out, (unsigned long long)native_dwc3_bulk_in,
+                         g->txHead - g->txTail, (unsigned long long)g->logOffset, (unsigned long long)g->logProduced,
+                         g->shHead - g->shTail, g->shOverflow);
+        return n < 0 ? 0 : (size_t(n) < cap ? size_t(n) : cap);
+      };
       alignas(4) static uint8_t rsp[usbdbg::kMaxData];
       size_t rn = usbdbg::handleCommand(t, rx.data(), rx.length(), rsp);
       queueFrame(usbdbg::kChRsp, rsp, rn);
@@ -570,7 +583,9 @@ inline void Gadget::pumpLog()
   for (size_t i = 0; i < take; i++) chunk[i] = uint8_t(msgbufp->msg_bufc[(logOffset + i) % uint64_t(size)]);
   static uint8_t data[usbdbg::kMaxData];
   size_t dn = usbdbg::buildLogData(logOffset, chunk, take, data);
-  if (queueFrame(usbdbg::kChLog, data, dn)) logOffset += take;   // ring full: retry on the next poll
+  // The log may only fill half the ring, so command replies and agent output are never starved by a log backlog
+  // (hardware usb-enum9: hello/state replies were dropped behind the boot-log backlog).
+  if (queueFrame(usbdbg::kChLog, data, dn, kTxRing / 2)) logOffset += take;   // ring busy: retry on the next poll
 }
 
 }  // namespace dwc3
