@@ -504,11 +504,13 @@ inline void Gadget::poll()
       if (!dwc3EvtIsDevice(e)) continue;   // carkit/i2c classes: not used
       unsigned type = dwc3DevEvtType(e);
       if (type == kDwc3DevEvtReset) {
-        // USB reset (dwc3_gadget_reset_interrupt): address 0; if ep0 was inside a control transfer, start over
-        // with a fresh SETUP (one is already pending when it sat in the setup phase).
+        // USB reset: back to address 0. ep0 is left as it is: a host typically resets during the status stage of
+        // its first GET_DESCRIPTOR, and a StartTransfer on ep0 while that transfer is still active fails and leaves
+        // no SETUP armed (hardware usb-enum5: enumeration stopped after 6 SETUPs). Linux ends the active transfer
+        // first (dwc3_ep0_reset_state); the pending status completes or is superseded by the next SETUP here.
         uint32_t dcfg = m.core_rd(kDwc3DCFG); dcfg &= ~(0x7fu << 3); m.core_wr(kDwc3DCFG, dcfg);
         native_dwc3_addr = 0;
-        if (phase != kWaitSetup) ep0QueueSetup();
+        native_dwc3_resets = native_dwc3_resets + 1;
       } else if (type == kDwc3DevEvtConnectDone) {
         // dwc3_gadget_conndone_interrupt: the negotiated speed decides the bulk max packet the descriptors report.
         uint32_t speed = m.core_rd(kDwc3DSTS) & 7u;

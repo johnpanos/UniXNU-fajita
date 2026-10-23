@@ -80,7 +80,7 @@ volatile uint32_t native_dwc3_addr = 0;            // address the host assigned
 volatile uint64_t native_dwc3_bulk_out = 0, native_dwc3_bulk_in = 0;
 const char *volatile native_dwc3_gadget_failure = nullptr;
 volatile int32_t native_dwc3_smmu_slot_g = -1, native_dwc3_smmu_bank_g = -1;
-volatile uint32_t native_dwc3_smmu_banks = 0;
+volatile uint32_t native_dwc3_smmu_banks = 0, native_dwc3_resets = 0;
 }
 
 static bool gProbeEnabled = false;
