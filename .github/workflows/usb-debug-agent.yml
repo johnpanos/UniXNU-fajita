@@ -1,0 +1,37 @@
+name: USB debug agent
+
+# Builds the userland end of the fajita USB debug channel (package/usb-debug-tools/fjdbg-agent.c)
+# for plain arm64 iOS 16 on a macOS runner (the Linux host has no iOS SDK or Mach-O signer),
+# 4 KiB-page ad-hoc signed with the same minimal entitlements as the SSH userland. The Linux
+# side packs it into the boot addon as sbin/wifid (scripts/make-fajita-usbdbg-addon.py).
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - package/usb-debug-tools/**
+      - .github/workflows/usb-debug-agent.yml
+
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and sign
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Werror \
+            package/usb-debug-tools/fjdbg-agent.c -o out/fjdbg-agent
+          codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjdbg-agent \
+            --entitlements package/usb-debug-tools/fjdbg-agent-entitlements.plist out/fjdbg-agent
+          codesign --verify --strict out/fjdbg-agent
+          codesign -dvvv out/fjdbg-agent 2>&1 | grep -E 'CDHash|Page size|Identifier' | tee out/codesign.txt
+          file out/fjdbg-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fjdbg-agent
+          path: out/
