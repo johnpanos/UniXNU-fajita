@@ -16,7 +16,8 @@ CONFIG_XNU_NATIVE_ARCH_TIMER=y
 CONFIG_XNU_NATIVE_PAN=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
-CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+# ArmCpu reads the per-CPU IRQ tail of BootProgress (weak); the candidate has no boot progress kit, so it is aliased to nullop() (an empty tail; -U makes ld64 abort in the static link).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-alias,_nullop,_boot_progress_cpu_tail"
 CONFIG_XNU_NATIVE_ADRENO=n
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n

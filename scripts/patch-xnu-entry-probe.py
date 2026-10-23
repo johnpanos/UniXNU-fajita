@@ -47,7 +47,8 @@ PANIC_VA = 0xFFFFFFF00BF69B04      # _panic
 VINFO_VA = 0xFFFFFFF00C0A2970      # _vinfo
 PANIC_CAVE_END = 0xFFFFFFF00B9D0FF0
 CAVE_SIZE = 0x60
-CAVES = {1: 0xFFFFFFF00B9D0500, 2: 0xFFFFFFF00B9D0560, 3: 0xFFFFFFF00B9D05C0, 4: 0xFFFFFFF00B9D0620}
+CAVES = {1: 0xFFFFFFF00B9D0500, 2: 0xFFFFFFF00B9D0560, 3: 0xFFFFFFF00B9D05C0, 4: 0xFFFFFFF00B9D0620,
+         5: 0xFFFFFFF00B9D0490}   # 5: the early watchdog, in the padding between the entry branch and cave 1 (0x70 bytes)
 TIMEBASE = 19200000
 
 PAINT = """
@@ -118,6 +119,33 @@ _start:
   b 2b
 """ + ".ltorg\n",
 }
+
+# fajita: stage 5 (FAJITA_EARLY_WDOG=1), chained after stage 1 with the MMU still off: the unattended-run backstop from the kernel
+# entry on, for hangs before ArmCpu arms it (fajita-wdog=3, which reprograms and pets it). Restart reason bootloader (IMEM
+# 0x146bf65c = 0x77665500, the cookie the ABL reads), then the APSS watchdog (0x17980000) with bark 16 s and bite 32 s, counting
+# without its interrupt. x0 (the boot arguments) is preserved.
+EARLY_WDOG = """.text
+.global _start
+_start:
+  movz x9, #0xf65c
+  movk x9, #0x146b, lsl #16
+  movz w10, #0x5500
+  movk w10, #0x7766, lsl #16
+  str w10, [x9]
+  movz x9, #0x1798, lsl #16
+  str wzr, [x9, #8]
+  movz w10, #0xffff
+  movk w10, #0x7, lsl #16
+  str w10, [x9, #0x10]
+  movz w10, #0xffff
+  movk w10, #0xf, lsl #16
+  str w10, [x9, #0x14]
+  mov w10, #1
+  str w10, [x9, #4]
+  str w10, [x9, #8]
+  dsb sy
+  b target
+"""
 
 RESET_BEFORE = """.text
 .global _start
@@ -394,8 +422,15 @@ def main():
         if any(data[file_offset(va):file_offset(va) + CAVE_SIZE]):
             raise SystemExit(f'Padding at {va:#x} is not empty')
 
+    early_wdog = os.environ.get('FAJITA_EARLY_WDOG') == '1'
+    # fajita: FAJITA_MMU_PROBE=<seconds> places stage 3 (the timed reset right after the MMU enable) even under --no-reset, to ask
+    # whether a kernel that stops after the magenta bar got through the MMU enable (reset after <seconds>) or not (watchdog, 32 s).
+    mmu_probe = int(os.environ.get('FAJITA_MMU_PROBE', '0'))
+    if mmu_probe:
+        # The panic screen does not fit the padding after cave 3; a probe run asks only about the MMU enable.
+        args.no_reset, args.reset_after, args.reset_delay, args.panic_screen = False, None, mmu_probe, False
     # (site, cave stage, symbols the cave is linked with)
-    sites = [(ENTRY_VA, 1, {'target': START_FIRST_CPU}),
+    sites = [(ENTRY_VA, 1, {'target': CAVES[5] if early_wdog else START_FIRST_CPU}),
              (MMU_ENABLE_VA, 2, {'target': MMU_ENABLE_VA + 4})]
     if args.no_reset:
         description = 'no reset probe'
@@ -415,6 +450,15 @@ def main():
             if len(code) > CAVE_SIZE:
                 raise SystemExit(f'Stage {stage} code is too large')
             data[file_offset(CAVES[stage]):file_offset(CAVES[stage]) + len(code)] = code
+    if early_wdog:
+        if any(data[file_offset(CAVES[5]):file_offset(CAVES[1])]):
+            raise SystemExit(f'Padding at {CAVES[5]:#x} is not empty')
+        with tempfile.TemporaryDirectory() as tmp:
+            code = assemble(EARLY_WDOG, CAVES[5], {'target': START_FIRST_CPU}, Path(tmp))
+        if CAVES[5] + len(code) > CAVES[1]:
+            raise SystemExit('Early watchdog code is too large')
+        data[file_offset(CAVES[5]):file_offset(CAVES[5]) + len(code)] = code
+        description += ', early watchdog from the kernel entry'
     for site, stage, _ in sites:
         struct.pack_into('<I', data, file_offset(site), branch(site, CAVES[stage]))
     if args.panic_screen:
