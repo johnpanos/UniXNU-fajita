@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 CXX=${CXX:-c++}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-for t in Dwc3Decode Dwc3Smmu UsbDbgProto; do
+for t in Dwc3Decode Dwc3Smmu UsbDbgProto AcmEnum; do
   "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -o "$TMP/$t" "$t.cpp"
   "$TMP/$t"
 done
