@@ -48,6 +48,31 @@ enum : uint32_t {
   kGccCfgNocUsb3PrimCbcr    = 0x502c,   // gcc_cfg_noc_usb3_prim_axi_clk
   kGccAggreUsb3PrimCbcr     = 0x8201c,  // gcc_aggre_usb3_prim_axi_clk
   kGccUsbPhyCfgAhb2PhyCbcr  = 0x6a004,  // gcc_usb_phy_cfg_ahb2phy_clk
+  // Block reset controls (gcc-sdm845.c gcc_resets): asserted/deasserted during
+  // bring-up (stage B). Reset bit is CBCR-style bit0 (BLK_ARES) in Linux's
+  // regmap_update_bits on the BCR word.
+  kGccUsb30PrimBcr          = 0xf000,   // GCC_USB30_PRIM_BCR
+  kGccQusb2PhyPrimBcr       = 0x12000,  // GCC_QUSB2PHY_PRIM_BCR
+  kGccUsbPhyCfgAhb2PhyBcr   = 0x6a000,  // GCC_USB_PHY_CFG_AHB2PHY_BCR
+  kGccBlkAres               = 1u << 0,
+  kGccGdscrPwrOn            = 1u << 31,  // GDSCR PWR_ON status (read); SW_COLLAPSE is bit0
+  kGccCbcrClkEnable         = 1u << 0,   // CBCR CLK_ENABLE (write); CLK_OFF is bit31 (read)
+};
+
+// ---- QSCRATCH / wrapper registers (wrapper base 0x0a6f8800 + offset) ----------
+// SDM845 dwc3-qcom glue (drivers/usb/dwc3/dwc3-qcom.c): the USB2-only board selects
+// the UTMI clock as the pipe clock and overrides VBUS/session for device mode, since
+// there is no Type-C/PMIC driver to assert it. Stage B only; the probe never writes.
+enum : uint32_t {
+  kQscratchGeneralCfg       = 0x08,
+  kQscratchHsPhyCtrl        = 0x10,
+  kQscratchSsPhyCtrl        = 0x30,
+  kQscratchPipeUtmiClkSel   = 1u << 0,   // PIPE_UTMI_CLK_SEL
+  kQscratchPipe3PhystatusSw = 1u << 3,   // PIPE3_PHYSTATUS_SW
+  kQscratchPipeUtmiClkDis   = 1u << 8,   // PIPE_UTMI_CLK_DIS
+  kQscratchUtmiOtgVbusValid = 1u << 20,  // HS_PHY_CTRL: UTMI_OTG_VBUS_VALID
+  kQscratchSwSessvldSel     = 1u << 28,  // HS_PHY_CTRL: SW_SESSVLD_SEL
+  kQscratchLane0PwrPresent  = 1u << 24,  // SS_PHY_CTRL: LANE0_PWR_PRESENT (unused HS-only)
 };
 
 // ---- DWC3 global registers (core base + offset) ------------------------------
