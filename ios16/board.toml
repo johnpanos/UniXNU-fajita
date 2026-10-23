@@ -77,9 +77,13 @@ tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
 kernelcache_sha256 = "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221"
 slide = "-0x1000000"
-# _initializeAppleMobileFileIntegrity() of the 20H392 AMFI (the function that references that name and "cs_enforcement_disable"),
-# the counterpart of 0xfffffff005ab4ae0 in 21H461.
-early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005703c54"
+# The 20H392 AMFI, AppleImage4 and sandbox kexts are no longer started: the kernel carries the HackiOS AMFI and Sandbox
+# MAC-policy stand-ins (patches/xnu-8796/zzw-hackios-security-standins.patch), which OSKext loads-but-does-not-start.
+# sandbox is dropped from the roots below (nothing depends on it); AMFI and AppleImage4 are dropped too but the prelink
+# dependency closure pulls them back in (IOHIDFamily/IOGPUFamily/IOMobileGraphicsFamily/apfs list them as libraries).
+# No early_security_init: AMFI's early initializer must never run (the stand-in registers the amfi/img4 interfaces).
+# boot-arg fajita-security-kexts=1 makes OSKext start the prelinked AMFI and AppleImage4 and keeps the stand-ins from
+# registering; a full return to Apple's set also needs sandbox in the roots and the early_security_init line above restored.
 # The 20H392 Libm keeps a 1228-byte constant pool in its code (0xfffffff005b8c054..0xfffffff005b8c520, between a ret and the
 # next function, read by ldr and adr) where 21H461 has the 1248-byte one NativePrelink knows; some of its words decode as
 # branches out of the collection.
@@ -92,7 +96,6 @@ roots = [
   "com.apple.driver.AppleEffaceableStorage",
   "com.apple.driver.AppleIISController",
   "com.apple.driver.AppleM2ScalerCSCDriver",
-  "com.apple.driver.AppleMobileFileIntegrity",
   "com.apple.driver.ApplePMGR",
   "com.apple.driver.IODARTFamily",
   "com.apple.filesystems.apfs",
@@ -112,8 +115,6 @@ roots = [
   "com.apple.kec.corecrypto",
   "com.apple.kext.AppleMatch",
   "com.apple.kext.CoreTrust",
-  "com.apple.security.AppleImage4",
-  "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
   "com.apple.iokit.IOHIDEventDriver",
 ]
