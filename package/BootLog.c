@@ -57,6 +57,20 @@ extern volatile int32_t native_dwc3_smmu_slot __attribute__((weak_import));
 extern volatile int32_t native_dwc3_smmu_bank __attribute__((weak_import));
 extern const char *volatile native_dwc3_failure __attribute__((weak_import));
 extern const char *volatile native_dwc3_smmu_error __attribute__((weak_import));
+// NativeDwc3 stage B (CDC-ACM gadget, usb-debug=N): bring-up progress + link state.
+extern volatile uint32_t native_dwc3_gadget_on __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_gadget_stage __attribute__((weak_import));
+extern volatile int32_t native_dwc3_gadget_status __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_clocks_up __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_phy_up __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_link_speed __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_setups __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_configured __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_events __attribute__((weak_import));
+extern volatile uint32_t native_dwc3_addr __attribute__((weak_import));
+extern volatile uint64_t native_dwc3_bulk_out __attribute__((weak_import));
+extern volatile uint64_t native_dwc3_bulk_in __attribute__((weak_import));
+extern const char *volatile native_dwc3_gadget_failure __attribute__((weak_import));
 extern volatile int native_gpu_addon_files __attribute__((weak_import));
 extern volatile int native_gpu_addon_written __attribute__((weak_import));
 extern volatile int native_gpu_addon_same __attribute__((weak_import));
@@ -344,6 +358,22 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     }
     if (native_dwc3_smmu_error) {
       snprintf(row, sizeof row, "U smmu: %.100s", native_dwc3_smmu_error);
+      at = put(out, at, cap, row, sizeof row);
+    }
+  }
+  // NativeDwc3 stage B (CDC-ACM gadget, usb-debug=N): stage (10 = running), status
+  // (0 ok), whether we had to bring clocks/PHY up (1) or reused UEFI's (0), the USB
+  // link speed after reset (0 = high, 0xff = no reset yet), the assigned address, the
+  // SETUP-packet count, SET_CONFIGURATION value, events drained and bulk byte counts.
+  if (&native_dwc3_gadget_stage && native_dwc3_gadget_on) {
+    char row[120];
+    snprintf(row, sizeof row, "V st=%u rc=%d clk=%u phy=%u spd=%u addr=%u setup=%u cfg=%u ev=%u out=%llu in=%llu",
+             native_dwc3_gadget_stage, native_dwc3_gadget_status, native_dwc3_clocks_up, native_dwc3_phy_up,
+             native_dwc3_link_speed, native_dwc3_addr, native_dwc3_setups, native_dwc3_configured, native_dwc3_events,
+             (unsigned long long)native_dwc3_bulk_out, (unsigned long long)native_dwc3_bulk_in);
+    at = put(out, at, cap, row, sizeof row);
+    if (native_dwc3_gadget_failure) {
+      snprintf(row, sizeof row, "V fail: %.100s", native_dwc3_gadget_failure);
       at = put(out, at, cap, row, sizeof row);
     }
   }

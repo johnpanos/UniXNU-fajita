@@ -20,10 +20,12 @@
 #include <libkern/c++/OSSharedPtr.h>
 #include <pexpert/pexpert.h>
 #include <kern/debug.h>
+#include <kern/thread.h>
 #define NATIVE_DWC3_KERNEL 1
 #include "Dwc3Registers.h"
 #include "Dwc3Phy.h"
 #include "../NativeUfs/SmmuTakeover.h"   // generic ARM SMMUv2 stream planner (read-only use here)
+#include "Dwc3Gadget.h"                  // stage B: the DWC3 CDC-ACM device controller (usb-debug=N)
 
 extern "C" {
 // Counters the boot log reads (package/BootLog.c), all weak so a board without the
@@ -47,10 +49,21 @@ volatile int32_t  native_dwc3_smmu_slot = -1, native_dwc3_smmu_bank = -1;
 volatile uint32_t native_dwc3_smmu_reuse = 0;
 const char *volatile native_dwc3_smmu_error = nullptr;
 const char *volatile native_dwc3_failure = nullptr;
+// Stage B (gadget, usb-debug=N) state the boot log surfaces (row 'V').
+volatile uint32_t native_dwc3_gadget_on = 0;      // usb-debug value seen
+volatile uint32_t native_dwc3_gadget_stage = 0;   // see Dwc3Gadget.h GadgetStage
+volatile int32_t  native_dwc3_gadget_status = -1;  // 0 ok, negative = failing stage
+volatile uint32_t native_dwc3_clocks_up = 0, native_dwc3_phy_up = 0;   // 1 = we enabled it, 0 = reused UEFI
+volatile uint32_t native_dwc3_link_speed = 0xff;   // DSTS connect speed after USB reset
+volatile uint32_t native_dwc3_setups = 0, native_dwc3_configured = 0, native_dwc3_events = 0;
+volatile uint32_t native_dwc3_addr = 0;            // address the host assigned
+volatile uint64_t native_dwc3_bulk_out = 0, native_dwc3_bulk_in = 0;
+const char *volatile native_dwc3_gadget_failure = nullptr;
 }
 
 static bool gProbeEnabled = false;
 static unsigned gProbeMode = 0;
+static unsigned gGadgetMode = 0;
 
 static uint32_t dwc3Read32(uintptr_t base, unsigned offset)
 {
@@ -68,9 +81,29 @@ static uintptr_t dwc3MapPhys(uint64_t phys, uint64_t length, OSSharedPtr<IOMemor
   return keep ? static_cast<uintptr_t>(keep->getVirtualAddress()) : 0;
 }
 
+// The gadget instance (stage B). Allocated zeroed with IONewZero so no C++ constructor
+// (and thus no static guard variable, which the kernel forbids) runs; zero is its
+// correct initial state. It lives for the driver's life.
+static dwc3::Gadget *gGadget = nullptr;
+
+// The polled service thread: drains the DWC3 event buffer and mirrors the kernel log
+// to the host. No IRQ, no locks, so it is safe this early and from the debug path.
+static void dwc3GadgetThread(void *, wait_result_t)
+{
+  thread_set_thread_name(current_thread(), "native_dwc3");
+  for (;;) {
+    if (gGadget) {
+      gGadget->poll();
+      gGadget->pumpLog();
+    }
+    IOSleep(2);   // 2 ms: fast enough for enumeration, light on the CPU
+  }
+}
+
 class NativeDwc3 : public IOService {
   OSDeclareDefaultStructors(NativeDwc3)
   void inspect();
+  void startGadget();
 public:
   IOService *probe(IOService *provider, SInt32 *score) override;
   bool start(IOService *provider) override;
@@ -105,11 +138,37 @@ bool NativeDwc3::start(IOService *provider)
     gProbeEnabled = value != 0;
   }
   native_dwc3_mode = gProbeMode;
-  if (!gProbeEnabled) {
-    return true;   // default off: nothing is mapped or read
+  uint32_t gadget = 0;
+  if (PE_parse_boot_argn("usb-debug", &gadget, sizeof(gadget))) {
+    gGadgetMode = gadget;
   }
-  inspect();
+  native_dwc3_gadget_on = gGadgetMode;
+  if (gProbeEnabled) {
+    inspect();
+  }
+  if (gGadgetMode) {
+    startGadget();
+  }
   return true;
+}
+
+// Stage B: bring the controller up as a CDC-ACM device and start the poll thread.
+// usb-debug=1 stops after the core soft reset (no enumeration, no host visibility);
+// usb-debug>=2 enumerates and runs the channel. Never panics: a failed stage is
+// recorded in the 'V' boot-log row and the thread simply idles.
+void NativeDwc3::startGadget()
+{
+  gGadget = IONewZero(dwc3::Gadget, 1);
+  if (!gGadget) {
+    native_dwc3_gadget_failure = "gadget alloc";
+    native_dwc3_gadget_status = -1;
+    return;
+  }
+  gGadget->bringUp(gGadgetMode);
+  thread_t t;
+  if (kernel_thread_start(dwc3GadgetThread, nullptr, &t) == KERN_SUCCESS) {
+    thread_deallocate(t);
+  }
 }
 
 // Read-only inspection. Each stage sets native_dwc3_stage before it touches MMIO,
