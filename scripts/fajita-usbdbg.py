@@ -376,6 +376,10 @@ def selftest(sim):
     me = [sys.executable, '-I', os.path.abspath(__file__), '--exec', sim, 'run']
     r = subprocess.run(me + ['hidutil', 'list'], capture_output=True, timeout=20)
     assert r.returncode == 2 and r.stdout == b'sim ran: hidutil list\n', (r.returncode, r.stdout, r.stderr)
+    r = subprocess.run(me + ['--timeout', '20', 'ioreg', '-c', 'IOService', '-d', '2'], capture_output=True, timeout=30)
+    assert r.returncode == 5 and r.stdout == b'sim ran: ioreg -c IOService -d 2\n', (r.returncode, r.stdout, r.stderr)
+    r = subprocess.run(me + ['@read', '/etc/hosts'], capture_output=True, timeout=20)
+    assert r.returncode == 0 and r.stdout.startswith(b'127.0.0.1'), (r.returncode, r.stdout, r.stderr)
     print('selftest: run (SHELL channel, exit marker) against UsbDbgSim OK')
 
 
@@ -388,7 +392,8 @@ def main():
     sub.add_parser('console')
     sub.add_parser('shell')
     p = sub.add_parser('run', help='run one userland command through the agent and wait for its exit')
-    p.add_argument('--timeout', type=float, default=60.0); p.add_argument('command', nargs='+')
+    p.add_argument('--timeout', type=float, default=60.0)
+    p.add_argument('command', nargs=argparse.REMAINDER, help='program and arguments (dashes are passed through)')
     sub.add_parser('hello')
     sub.add_parser('state')
     p = sub.add_parser('read'); p.add_argument('space', choices=['virt', 'phys']); p.add_argument('addr'); p.add_argument('length')
@@ -433,6 +438,8 @@ def main():
 
     if a.cmd == 'kdp-proxy':
         return kdp_proxy(make, a.listen, a.target_ip, a.mode)
+    if a.cmd == 'run' and not a.command:
+        raise SystemExit('run: give a command, e.g. run ps -A')
     if a.cmd == 'run':
         # One command through the agent: print its output, return its exit status (the agent ends every command
         # with a line `fjdbg: exit N`). Earlier commands' late output is skipped up to our own marker line.
@@ -448,9 +455,10 @@ def main():
             at = text.find(marker)
             if at < 0:
                 return
-            m = re.search(rb'fjdbg: exit (-?[0-9]+)\n', text[at:])
+            # a program ends with `fjdbg: exit N`; the agent's @builtins end with `fjdbg: eof` (status 0)
+            m = re.search(rb'fjdbg: (?:exit (-?[0-9]+)|eof)\n', text[at:])
             if m:
-                state['code'] = int(m.group(1))
+                state['code'] = int(m.group(1)) if m.group(1) is not None else 0
                 got.set()
         link = Link(transport, on_shell=on_shell)
         try:
@@ -465,7 +473,7 @@ def main():
             text = bytes(buf)
             at = text.find(marker)
             body = text[at:].split(b'\n', 1)[1] if at >= 0 and b'\n' in text[at:] else b''
-            body = re.sub(rb'fjdbg: exit -?[0-9]+\n$', b'', body)
+            body = re.sub(rb'\n?fjdbg: (?:exit -?[0-9]+|eof)\n$', b'\n', body)
             sys.stdout.buffer.write(body)
             sys.stdout.flush()
         finally:

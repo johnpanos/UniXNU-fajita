@@ -103,7 +103,9 @@ int main(int argc, char **argv)
           line[ll] = 0;
           char out[700];
           int n;
-          if (strncmp(line, "fjdbg-run", 9) == 0) {
+          if (strncmp(line, "@read ", 6) == 0) {   // the agent's builtin: file bytes, then "fjdbg: eof"
+            n = snprintf(out, sizeof out, "127.0.0.1 localhost\n\nfjdbg: eof\n");
+          } else if (strncmp(line, "fjdbg-run", 9) == 0) {
             n = snprintf(out, sizeof out, "fjdbg: cannot run %s: No such file or directory\n", line);
           } else {
             int args = 1;
