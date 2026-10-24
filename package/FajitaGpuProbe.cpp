@@ -378,6 +378,7 @@ extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8]
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_maint_stats[4] __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_skip_readonly_imports __attribute__((weak));
 extern "C" bool (*native_adreno_page_uncached)(uint64_t physical) __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_uncached_skipped __attribute__((weak));
 extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
@@ -614,6 +615,9 @@ bool stage10()
     if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
     // fajita-gpu-import-skip (default 1): no per-submission cache maintenance of the imports the GPU writes (see NativeAdrenoVm.cpp).
     if (&native_adreno_skip_written_imports) native_adreno_skip_written_imports = bootArg("fajita-gpu-import-skip", 1);
+    // fajita-gpu-ro-skip (default 0): no per-submission maintenance of read-only imports either; the native Metal frontend cleans the
+    // imports whose surfaces changed at commit (NativeBridgeMetalFrontend.mm flushImports). Only with a plugin that does.
+    if (&native_adreno_skip_readonly_imports) native_adreno_skip_readonly_imports = bootArg("fajita-gpu-ro-skip", 0);
     // fajita-gpu-uncached-skip (default 1): publishing an import skips its pages that no CPU mapping caches (NativeAdrenoMemory.cpp).
     if (&native_adreno_page_uncached) native_adreno_page_uncached = bootArg("fajita-gpu-uncached-skip", 1) ? pageUncached : nullptr;
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
