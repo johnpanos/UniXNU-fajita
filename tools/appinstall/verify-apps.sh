@@ -13,7 +13,7 @@ for k in mobilecal mobilemail mobilenotes reminders mobiletimer tv hello weather
   xy=${POS[$k]%%:*}; name=${POS[$k]##*:}
   reg=$(grep -c -i "\.$k\$\|\.$k\.\|^org.unixnu.$k\$" $R/list.txt); b=$(grep -c "/$name.app/ " $R/bundles.txt)
   page=0; case $k in weather|MobileAddressBook) page=1;; esac
-  $SS call kcmd touch swipe right > /dev/null; sleep 1; [ $page = 1 ] && { $SS call kcmd touch swipe left > /dev/null; sleep 2; }
+  [ $page = 1 ] && [ -z "$onp2" ] && { $SS call kcmd touch swipe left > /dev/null; sleep 2; onp2=1; }
   $SS call kcmd touch tap $xy > /dev/null; sleep 7
   l=$($SS run ps -A | grep -c "/$name.app/$name\|/$name\$")
   $SS call screenshot $R/$name.png > /dev/null
