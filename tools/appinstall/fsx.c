@@ -1,4 +1,4 @@
-// fsx: tiny filesystem helper for the iOS userland (no ls/rm/mkdir there).  fsx [ls] DIR [DEPTH] | rm PATH | rmr DIR | mk DIR | cat FILE
+// fsx: tiny filesystem helper for the iOS userland (no ls/rm/mkdir there).  fsx [ls] DIR [DEPTH] | rm PATH | rmr DIR | mk DIR [UID GID] (UID/GID applied to the last component) | chown PATH UID GID | cat FILE
 #include <stdio.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -30,7 +30,8 @@ int main(int c, char **v) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	if (c > 2 && !strcmp(v[1], "rm")) { printf("unlink -> %d\n", unlink(v[2])); return 0; }
 	if (c > 2 && !strcmp(v[1], "rmr")) { rmr(v[2]); return 0; }
-	if (c > 2 && !strcmp(v[1], "mk")) { char b[1024]; strlcpy(b, v[2], sizeof b); for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0755); *s = '/'; } printf("mkdir -> %d\n", mkdir(b, 0755)); return 0; }
+	if (c > 2 && !strcmp(v[1], "mk")) { char b[1024]; strlcpy(b, v[2], sizeof b); for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0755); *s = '/'; } int r = mkdir(b, 0755); if (c > 4) { chown(b, atoi(v[3]), atoi(v[4])); for (char *s = b + 1; *s; s++) {} } printf("mkdir -> %d\n", r); return 0; }
+	if (c > 4 && !strcmp(v[1], "chown")) { printf("chown -> %d\n", chown(v[2], atoi(v[3]), atoi(v[4]))); return 0; }
 	if (c > 2 && !strcmp(v[1], "cat")) { FILE *f = fopen(v[2], "r"); int ch; while (f && (ch = fgetc(f)) != EOF) putchar(ch); return 0; }
 	int a = c > 1 && !strcmp(v[1], "ls"); walk(v[1 + a], 0, c > 2 + a ? atoi(v[2 + a]) : 0); return 0;
 }
