@@ -34,7 +34,7 @@ jobs:
           git -C unixnu checkout -q "$REF"
           git -C unixnu config submodule.drivers/NativeMetal.url https://github.com/johnpanos/NativeMetal
           git -C unixnu config submodule.drivers/NativeAdreno.url https://github.com/johnpanos/NativeAdreno
-          git -C unixnu submodule update --init --depth 50 drivers/NativeMetal drivers/NativeAdreno kits/AdrenoPM4 kits/ArmSmmu4K
+          git -C unixnu submodule update --init --depth 50 drivers/NativeMetal drivers/NativeAdreno drivers/NativeMobileDisplay kits/AdrenoPM4 kits/ArmSmmu4K
           git -C unixnu log --oneline -1
           git -C unixnu submodule status drivers/NativeMetal drivers/NativeAdreno
       - name: Tools
