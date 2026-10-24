@@ -280,6 +280,11 @@ def serve(args):
 
 
 def call(args):
+    try:   # activity stamp beside the socket: session.sh ends a session nobody has called into for a while
+        with open(args.sock + '.activity', 'a'):
+            os.utime(args.sock + '.activity')
+    except OSError:
+        pass
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(args.sock)
     f = s.makefile('rwb')
