@@ -701,6 +701,94 @@ bool (*const kStages[])() = {nullptr, stage1, stage2, stage3, stage4, stage5, st
 constexpr unsigned kLastStage = sizeof kStages / sizeof *kStages - 1;
 volatile uint32_t gTarget;
 
+
+// ---- Clock governor (fajita-gpu-gov, default 1): GPU DCVS level and the DDR/LLCC vote follow activity, tsens caps them ----
+// Every 20 ms: GPU busy cycles (RBBM counter 1 = PERF_RBBM_STATUS_MASKED) and the GPU hand-off frames. Any activity: the top GPU
+// level (Linux's sdm845 OPPs: index gpu_count-1 = 710 MHz) and the bus at Linux's A630 vote (7216 MB/s); 1 s without either: the
+// lowest GPU OPP (index 1, 257 MHz) and the keepalive bus vote. Every second: tsens0/1 (sdm845.dtsi, v2 TM_Sn_STATUS at 0xa0, last
+// temperature in deci-degC); at 80 C the level is capped at index 4 (520 MHz), at 84 C at index 1 (gpu-top-thermal is passive at 85 C,
+// cpu0-thermal at 90 C). kcmd gpu gov shows the state; every change reads back (DCVS return, BCM echo).
+extern "C" int fajita_bus_set(unsigned peakMBps) __attribute__((weak));
+extern "C" char fajita_bus_row[256] __attribute__((weak));
+struct Gov {
+    uint32_t level, cap, bus, changes, busErrors, maxTempDeci, hotZone, ticks;
+    uint64_t lastActiveUs, busyLast, framesLast;
+    uint32_t dcvsRet;
+    volatile uint32_t running, enabled;
+};
+Gov gGov;
+volatile uint32_t *gTsens[2];
+const unsigned kTsensCount[2] = {13, 8};
+OSSharedPtr<IOMemoryMap> gTsensMap[2];
+int32_t tsensMaxDeci(uint32_t *zone) {
+    static const uint64_t base[2] = {0x0c263000, 0x0c265000};
+    int32_t best = -1000;
+    for (unsigned b = 0; b < 2; ++b) {
+        if (!gTsens[b]) {
+            IODeviceMemory *m = IODeviceMemory::withRange(base[b], 0x1000);
+            if (m) {gTsensMap[b] = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapInhibitCache | kIOMapReadOnly), OSNoRetain); m->release();}
+            if (!gTsensMap[b]) continue;
+            gTsens[b] = reinterpret_cast<volatile uint32_t *>(gTsensMap[b]->getVirtualAddress());
+        }
+        for (unsigned n = 0; n < kTsensCount[b]; ++n) {
+            const uint32_t v = gTsens[b][(0xa0 + 4 * n) / 4];
+            if (!(v & (1u << 21))) continue;                                   // VALID
+            const int32_t t = int32_t(v << 20) >> 20;                          // LAST_TEMP 11:0, signed deci-degC
+            if (t > best) {best = t; if (zone) *zone = b * 16 + n;}
+        }
+    }
+    return best;
+}
+void govSetLevel(unsigned level) {
+    if (level == gGov.level) return;
+    uint32_t ret = 0;
+    if (A630SetFreq(&gIo, level, &ret) == A630Ok) {gGov.level = level; gGov.dcvsRet = ret; ++gGov.changes;}
+}
+void govSetBus(unsigned mbps) {
+    if (!fajita_bus_set || mbps == gGov.bus) return;
+    if (fajita_bus_set(mbps)) ++gGov.busErrors; else gGov.bus = mbps;
+}
+void govThread(void *, wait_result_t)
+{
+    const unsigned top = gPerf.gpu_count - 1, low = 1;
+    gGov.level = top; gGov.cap = top; gGov.bus = 7216; gGov.lastActiveUs = nowUs();
+    gpuWr(0x0507 + 1, 6);   // RBBM_PERFCTR_RBBM_SEL_1 = PERF_RBBM_STATUS_MASKED (kcmd gpu perf selects the same)
+    auto busy = [] {return uint64_t(gpuRd(0x041c + 3)) << 32 | gpuRd(0x041c + 2);};
+    gGov.busyLast = busy();
+    gGov.framesLast = &native_gop_gpu_offers ? native_gop_gpu_offers : 0;
+    for (;;) {
+        IOSleep(20);
+        if (!gGov.enabled) continue;
+        ++gGov.ticks;
+        const uint64_t now = nowUs(), b = busy(), f = &native_gop_gpu_offers ? native_gop_gpu_offers : 0;
+        const bool active = b != gGov.busyLast || f != gGov.framesLast;
+        gGov.busyLast = b; gGov.framesLast = f;
+        if (!(gGov.ticks % 50)) {
+            uint32_t zone = 0;
+            const int32_t t = tsensMaxDeci(&zone);
+            gGov.maxTempDeci = uint32_t(t); gGov.hotZone = zone;
+            const unsigned cap = t >= 840 ? low : t >= 800 ? (top > 4 ? 4u : top) : top;
+            if (cap != gGov.cap) {gGov.cap = cap; gpuLog("gov: %d.%d C (zone %u): GPU level capped at %u", t / 10, t % 10, zone, cap);}
+        }
+        if (active) {
+            gGov.lastActiveUs = now;
+            govSetLevel(gGov.cap);
+            govSetBus(7216);
+        } else if (now - gGov.lastActiveUs > 1000000) {
+            govSetLevel(low < gGov.cap ? low : gGov.cap);
+            govSetBus(0);
+        }
+        if (gGov.level > gGov.cap) govSetLevel(gGov.cap);
+    }
+}
+void govStart()
+{
+    if (gGov.running || !bootArg("fajita-gpu-gov", 1)) return;
+    gGov.running = 1; gGov.enabled = 1;
+    thread_t t = nullptr;
+    if (kernel_thread_start(govThread, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t); else gGov.running = 0;
+}
+
 void runThread(void *, wait_result_t)
 {
     const unsigned target = gTarget;
@@ -714,6 +802,7 @@ void runThread(void *, wait_result_t)
         if (!ok) {fajita_gpu_failed = (int32_t)s; break;}
         fajita_gpu_stage = s;
     }
+    if (fajita_gpu_stage >= 10) govStart();
     fajita_gpu_running = 0;
 }
 
@@ -799,6 +888,15 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         return n - from;
     }
     if (!strncmp(a, "perf", 4)) return perfCmd(a + 4, out, cap);
+    if (!strncmp(a, "gov", 3)) {   // gov [on|off]: the clock governor's state (off: it stops changing anything)
+        if (!strncmp(a + 3, " on", 3)) gGov.enabled = 1; else if (!strncmp(a + 3, " off", 4)) gGov.enabled = 0;
+        uint32_t z = 0;
+        const int32_t t = tsensMaxDeci(&z);
+        return appendf(out, cap, 0, "gov %s level %u (%u kHz) cap %u bus %u MB/s changes %u bus-errors %u dcvs-ret %x | max %d.%d C zone %u | idle %llu ms\n%s\n",
+                       gGov.enabled ? "on" : "off", gGov.level, gPerf.gpu_khz[gGov.level < A630MaxGpuLevels ? gGov.level : 0], gGov.cap, gGov.bus,
+                       gGov.changes, gGov.busErrors, gGov.dcvsRet, t / 10, t % 10, z,
+                       (unsigned long long)((nowUs() - gGov.lastActiveUs) / 1000), &fajita_bus_row ? fajita_bus_row : "");
+    }
     if (!strncmp(a, "freq ", 5)) {   // DCVS: the GPU perf index (0..gpu_count-1) through the GMU's legacy DCVS OOB, as Linux's set_freq
         unsigned idx = 0;
         for (const char *p = a + 5; *p >= '0' && *p <= '9'; ++p) idx = idx * 10 + unsigned(*p - '0');

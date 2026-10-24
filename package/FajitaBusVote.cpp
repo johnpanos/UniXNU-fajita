@@ -167,6 +167,8 @@ size_t run(bool write, bool off, uint64_t peakMBps, uint64_t avgMBps, char *buf,
         }
         const int r = send(2, rd, st, resp, &us);
         o.add("| read tcs%d MC0 %08x SH0 %08x", r, resp[0], resp[1]);
+        // The BCMs echo the vote without the commit bit (30): anything else means the vote did not take.
+        if (write && (r < 0 || ((resp[0] ^ cmd[0][2]) & 0x3fffffffu) || ((resp[1] ^ cmd[1][2]) & 0x3fffffffu))) {o.add(" MISMATCH"); error = -5;}
     } while (0);
     fajita_bus_state[3] = uint32_t(error);
     IOLockUnlock(gLock);
@@ -195,6 +197,14 @@ size_t kcmdBus(const char *args, size_t len, char *out, size_t cap) {
     return n;
 }
 }  // namespace
+
+// For a governor (FajitaGpuProbe.cpp): peak MB/s (Linux's GPU vote is 7216), 0 = the keepalive minimum. Returns 0 when the BCMs read
+// back what was sent; the reply text lands in fajita_bus_row.
+extern "C" int fajita_bus_set(unsigned peakMBps) {
+    if (!gLock) return -19;
+    run(true, peakMBps == 0, peakMBps, 0, fajita_bus_row, sizeof fajita_bus_row);
+    return int(fajita_bus_state[3]);
+}
 
 // Called by FajitaCpuFreq.cpp's sheng_cpufreq_poll (the boot progress monitor, once a second): the first call after IOKit is up
 // registers the kcmd and sends the boot vote.
