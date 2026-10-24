@@ -8,6 +8,7 @@
 
 #include "AcmDescriptors.h"
 #include "UsbDbgDevice.h"
+#include "UsbDbgKernelTarget.h"   // memory/MMIO peek and poke, named kernel commands
 // The generic ARM SMMUv2 stream planner (NativeUfs/SmmuTakeover.h) is included by the
 // including TU (NativeDwc3.cpp) before this header; it maps the gadget DMA behind
 // stream 0x740 (adopt the firmware bypass or plan a free bank).
@@ -525,6 +526,7 @@ inline void Gadget::onBulkOut(uint32_t remaining)
       t.ident = "fajita-usb-debug";
       t.features = usbdbg::kFeatLog;
       t.ctx = this;
+      usbdbgk::fill(t, native_dwc3_gadget_on >= 2);   // writes need usb-debug>=2
       t.state = [](void *ctx, char *out, size_t cap) -> size_t {
         Gadget *g = static_cast<Gadget *>(ctx);
         int n = snprintf(out, cap,
