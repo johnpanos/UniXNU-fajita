@@ -227,12 +227,19 @@ bool stage4()
 {
     // a6xx_gmu_init (A630 branch): dummy 4 KiB at 0x60000000, debug 16 KiB, log 16 KiB, hfi 16 KiB; no icache (a page is
     // allocated anyway, the allocator wants one; nothing uses it). The GMU is arm-smmu-qcom's second client: bank 1.
-    // The reset S2CRs read 0x000200ff (TYPE fault, CBNDX 0xff); the stream kit leases only a slot whose S2CR is exactly
-    // fault with index 0 (gpu2: attach refused Busy). Both are "fault": rewrite the unused slots 0 and 1 to the form it expects.
+    // The reset S2CRs read 0x000200ff (TYPE fault, CBNDX 0xff); the stream kit leases only a slot whose S2CR reads clean
+    // FAULT with CBNDX 0 (gpu2/gpu3: attach refused Busy). The SDM845 SMMU firmware has the Qualcomm quirk that writes of a
+    // FAULT-type S2CR are ignored and a BYPASS write lands as FAULT (arm-smmu-qcom qcom_smmu_cfg_probe; confirmed live: a
+    // bypass 0x00010000 read back 0x00020000), so writing BYPASS with CBNDX 0 to an unused slot gives the clean FAULT the kit
+    // wants. GMU uses slot 1, GPU slot 0; normalize both while no stream is valid.
     for (unsigned slot = 0; slot < 2; ++slot) {
         volatile uint32_t *smr = reinterpret_cast<volatile uint32_t *>(gSmmu.va + 0x800 + 4 * slot);
         volatile uint32_t *s2cr = reinterpret_cast<volatile uint32_t *>(gSmmu.va + 0xc00 + 4 * slot);
-        if (!(*smr & 0x80000000u) && *s2cr == 0x000200ffu) *s2cr = 0x00020000u;
+        if (!(*smr & 0x80000000u) && (*s2cr & 0x30000u) == 0x20000u && (*s2cr & 0xff) != 0) {
+            *s2cr = 0x00010000u;   // BYPASS, CBNDX 0 -> the firmware stores FAULT, CBNDX 0
+            __asm__ volatile("dsb sy" ::: "memory");
+            gpuLog("S4 smmu slot %u s2cr normalized to %08x", slot, *s2cr);
+        }
     }
     __asm__ volatile("dsb sy" ::: "memory");
     IOReturn st = NativeAdrenoGmuContextSetSizes(0x1000, 0x1000, 0x4000, 0x4000, 0x4000);
