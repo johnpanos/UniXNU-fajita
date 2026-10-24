@@ -7,6 +7,10 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#include <signal.h>
+// libproc (no header in the iPhoneOS SDK; the functions are in libSystem)
+extern "C" int proc_listallpids(void *buffer, int buffersize);
+extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
 #include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +31,27 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IOLBF, 0);
         const double t0 = nowMs();
+        if (argc > 2 && !strcmp(argv[1], "killall")) {
+            // killall NAME: SIGKILL every process of that name (launchd restarts a KeepAlive job such as backboardd).
+            static int pids[4096];
+            const int n = proc_listallpids(pids, sizeof pids);
+            int killed = 0;
+            for (int i = 0; i < n; ++i) {
+                char name[64] = {};
+                if (proc_name(pids[i], name, sizeof name) > 0 && !strcmp(name, argv[2]) && kill(pids[i], SIGKILL) == 0) {
+                    printf("killed %s %d\n", name, pids[i]);
+                    ++killed;
+                }
+            }
+            printf("%d killed\n", killed);
+            return killed ? 0 : 1;
+        }
+        if (argc > 1 && !strcmp(argv[1], "ps")) {
+            static int pids[4096];
+            const int n = proc_listallpids(pids, sizeof pids);
+            for (int i = 0; i < n; ++i) {char name[64] = {}; proc_name(pids[i], name, sizeof name); printf("%d %s\n", pids[i], name);}
+            return 0;
+        }
         if (argc > 1 && !strcmp(argv[1], "bundle")) {
             // Load the plugin the way Metal's discovery does, with every error visible.
             NSBundle *bundle = [NSBundle bundleWithPath:@"/System/Library/Extensions/NativeAdrenoMetal.bundle"];
