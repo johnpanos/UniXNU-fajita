@@ -241,3 +241,63 @@ class Hub:
 
     def shell_exchange(self, lines, timeout):
         return self.shell_collect(self.shell_send(lines), time.time() + timeout)
+
+
+def serve(args):
+    hub = Hub(args.log)
+    threading.Thread(target=hub.connect_loop, args=(args.exec_cmd,), daemon=True).start()
+    try:
+        os.unlink(args.sock)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(args.sock)
+    srv.listen(8)
+    signal.signal(signal.SIGTERM, lambda *_: (srv.close(), os._exit(0)))
+    hub.note('serving ' + args.sock)
+
+    def client(c):
+        try:
+            f = c.makefile('rwb')
+            req = json.loads(f.readline())
+            try:
+                rep = hub.handle(req)
+            except Exception as e:  # noqa: BLE001 - report every failure to the caller
+                rep = {'ok': False, 'out': 'error: %s\n' % e}
+            f.write((json.dumps(rep) + '\n').encode())
+            f.flush()
+        finally:
+            c.close()
+
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=client, args=(c,), daemon=True).start()
+
+
+def call(args):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(args.sock)
+    f = s.makefile('rwb')
+    req = {'op': args.op, 'args': args.rest}
+    if args.timeout:
+        req['timeout'] = args.timeout
+    f.write((json.dumps(req) + '\n').encode())
+    f.flush()
+    rep = json.loads(f.readline())
+    sys.stdout.write(rep['out'])
+    return 0 if rep['ok'] else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--sock', default=DEFAULT_SOCK)
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('serve'); p.add_argument('--log', required=True)
+    p.add_argument('--exec', dest='exec_cmd', help='tests: talk to a program (the simulator) instead of the tty')
+    p = sub.add_parser('call'); p.add_argument('--timeout', type=float); p.add_argument('op'); p.add_argument('rest', nargs=argparse.REMAINDER)
+    a = ap.parse_args()
+    return serve(a) if a.cmd == 'serve' else call(a)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
