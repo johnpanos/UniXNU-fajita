@@ -24,7 +24,7 @@ KIT = ROOT / 'kits/fajita'
 WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-designator', '-Wno-reorder-init-list',
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
-INCLUDES = ['-I', str(KIT), '-I', str(SPMI), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
+INCLUDES = ['-I', str(KIT), '-I', str(SPMI), '-I', str(ROOT / 'drivers/NativeGeniI2c'), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 
 def record(relative):
@@ -63,6 +63,7 @@ def main():
     units = [
         (cpp_rec, KIT / 'FajitaPmic.cpp', []),
         (c_rec, KIT / 'FajitaPmicBoard.c', ['-mgeneral-regs-only']),
+        (c_rec, KIT / 'FajitaGaugeI2c.c', ['-mgeneral-regs-only']),
     ]
     objects, commands = [], {}
     for rec, source, extra in units:
@@ -83,7 +84,8 @@ def main():
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if digest != previous:
         (OBJ_ROOT / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
-    sources = [KIT / 'FajitaPmic.cpp', KIT / 'FajitaPmicBoard.c', KIT / 'FajitaPmicBoard.h', SPMI / 'NativeSpmi.h']
+    sources = [KIT / 'FajitaPmic.cpp', KIT / 'FajitaPmicBoard.c', KIT / 'FajitaPmicBoard.h', KIT / 'FajitaGaugeI2c.c', KIT / 'FajitaGaugeI2c.h',
+               SPMI / 'NativeSpmi.h', ROOT / 'drivers/NativeGeniI2c/GeniI2c.c']
     (OUT / 'build-report.json').write_text(json.dumps({
         'archive_sha256': digest,
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},

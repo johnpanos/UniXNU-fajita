@@ -137,6 +137,72 @@ int fpm_charging(uint8_t status_1, uint8_t status_2, int online);
 static inline int fpm_usb_online(uint8_t power_path) {return (power_path & 0x10) && (power_path & 0x01);}
 static inline unsigned fpm_icl_ma(uint8_t icl_status) {return icl_status * (FPM_CURRENT_STEP_UA / 1000u);}
 
+// The battery's own gauge: TI bq27411 at 0x55 on i2c10 (sdm845-oneplus-common.dtsi &i2c10, 100 kHz; the PMI8998 FG node is
+// disabled on fajita in mainline and pmOS). i2c10 = QUP wrapper 1 SE2 (sdm845.dtsi i2c@a88000, GCC_QUPV3_WRAP1_S2_CLK,
+// qup_i2c10_default: gpio55/gpio56 function qup10). Only standard-command reads (register pointer write, repeated START, read):
+// nothing in the gauge is ever written.
+#define FPM_BQ_ADDR 0x55
+#define FPM_BQ_HZ 100000u
+#define FPM_BQ_SE_BASE 0x00a88000ULL
+#define FPM_BQ_SE_SIZE 0x4000ULL
+#define FPM_QUP1_WRAPPER_BASE 0x00ac0000ULL
+#define FPM_GCC_BASE 0x00100000ULL
+#define FPM_GCC_VOTE 0x5200c                  // APCS clock branch vote register of the QUP wrapper 1 branches
+#define FPM_VOTE_M_AHB (1u << 20)             // gcc_qupv3_wrap_1_m_ahb_clk, halt 0x1800c
+#define FPM_VOTE_S_AHB (1u << 21)             // gcc_qupv3_wrap_1_s_ahb_clk, halt 0x18010
+#define FPM_VOTE_S2 (1u << 24)                // gcc_qupv3_wrap1_s2_clk, halt 0x18274
+#define FPM_HALT_M_AHB 0x1800c
+#define FPM_HALT_S_AHB 0x18010
+#define FPM_HALT_S2 0x18274
+#define FPM_S2_RCG 0x18278                    // gcc_qupv3_wrap1_s2_clk_src cmd_rcgr
+#define FPM_RCG_CFG 0x4
+#define FPM_RCG_DFSR 0x14
+#define FPM_RCG_PERF_CFG(l) (0x1c + 4 * (l))
+#define FPM_RCG_PERF_M(l) (0x5c + 4 * (l))
+#define FPM_RCG_PERF_N(l) (0x9c + 4 * (l))
+#define FPM_DFS_LEVELS 8
+#define FPM_TCXO_HZ 19200000u
+#define FPM_TLMM_BASE 0x03400000ULL
+#define FPM_TLMM_NORTH 0x00500000u
+#define FPM_PIN_STRIDE 0x1000u
+#define FPM_GPIO_BQ_SDA 55                    // PINGROUP(55, NORTH, qup10, ...): function 1
+#define FPM_GPIO_BQ_SCL 56
+#define FPM_FUNC_QUP10 1u
+#define FPM_CBCR_CLK_OFF (1u << 31)
+#define FPM_CBCR_HW_CTL (1u << 1)
+
+// bq27411 standard commands (two bytes, little endian).
+#define FPM_BQ_TEMPERATURE 0x02               // 0.1 K
+#define FPM_BQ_VOLTAGE 0x04                   // mV
+#define FPM_BQ_FLAGS 0x06
+#define FPM_BQ_REMAINING 0x0c                 // mAh
+#define FPM_BQ_FULL 0x0e                      // mAh
+#define FPM_BQ_AVG_CURRENT 0x10               // signed mA, positive while charging
+#define FPM_BQ_SOC 0x1c                       // percent
+#define FPM_BQ_SOH 0x20                       // percent in the low byte
+#define FPM_BQ_FLAG_DSG 0x0001u
+#define FPM_BQ_FLAG_FC 0x0200u
+
+typedef struct fpm_bq {
+    int mv, ma, soc, temp_dc, remaining_mah, full_mah, soh;
+    unsigned flags;
+    int valid;                                // the readings pass fpm_bq_plausible
+} fpm_bq;
+// From the seven words read in the order temperature, voltage, flags, remaining, full, average current, SoC (and SoH).
+void fpm_bq_decode(fpm_bq *out, const uint16_t words[8]);
+int fpm_bq_plausible(const fpm_bq *b);
+
+static inline uint32_t fpm_pin_offset(unsigned gpio) {return FPM_TLMM_NORTH + FPM_PIN_STRIDE * gpio;}
+// TLMM CTL: pull 1:0, function 5:2, drive (mA / 2 - 1) 8:6, output enable 9.
+static inline uint32_t fpm_pin_cfg(unsigned func, unsigned drive_ma, unsigned pull) {
+    unsigned code = drive_ma >= 2 ? drive_ma / 2 - 1 : 0;
+    if (code > 7) code = 7;
+    return (pull & 3u) | ((func & 15u) << 2) | (code << 6);
+}
+static inline int fpm_branch_running(uint32_t cbcr) {return !(cbcr & FPM_CBCR_CLK_OFF) || (cbcr & FPM_CBCR_HW_CTL);}
+// The DFS level of 19.2 MHz (TCXO), or -1: as the touch probe's ftb_xo_level (clk-rcg2.c rate arithmetic).
+int fpm_xo_level(uint32_t dfsr, const uint32_t *cfg, const uint32_t *m, const uint32_t *n, unsigned levels, uint32_t cfg_now);
+
 #ifdef __cplusplus
 }
 #endif

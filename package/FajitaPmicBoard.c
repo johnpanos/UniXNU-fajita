@@ -86,3 +86,38 @@ int fpm_charging(uint8_t status_1, uint8_t status_2, int online) {
     default: return 0;
     }
 }
+
+void fpm_bq_decode(fpm_bq *out, const uint16_t w[8]) {
+    out->temp_dc = (int)w[0] - 2731;
+    out->mv = w[1];
+    out->flags = w[2];
+    out->remaining_mah = w[3];
+    out->full_mah = w[4];
+    out->ma = (int16_t)w[5];
+    out->soc = w[6];
+    out->soh = w[7] & 0xff;
+    out->valid = fpm_bq_plausible(out);
+}
+
+int fpm_bq_plausible(const fpm_bq *b) {
+    return b->mv >= 2500 && b->mv <= 4600 && b->soc >= 0 && b->soc <= 100 && b->temp_dc > -400 && b->temp_dc < 800 &&
+           b->full_mah > 0 && b->full_mah < 10000 && b->remaining_mah <= b->full_mah + 200;
+}
+
+static uint64_t src_hz(unsigned sel) {return sel == 0 ? FPM_TCXO_HZ : sel == 1 ? 600000000ULL : sel == 6 ? 300000000ULL : 0;}
+static uint64_t rcg_hz(uint32_t cfg, uint32_t mreg, uint32_t nreg) {
+    unsigned src = (cfg >> 8) & 7, mode = (cfg >> 12) & 3, hid = cfg & 0x1f;
+    uint64_t rate = src_hz(src);
+    if (hid) rate = rate * 2 / (hid + 1);
+    if (mode) {
+        uint32_t m = mreg & 0xffff, n = ((~nreg) & 0xffff) + m;
+        if (n) rate = rate * m / n;
+    }
+    return rate;
+}
+
+int fpm_xo_level(uint32_t dfsr, const uint32_t *cfg, const uint32_t *m, const uint32_t *n, unsigned levels, uint32_t cfg_now) {
+    if (!(dfsr & 1)) return rcg_hz(cfg_now, 0, 0xffff) == FPM_TCXO_HZ && !((cfg_now >> 12) & 3) ? 0 : -1;
+    for (unsigned l = 0; l < levels; l++) if (rcg_hz(cfg[l], m[l], n[l]) == FPM_TCXO_HZ) return (int)l;
+    return -1;
+}
