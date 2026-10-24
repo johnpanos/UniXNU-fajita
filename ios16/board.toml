@@ -176,6 +176,7 @@ board_args = [
   "native-touch-edge-side=43","native-touch-edge-top=20","native-touch-edge-bottom=42",
   # PMI8998 charging (package/FajitaPmic.cpp): the pmOS qcom_smbx charger setup, fast charge 1.0 A, USB input limit 1.5 A, a status
   # row (charger, fuel-gauge voltage/current) every 30 s, no register dump. fajita-pmic=1 on the command line makes a run read only.
+  "fajita-touch=4","sheng-touch-hid=1",   # touch on by default (NOTES-touch.md stage 4)
   "fajita-pmic=2","fajita-pmic-dump=0","fajita-pmic-period=30",
   # PMIC keys (power, volume up/down) as HID consumer usages through NativeHidInput's report 2; the battery as an IOPMPowerSource
   # (AppleSmartBattery) for powerd, from the bq27411 gauge on i2c10 (read only). NOTES-pmic.md.
