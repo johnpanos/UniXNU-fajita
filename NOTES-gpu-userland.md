@@ -74,11 +74,25 @@ From the 20H392 dyld cache (scratchpad/dsc16) and kernelcache (.cache/ipsw/20H39
 
 Local worktrees: /home/john/src/UniXNU-ios16-stack-gpuuser (UniXNU), /home/john/src/UniXNU-fajita-gpuuser (board).
 
+## Hardware results (2026-10-23 sessions)
+
+| Session | Result |
+| --- | --- |
+| gpuu2 | ngpu-probe: open (type 0x4147), DeviceInfo, a CP_MEM_WRITE IB from userspace read back, 200 submissions |
+| session-193533 | stage 11: AGXAccelerator registered after the bound IOAcceleratorES matched the live metaclass |
+| session-194706 | ngpu-vk: Turnip on the A630 passes fill 1024/1024, compute 1024/1024, render 512 px / 0 stray |
+| session-195220 | panic pmap_assert_free: a killed client's BOs freed while still CPU-mapped; fixed (deferred close) |
+| session-200101 | ngpu-metal: MTLCreateSystemDefaultDevice() = 'Turnip Adreno (TM) 630'; a blit fill on the GPU passes |
+| session-201609 | backboardd takes the device, then SIGSEGV in QuartzCore's newPipelineLibraryWithFilePath:error: (fixed in NativeMetal) |
+
+Session tools: `ngpu-metal ps|killall NAME|bundle`, `ngpu-vk`, `ngpu-probe` in /usr/sbin (pushed copies: run them from
+/private/var/ngpu/sbin); boot args `ngpu-trace=1|2` (every ABI call, the plugin's markers and texts in the kernel log),
+`fajita-gpu=11 fajita-gpu-delay=90` (stages after userland is up; earlier, stage 10 hung in early boot). The CRASH/ABORT rows of
+BootProgress are in the live log. iOS 16 has no ls/echo/sysctl/kill/launchctl.
+
 ## Left
 
-1. ngpu-probe on the phone (direct open, CP_MEM_WRITE read-back).
-2. NativeMetal for 20H392: `_MTLDevice` 528, gate the 21H461 address diagnostics, iOS 16 deployment target.
-3. CI: Turnip (darwin KMD, ios16 target), metal2vulkan bridge and the plugin bundle for arm64 iOS 16, signed.
-4. The AGXAccelerator shim on the A630 kernel side, with MetalPluginName.
-5. Delivery of the bundle (boot image with the current DarwinBoot, or the kernel-embedded add-on).
-6. Discovery, the first GPU frame, then `--publish` for CARenderServer.
+1. CARenderServer on the native device (backboardd): the next crash or the first composited frame.
+2. The scanout path on fajita (NativeLegacyDisplay) for GPU-rendered frames.
+3. Stage 10/11 early in boot (stage 10 hung at ~51 s uptime), so backboardd finds the device without a restart.
+4. GetTimestamp inside a GMU OOB_PERFCOUNTER pair; the BO pool size.
