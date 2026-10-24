@@ -24,6 +24,35 @@ jobs:
           repository: johnpanos/NativeAdreno
           ref: fajita-a630
           path: NativeAdreno
+      - uses: actions/checkout@v4
+        with:
+          repository: johnpanos/NativeMetal
+          ref: fajita-a630
+          path: NativeMetal
+      - uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: v1.4.309
+          path: Vulkan-Headers
+      - name: Smoke shaders
+        run: |
+          set -e
+          brew install shaderc spirv-tools || true
+          mkdir -p smoke
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, subprocess, tempfile
+          lines = ['#pragma once', '#include <stdint.h>']
+          with tempfile.TemporaryDirectory() as tmp:
+              for source in sorted(Path('NativeMetal/shaders').glob('smoke_*')):
+                  spv = Path(tmp) / (source.name + '.spv')
+                  subprocess.run(['glslc', '--target-env=vulkan1.1', '-O', str(source), '-o', str(spv)], check=True)
+                  words = struct.unpack('<%dI' % (spv.stat().st_size // 4), spv.read_bytes())
+                  lines.append('static const uint32_t kSpv_%s[] = {' % source.name.replace('.', '_'))
+                  lines += ['    ' + ', '.join('0x%08x' % w for w in words[i:i + 8]) + ',' for i in range(0, len(words), 8)]
+                  lines.append('};')
+          Path('smoke/NativeTurnipShaders.h').write_text('\n'.join(lines) + '\n')
+          PY
       - name: Build and sign
         run: |
           set -e
@@ -40,6 +69,10 @@ jobs:
           codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.ngpu-metal \
             --entitlements package/gpu-tools/ngpu-probe-entitlements.plist out/ngpu-metal
           codesign --verify --strict out/ngpu-metal
+          xcrun --sdk iphoneos clang++ -std=c++17 -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Wno-unused-parameter \
+            -Wno-missing-field-initializers -I NativeMetal -I Vulkan-Headers/include -I smoke package/gpu-tools/ngpu-vk.cpp -o out/ngpu-vk
+          codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.ngpu-vk \
+            --entitlements package/gpu-tools/ngpu-probe-entitlements.plist out/ngpu-vk
           git -C NativeAdreno rev-parse HEAD > out/native-adreno.txt
           file out/ngpu-probe
       - uses: actions/upload-artifact@v4
