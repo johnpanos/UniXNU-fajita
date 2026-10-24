@@ -55,7 +55,7 @@ def check_object(path):
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     rec = record('iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
-    sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
+    sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp', KIT / 'FajitaPanel.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
     objects, commands = [], {}
     for source in sources:
         obj = OUT / (source.stem + '.o')
