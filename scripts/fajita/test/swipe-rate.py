@@ -6,7 +6,7 @@ import os
 import subprocess, sys, time, re, statistics as st
 
 HUB = ['python3', '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'fajita-usbdbg-hub.py'), 'call', '--timeout', '8']
-SETTLE = float(__import__('os').environ.get('SETTLE', '1.0'))
+SETTLE = float(os.environ.get('SETTLE', '1.0'))
 
 
 def call(*a):

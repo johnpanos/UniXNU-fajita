@@ -9,6 +9,8 @@
 #                  build is for using the phone: no automatic reset (the APSS watchdog still recovers a hard hang).
 #   --skip-kernel  reuse the last kernel; --skip-plugin reuse the last plugin (both are rebuilt incrementally anyway).
 #   KERNEL_ARG     extra boot arguments, e.g. fajita-brightness=1.
+#   --candidate    instead: rebuild the storage candidate input (fajita_ios16_candidate_defconfig, the prelinked kernel the storage kit is
+#                  qualified against) into .cache/fajita-inputs/storage-candidate/. Needed once, or when the stack's kit ABI changes.
 #
 # The stack lives in its own worktree of ~/src/UniXNU at the pinned commit ($FAJITA_STACK, default ~/src/UniXNU-fajita-stack); the
 # script creates it and moves it to the pin, so nobody needs to manage it by hand. Inputs that are not in git (Apple SDK, firmware,
@@ -24,15 +26,16 @@ UNIXNU_REPO=${UNIXNU_REPO:-$HOME/src/UniXNU}
 STACK=${FAJITA_STACK:-$HOME/src/UniXNU-fajita-stack}
 OUT=${FAJITA_OUT:-$BOARD/.cache/fajita-out}
 IN=$BOARD/.cache/fajita-inputs
-TEST=0; SKIP_K=0; SKIP_P=0; EXTRA=()
+TEST=0; SKIP_K=0; SKIP_P=0; CAND=0; EXTRA=()
 for a in "$@"; do case $a in
-  --test) TEST=1 ;; --skip-kernel) SKIP_K=1 ;; --skip-plugin) SKIP_P=1 ;;
-  -h|--help) sed -n 2,15p "$0"; exit 0 ;;
+  --test) TEST=1 ;; --candidate) CAND=1 ;; --skip-kernel) SKIP_K=1 ;; --skip-plugin) SKIP_P=1 ;;
+  -h|--help) sed -n 2,17p "$0"; exit 0 ;;
   *) EXTRA+=("$a") ;;
 esac; done
 mkdir -p "$OUT"; LOG=$OUT/build.txt; : > "$LOG"
 say() { echo "[$(date +%T)] $*" | tee -a "$LOG"; }
-for f in boot.img storage-candidate/kernel.macho storage-candidate/kernel.json metal-base.ngpu platform-seed fjdbg-agent; do
+NEED="storage-candidate/kernel.macho storage-candidate/kernel.json"; [ $CAND = 1 ] && NEED=
+for f in boot.img $NEED metal-base.ngpu platform-seed fjdbg-agent; do
   [ -e "$IN/$f" ] || { echo "missing input $IN/$f (see AGENTS.md, Inputs)"; exit 1; }
 done
 
@@ -69,6 +72,15 @@ export UNIXNU_IIG_OUTPUTS=$BOARD/.cache/iig-outputs-20H392 FAJITA_USBDBG_AGENT=$
 export PYTHONPATH=$STACK/scripts FAJITA_STORAGE_CANDIDATE=$IN/storage-candidate/kernel.macho FAJITA_VERIFIED_ROOT_CACHE=$BOARD/.cache/verified-root
 D16=$BOARD/ios16
 cd "$STACK"
+
+if [ $CAND = 1 ]; then
+  say "storage candidate (fajita_ios16_candidate_defconfig) ..."
+  export UNIXNU_OUT=$OUT/candidate; unset FAJITA_STORAGE_CANDIDATE
+  ./unixnu defconfig fajita_ios16_candidate_defconfig -D "$D16" > /dev/null || { say "CANDIDATE DEFCONFIG FAILED"; exit 1; }
+  ./unixnu build kernel -D "$D16" > "$OUT/candidate.log" 2>&1 || { say "CANDIDATE BUILD FAILED"; tail -8 "$OUT/candidate.log"; exit 1; }
+  mkdir -p "$IN/storage-candidate"; cp "$UNIXNU_OUT/fajita-ios16/kernel/kernel.macho" "$UNIXNU_OUT/fajita-ios16/kernel/kernel.json" "$IN/storage-candidate/"
+  say "storage candidate: $(sha256sum "$IN/storage-candidate/kernel.macho" | cut -c1-16)"; exit 0
+fi
 
 # 2. Kernel.
 if [ $SKIP_K = 0 ]; then

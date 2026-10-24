@@ -137,19 +137,14 @@ None touch NativeAdrenoABI.h.
 
 ## 4. Build, boot and drive
 
-Scripts in the session scratchpad
-(`/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad/`):
-- `build-kernel16-gpu.sh` — fetches + merges origin/ios16-port, then `./unixnu build kernel` into out-ios16-gpu with the
-  `fajita_ios16_gpu_defconfig` (adds libFajitaGpu.a to the force-load archives). Needs the xcrun shim on PATH for the
-  archive step; the top-level unixnu build adds it, but if running build-fajita-gpu.py by hand prefix
-  `PATH=/home/john/src/UniXNU-ios16-stack/scripts/unixnu/host:$PATH`.
-- `build-payload16-gpu.sh [kernel-args...]` — payload into payload16-gpu.img. Adds the sheng-autoreset + wdstop backstop.
+`scripts/fajita/build.sh` builds the GPU kernel (`fajita_ios16_gpu_defconfig`, which adds libFajitaGpu.a to the force-load
+archives), the plugin and the payload; `--test` adds the sheng-autoreset + wdstop backstop. See AGENTS.md.
 - `build-fajita-gpu.py` (in scripts/) — libFajitaGpu.a: the probe, A630 code, the NativeAdreno GMU/GPU/SMMU/ring objects,
   the ArmSmmu4K kit, and the three sha256-pinned firmware blobs (incbin from .cache/firmware). Skips sheng's A740 GMU
   sources (ADRENO_SKIP). The firmware is gitignored; ios16/.cache/firmware holds qcom/a630_gmu.bin, qcom/a630_sqe.fw,
   qcom/sdm845/oneplus6/a630_zap.mbn.
-- Run on the phone: `scratchpad/cycle.sh gpuN payload16-gpu.img boot-kc.img` (USB log streams by default; queues on
-  phone.lock). A ready-to-probe image that auto-publishes is `payload16-gpu-publish.img` (fajita-gpu=10, delay 8 s).
+- Run on the phone: `scripts/fajita/test/cycle.sh gpuN` (USB log streams by default; queues on phone.lock). For a probe image
+  that auto-publishes, build with `scripts/fajita/build.sh --test fajita-gpu=10`.
 
 Boot args: `fajita-gpu=<n>` runs stages 1..n at boot; `fajita-gpu-delay=<s>` the delay before the thread starts (default
 15); `fajita-gpu-level=<i>` the boot GX vote index; `fajita-gpu-zap=<0..4>` the zap depth (0 skip, 4 full + secure exit).

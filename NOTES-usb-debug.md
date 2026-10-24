@@ -104,12 +104,10 @@ Host side: `cdc_acm`/`cdc_ether` are in-box; a udev rule tags our VID/PID `uacce
 for the ttyACM (the pmOS gadget already gets this; a rule for `1209:0001` /
 `18d1:ecm` will be added under the user's udev dir if needed).
 
-## Build / run (own worktree, own out dir + lock; never touches the touch agent's tree)
+## Build / run
 
-- `scratchpad/build-kernel16-usb.sh` then `scratchpad/build-payload16-usb.sh
-  native-dwc3-probe=2` (the backstop args are added automatically).
-- `scratchpad/cycle.sh usb-probe scratchpad/payload16-usb.img scratchpad/boot-kc.img`
-  (queues behind the phone.lock). The `U` row comes back in `logs/usb-probe/`.
+- `scripts/fajita/build.sh --test native-dwc3-probe=2`, then `scripts/fajita/test/cycle.sh usb-probe` (queues behind
+  phone.lock). The `U` row comes back in `.cache/fajita-work/logs/usb-probe/`.
 
 ## Status (2026-10-23): working on hardware
 
@@ -154,13 +152,10 @@ Bugs found on hardware, each from a BootLog `V` row:
 
 ## How to use
 
-Build (own worktree, own out dir; the backstop args are added by the payload script):
+Build and run (the debug channel is part of every build):
 ```
-S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad
-cd /home/john/src/UniXNU-ios16-stack
-bash $S/build-kernel16-usb.sh          # sets FAJITA_USBDBG_AGENT (the CI agent) for the embed
-bash $S/build-payload16-usb.sh usb-debug=3 sheng-autoreset=300
-$S/cycle.sh NAME $S/payload16-usb.img $S/boot-kc.img
+scripts/fajita/build.sh --test
+scripts/fajita/test/cycle.sh NAME          # or session.sh start, for many commands in one boot
 ```
 `usb-debug=1` stops after the core reset, `=2` enumerates and runs the kernel channel,
 `=3` also installs and mounts the userland agent.

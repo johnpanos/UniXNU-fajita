@@ -11,7 +11,7 @@ scripts/fajita/build.sh          # kernel + GPU plugin + payload + boot image ->
 scripts/fajita/boot.sh           # phone in fastboot: flash system_a, arm slot b, fastboot boot
 ```
 
-`build.sh --test` makes a build that resets itself (for unattended runs); without it the phone stays up. Extra arguments are boot
+`build.sh --candidate` rebuilds the storage candidate input. `build.sh --test` makes a build that resets itself (for unattended runs); without it the phone stays up. Extra arguments are boot
 arguments (`scripts/fajita/build.sh fajita-brightness=1`). The UniXNU stack is a worktree of `~/src/UniXNU` at the commit in
 `ios16/gpu-plugin.ref` (default `~/src/UniXNU-fajita-stack`); `build.sh` creates it and moves it there. To change the stack, commit to
 the UniXNU fork (`johnpanos/UniXNU`, branch `fajita-a630-userland`), push, and bump `ios16/gpu-plugin.ref` in the same commit as any
@@ -38,9 +38,25 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `gpu-ab.sh ENV...` | A/B plugin settings in one session: frame rate, GPU busy, screenshot diff per variant |
 | `settings-scroll.sh NAME` | correctness pass: open Settings, scroll, screenshot each step |
 | `perf.py`, `passes.py`, `ts.py` | GPU counters, per-pass timing, timestamps |
+| `rows.py` | the Metal frontend's telemetry rows |
+| `to-fastboot.sh` | get the phone back to fastboot |
+| `bright-probe.py STAGE LEVEL` | DSI brightness probe |
 | `hc OP ...` | a raw hub call (`run`, `kcmd`, `screenshot`, `read32`, `reset`, ...) |
 
 ## Best practices
+
+**Tools live in git, and are reusable.**
+- Write every build, test, measurement or probe script as a committed tool: under `scripts/fajita/` (build and boot),
+  `scripts/fajita/test/` (on the phone), `tools/<area>/` (host-side analysis). Commit it with the change it supports.
+- A tool works for whoever runs it next. No hardcoded `/tmp/...`, home directories or session paths: find the repo from the
+  script's own location (`$(dirname "$0")`), and put state in `.cache/fajita-work/` (`FAJITA_WORK`) and outputs in
+  `.cache/fajita-out/` (`FAJITA_OUT`). Take parameters as arguments or environment variables, with a usage line at the top.
+- Extend the existing tool instead of copying it: one `build.sh` with a flag, not `build-kernel16-<agent>.sh` per agent.
+  No `plan17.sh`, `run5.sh` or `-old` copies; git history keeps the old versions.
+- No temp directories with one-off scripts or build trees. Scratch output goes in `.cache/` and is deleted when done.
+  A config, defconfig or patch a build depends on is committed. The storage candidate was once built from an uncommitted
+  `zz_` defconfig that was lost; `build.sh --candidate` now builds it from `fajita_ios16_candidate_defconfig`.
+- Write notes (`NOTES-*.md`) against the committed tools, never against paths in a scratch directory.
 
 **One tree.**
 - Work on `ios16-port`, or a short-lived branch of it.

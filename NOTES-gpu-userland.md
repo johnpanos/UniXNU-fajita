@@ -169,16 +169,11 @@ Local worktrees: /home/john/src/UniXNU-ios16-stack-gpuuser (UniXNU), /home/john/
 ## Reproduce (GPU-composited boot)
 
 ```sh
-S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad
-# kernel (gpu-userland worktree; merges origin/ios16-port first)
-bash $S/build-kernel16-gpuuser.sh
-# userland from CI: "GPU plugin (iOS 16)" (ios16/gpu-plugin.ref) and "GPU userland tools", then the add-on
-python3 scripts/make-fajita-gpu-addon.py $S/gpuuser/metal.ngpu --file sbin/ngpu-metal=gpu-tools/ngpu-metal:755 \
-  --tree addons/NativeAdrenoMetal.bundle=gpu-plugin/NativeAdrenoMetal.bundle --file addons/NativeAdrenoMetal.publish=publish:644 \
-  --file addons/NativeAdrenoMetal.clients=clients:644
-GPU_ADDON=$S/gpuuser/metal.ngpu bash $S/build-payload16-gpuuser.sh usb-debug=3 fajita-gpu=11 fajita-gpu-delay=8 [ngpu-trace=1]
-$S/session.sh start $S/payload16-gpuuser.img $S/boot-gpu.img     # boot-gpu.img: DarwinBoot d099354 + -v, delivers the add-on
+scripts/fajita/build.sh --test                 # kernel (fajita_ios16_gpu_defconfig), plugin, add-on, payload, boot image
+scripts/fajita/test/session.sh start           # boot it and keep it up; then session.sh run/push/pull/call
 ```
+Add `ngpu-trace=1` (or any boot argument) to the build.sh command line. The boot image (`.cache/fajita-inputs/boot.img`) is
+DarwinBoot d099354 + -v, which delivers the add-on.
 
 On a first boot without the framebuffer preferences in Data, the plugin writes them and restarts backboardd once (marker 68f5).
 
@@ -193,7 +188,7 @@ BootProgress are in the live log. iOS 16 has no ls/echo/sysctl/kill/launchctl.
 ## Frame rate (2026-10-23, sessions 225259..232852)
 
 Measured with on-demand swipes: `kcmd touch swipe up|down|left|right [FRAMES] | tap` (FajitaTouchProbe.cpp) and the host sampler
-scratchpad/gpuuser/swipe-rate.py (fires each swipe through the hub, samples `kcmd gpu raw`: presented frames = hand-off completions,
+scripts/fajita/test/swipe-rate.py (fires each swipe through the hub, samples `kcmd gpu raw`: presented frames = hand-off completions,
 per-submission ring with publish, completion latency and acquire). Correctness: lock screen after a backboardd restart and home screen
 after a left+right re-render, compared with the all-skips-off baseline (below the clock / status bar).
 
@@ -209,7 +204,7 @@ after a left+right re-render, compared with the all-skips-off baseline (below th
 Remaining per-frame cost: GPU execution (completion 70-90 ms per submission at 710 MHz, sysmem rendering forced by the plugin's
 TU_DEBUG=sysmem,nocb for a7xx BV/BR hangs; the A630 has no concurrent binning) and an 7-10 ms acquire per completed fence on the
 waiting thread. kcmd tools: `gpu raw|set|freq N|membw`, `bus [read|off|PEAK [AVG]]`, `touch ...`; frontend telemetry rows with
-scratchpad/gpuuser/rows.py (readv of native_adreno_metal_rows).
+scripts/fajita/test/rows.py (readv of native_adreno_metal_rows).
 
 ## Left
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ts.py [N]: per-submission timeline from the ring timestamps (kernel in $KM): submit (CPU, WPTR write), CP start, work drained (GPU,
+"""ts.py [N]: per-submission timeline from the ring timestamps (kernel: $KM, default the last build.sh kernel): submit (CPU, WPTR write), CP start, work drained (GPU,
 RB_DONE_TS), and the kernel's retire (submit ring [3]); plus acquire detail. Repeat N times (default 1) to sample several windows."""
 import os, struct, subprocess, sys, statistics as st
-K = os.environ['KM']
+K = os.environ.get('KM') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '.cache', 'fajita-out', 'unixnu', 'fajita-ios16', 'kernel', 'kernel.macho')
 HUB = ['python3', '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'fajita-usbdbg-hub.py'), 'call', '--timeout', '8']
 syms = {}
 for l in subprocess.run(['llvm-nm', K], capture_output=True, text=True).stdout.splitlines():
