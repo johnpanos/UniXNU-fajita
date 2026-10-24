@@ -26,6 +26,8 @@ vm_offset_t ml_io_map(vm_offset_t pa, vm_size_t size)
   if (p.empty()) p.assign(1024, 0);
   return reinterpret_cast<vm_offset_t>(p.data());
 }
+static int gResets;
+int boot_reset_bootloader(char *, unsigned) { gResets++; return 99; }
 int pmap_valid_address(uint64_t a) { return a >= 0x80000000ull && a < 0x80000000ull + gRam.size(); }
 unsigned int ml_phys_read_word(vm_offset_t a) { uint32_t v; memcpy(&v, &gRam[a - 0x80000000ull], 4); return v; }
 unsigned int ml_phys_read_byte(vm_offset_t a) { return gRam[a - 0x80000000ull]; }
@@ -119,6 +121,17 @@ int main()
   n = t.kcmd(nullptr, "nosuch", 6, out, sizeof out);
   out[n] = 0;
   assert(strstr(out, "unknown command 'nosuch'"));
+
+  // reset: refused without writes, accepted with them, carried out by the poll thread after the reply.
+  putLe16(req, kOpReset); putLe16(req + 2, 0); putLe32(req + 4, 0);
+  usbdbgk::fill(t, false);
+  handleCommand(t, req, 8, rsp);
+  assert(int32_t(getLe32(rsp + 4)) == kErrDenied && !gResets);
+  usbdbgk::fill(t, true);
+  handleCommand(t, req, 8, rsp);
+  assert(int32_t(getLe32(rsp + 4)) == kOk && !gResets);
+  for (int i = 0; i < 40; i++) usbdbgk::pollReset();
+  assert(gResets == 1);
 
   printf("KernelTarget: MMIO power guard, RAM bound, write gate and kcmd assertions passed\n");
   return 0;

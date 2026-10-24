@@ -227,6 +227,7 @@ static void dwc3GadgetThread(void *, wait_result_t)
       gGadget->pumpLog();
       gGadget->pumpShot();
       gGadget->kickTx();
+      usbdbgk::pollReset();
       if (!gDevCreated && &rootvnode && rootvnode) {
         gDevCreated = true;
         fjdbgCreateNode();

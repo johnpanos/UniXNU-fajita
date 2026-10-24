@@ -41,6 +41,13 @@ typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out,
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help);
 extern volatile uint32_t native_dwc3_gadget_on;   // NativeDwc3.cpp: the usb-debug value
 int pmap_valid_address(uint64_t addr);           // osfmk/arm/pmap/pmap.h (boolean_t)
+#if defined(__aarch64__)
+int boot_reset_bootloader(char *text, unsigned cap) __attribute__((weak_import));   // package/BootReset.c: PSCI SYSTEM_RESET
+#define USBDBGK_HAVE_RESET (&boot_reset_bootloader != nullptr)
+#else   // host tests define it
+int boot_reset_bootloader(char *text, unsigned cap);
+#define USBDBGK_HAVE_RESET true
+#endif
 volatile uint32_t native_dwc3_mmio_maps = 0, native_dwc3_kcmds = 0, native_dwc3_mmio_refused = 0;
 }
 
@@ -237,6 +244,26 @@ static size_t kcmd(void *, const char *cmd, size_t len, char *out, size_t cap)
   return k > 0 ? (size_t(k) < cap ? size_t(k) : cap) : 0;
 }
 
+// reset (op reset, a write: usb-debug>=2): answer first, reset from the poll thread a few polls later so the reply
+// reaches the host (session.sh end, hub `call reset`). Any mode resets to the bootloader (fastboot on fajita).
+static volatile uint32_t gResetCountdown;
+static int32_t reset(void *, uint32_t)
+{
+  if (!USBDBGK_HAVE_RESET) return usbdbg::kErrUnsupported;
+  gResetCountdown = 30;   // about 30 ms of 1 ms polls
+  return usbdbg::kOk;
+}
+static void pollReset()
+{
+  uint32_t left = gResetCountdown;
+  if (!left) return;
+  gResetCountdown = left - 1;
+  if (left == 1) {
+    char text[64];
+    boot_reset_bootloader(text, sizeof text);
+  }
+}
+
 static void fill(usbdbg::Target &t, bool writes)
 {
   t.features |= usbdbg::kFeatMemory | usbdbg::kFeatMmio | usbdbg::kFeatKcmd;
@@ -248,6 +275,7 @@ static void fill(usbdbg::Target &t, bool writes)
   t.readVirt = readVirt;
   t.writeVirt = writeVirt;
   t.kcmd = kcmd;
+  t.reset = reset;
 }
 
 }  // namespace usbdbgk

@@ -21,6 +21,7 @@ import socket
 import struct
 import sys
 import threading
+import zlib
 import time
 from pathlib import Path
 
@@ -67,7 +68,7 @@ class Hub:
     def on_shell(self, data):
         with self.shell_event:
             self.shell.extend(data)
-            del self.shell[:-262144]
+            del self.shell[:-(32 << 20)]   # room for a pull of up to ~16 MiB (hex on the wire)
             self.shell_event.notify_all()
 
     def connect_loop(self, exec_cmd=None):
@@ -169,86 +170,74 @@ class Hub:
             fj.write_png(path, w, h, bgr)
             self.note('screenshot %s %dx%d %.1f s' % (path, w, h, time.time() - t0))
             return {'ok': True, 'out': '%s: %dx%d, %.1f s\n' % (path, w, h, time.time() - t0)}
+        timeout = float(req.get('timeout') or 60)
         if op == 'run':
-            timeout = float(req.get('timeout', 60))
-            marker = ('fjdbg-hub-%d-%d' % (os.getpid(), int(time.time() * 1000))).encode()
-            with self.shell_event:
-                start = len(self.shell)
-            with self.lock:
-                if not self.link:
-                    raise RuntimeError('no gadget')
-                self.link.send_frame(fj.CH_SHELL, marker + b'\n' + ' '.join(a).encode() + b'\n')
+            body = self.shell_exchange([' '.join(a).encode()], timeout)
+            if body is None:
+                return {'ok': False, 'out': 'run: timeout\n'}
+            return {'ok': True, 'out': body.decode(errors='replace')}
+        if op == 'push':
+            # push LOCAL REMOTE [MODE]: the agent writes REMOTE.fjtmp, checks size and CRC32, chmods, renames
+            data = open(a[0], 'rb').read()
+            marker = self.shell_send([b'@put %s %s %d' % (a[1].encode(), (a[2] if len(a) > 2 else '755').encode(), len(data))])
             limit = time.time() + timeout
-            with self.shell_event:
-                while time.time() < limit:
-                    text = bytes(self.shell)
-                    at = text.find(marker)
-                    if at >= 0:
-                        m = re.search(rb'fjdbg: (?:exit (-?[0-9]+)|eof)\n', text[at:])
-                        if m:
-                            body = text[at:at + m.end()]
-                            first = body.find(b'\n')
-                            return {'ok': True, 'out': body[first + 1:].decode(errors='replace')}
-                    self.shell_event.wait(0.5)
-            return {'ok': False, 'out': 'run: timeout\n'}
+            for i in range(0, len(data), 512):
+                self.shell_send([b'@d ' + data[i:i + 512].hex().encode()], marker)
+                if (i // 512) % 4 == 3 and not self.shell_wait(marker, rb'fjdbg: k %d\n' % min(len(data), i + 512), limit):
+                    return {'ok': False, 'out': 'push: no ack at %d bytes\n' % (i + 512)}
+            self.shell_send([b'@end %08x' % zlib.crc32(data)], marker)
+            body = self.shell_collect(marker, limit)
+            if body is None:
+                return {'ok': False, 'out': 'push: timeout\n'}
+            return {'ok': b'fjdbg: put ok' in body, 'out': body.decode(errors='replace')}
+        if op == 'pull':
+            # pull REMOTE LOCAL
+            body = self.shell_exchange([b'@get ' + a[0].encode()], timeout)
+            if body is None:
+                return {'ok': False, 'out': 'pull: timeout\n'}
+            m = re.search(rb'fjdbg: get (\d+)\n', body)
+            c = re.search(rb'fjdbg: get crc ([0-9a-f]+)\n', body)
+            if not m or not c:
+                return {'ok': False, 'out': body.decode(errors='replace')}
+            data = bytes.fromhex(b''.join(re.findall(rb'@d ([0-9a-f]*)\n', body)).decode())
+            if len(data) != int(m.group(1)) or zlib.crc32(data) != int(c.group(1), 16):
+                return {'ok': False, 'out': 'pull: size/crc mismatch (%d bytes)\n' % len(data)}
+            open(a[1], 'wb').write(data)
+            return {'ok': True, 'out': 'pulled %s -> %s, %d bytes, crc %08x\n' % (a[0], a[1], len(data), zlib.crc32(data))}
         return {'ok': False, 'out': 'unknown op %s\n' % op}
 
+    def shell_send(self, lines, marker=None):
+        """Send lines to the agent; a new exchange starts with a unique marker line (returned) that output is found after."""
+        with self.lock:
+            if not self.link:
+                raise RuntimeError('no gadget')
+            if marker is None:
+                marker = ('fjdbg-hub-%d-%d' % (os.getpid(), int(time.time() * 1000))).encode()
+                self.link.send_frame(fj.CH_SHELL, marker + b'\n')
+            for line in lines:
+                self.link.send_frame(fj.CH_SHELL, line + b'\n')
+        return marker
 
-def serve(args):
-    hub = Hub(args.log)
-    threading.Thread(target=hub.connect_loop, args=(args.exec_cmd,), daemon=True).start()
-    try:
-        os.unlink(args.sock)
-    except FileNotFoundError:
-        pass
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(args.sock)
-    srv.listen(8)
-    signal.signal(signal.SIGTERM, lambda *_: (srv.close(), os._exit(0)))
-    hub.note('serving ' + args.sock)
+    def shell_wait(self, marker, pattern, limit):
+        """Wait until the agent's output after marker matches pattern; return the match or None at limit."""
+        with self.shell_event:
+            while time.time() < limit:
+                text = bytes(self.shell)
+                at = text.find(marker)
+                if at >= 0:
+                    m = re.search(pattern, text[at:])
+                    if m:
+                        return (text[at:], m)
+                self.shell_event.wait(0.2)
+        return None
 
-    def client(c):
-        try:
-            f = c.makefile('rwb')
-            req = json.loads(f.readline())
-            try:
-                rep = hub.handle(req)
-            except Exception as e:  # noqa: BLE001 - report every failure to the caller
-                rep = {'ok': False, 'out': 'error: %s\n' % e}
-            f.write((json.dumps(rep) + '\n').encode())
-            f.flush()
-        finally:
-            c.close()
+    def shell_collect(self, marker, limit):
+        """The agent's output after marker up to and including 'fjdbg: exit N' / 'fjdbg: eof', or None at limit."""
+        r = self.shell_wait(marker, rb'fjdbg: (?:exit (-?[0-9]+)|eof)\n', limit)
+        if r is None:
+            return None
+        body = r[0][:r[1].end()]
+        return body[body.find(b'\n') + 1:]
 
-    while True:
-        c, _ = srv.accept()
-        threading.Thread(target=client, args=(c,), daemon=True).start()
-
-
-def call(args):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(args.sock)
-    f = s.makefile('rwb')
-    req = {'op': args.op, 'args': args.rest}
-    if args.timeout:
-        req['timeout'] = args.timeout
-    f.write((json.dumps(req) + '\n').encode())
-    f.flush()
-    rep = json.loads(f.readline())
-    sys.stdout.write(rep['out'])
-    return 0 if rep['ok'] else 1
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--sock', default=DEFAULT_SOCK)
-    sub = ap.add_subparsers(dest='cmd', required=True)
-    p = sub.add_parser('serve'); p.add_argument('--log', required=True)
-    p.add_argument('--exec', dest='exec_cmd', help='tests: talk to a program (the simulator) instead of the tty')
-    p = sub.add_parser('call'); p.add_argument('--timeout', type=float); p.add_argument('op'); p.add_argument('rest', nargs=argparse.REMAINDER)
-    a = ap.parse_args()
-    return serve(a) if a.cmd == 'serve' else call(a)
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+    def shell_exchange(self, lines, timeout):
+        return self.shell_collect(self.shell_send(lines), time.time() + timeout)
