@@ -377,8 +377,13 @@ bool cpRun(const uint32_t *words, size_t count, const char *what, uint32_t timeo
 extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8], native_adreno_pool_status;
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_maint_stats[4] __attribute__((weak));
+extern "C" volatile uint64_t native_adreno_submit_ring[64][5] __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_readonly_imports __attribute__((weak));
+extern "C" volatile int native_adreno_trace __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_skip_written_publish __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_uncached_acquire_skip __attribute__((weak));
+extern "C" volatile uint64_t native_adreno_acquire_stats[2] __attribute__((weak));
 extern "C" bool (*native_adreno_page_uncached)(uint64_t physical) __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_uncached_skipped __attribute__((weak));
 extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
@@ -613,11 +618,13 @@ static const NativeAdrenoAbiDeviceInfo gDeviceInfo = {
 bool stage10()
 {
     if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
-    // fajita-gpu-import-skip (default 1): no per-submission cache maintenance of the imports the GPU writes (see NativeAdrenoVm.cpp).
-    if (&native_adreno_skip_written_imports) native_adreno_skip_written_imports = bootArg("fajita-gpu-import-skip", 1);
-    // fajita-gpu-ro-skip (default 0): no per-submission maintenance of read-only imports either; the native Metal frontend cleans the
+    // fajita-gpu-import-skip (default 0; session-225259: 1 corrupted the lock-screen wallpaper): no publish or acquire of GPU-written imports.
+    if (&native_adreno_skip_written_imports) native_adreno_skip_written_imports = bootArg("fajita-gpu-import-skip", 0);
+    // fajita-gpu-ro-skip (default 1 since session-232253, screens identical to all-off): no per-submission maintenance of read-only imports either; the native Metal frontend cleans the
     // imports whose surfaces changed at commit (NativeBridgeMetalFrontend.mm flushImports). Only with a plugin that does.
-    if (&native_adreno_skip_readonly_imports) native_adreno_skip_readonly_imports = bootArg("fajita-gpu-ro-skip", 0);
+    if (&native_adreno_skip_readonly_imports) native_adreno_skip_readonly_imports = bootArg("fajita-gpu-ro-skip", 1);
+    // fajita-gpu-wpub-skip (default 1, session-232253: publish 22 -> 0.2 ms, screens identical): no publish of GPU-written imports either (the frontend cleans changed imports); acquire stays.
+    if (&native_adreno_skip_written_publish) native_adreno_skip_written_publish = bootArg("fajita-gpu-wpub-skip", 1);
     // fajita-gpu-uncached-skip (default 1): publishing an import skips its pages that no CPU mapping caches (NativeAdrenoMemory.cpp).
     if (&native_adreno_page_uncached) native_adreno_page_uncached = bootArg("fajita-gpu-uncached-skip", 1) ? pageUncached : nullptr;
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
@@ -733,6 +740,8 @@ size_t appendf(char *out, size_t cap, size_t at, const char *fmt, ...)
     return at + ((size_t)n < cap - at ? (size_t)n : cap - at - 1);
 }
 
+
+
 size_t kcmd(const char *args, size_t len, char *out, size_t cap)
 {
     char a[32] = {};
@@ -744,6 +753,84 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         const uint32_t from = n > cap - 1 ? n - uint32_t(cap - 1) : 0;
         memcpy(out, fajita_gpu_text + from, n - from);
         return n - from;
+    }
+    if (!strncmp(a, "freq ", 5)) {   // DCVS: the GPU perf index (0..gpu_count-1) through the GMU's legacy DCVS OOB, as Linux's set_freq
+        unsigned idx = 0;
+        for (const char *p = a + 5; *p >= '0' && *p <= '9'; ++p) idx = idx * 10 + unsigned(*p - '0');
+        if (fajita_gpu_stage < 6 || idx >= gPerf.gpu_count) return appendf(out, cap, 0, "no (stage %u, levels %u)\n", (unsigned)fajita_gpu_stage, gPerf.gpu_count);
+        uint32_t ret = 0;
+        const A630Status st = A630SetFreq(&gIo, idx, &ret);
+        return appendf(out, cap, 0, "freq index %u (%u kHz): %s ret %x\n", idx, gPerf.gpu_khz[idx], statusName(st), ret);
+    }
+    if (!strncmp(a, "membw", 5)) {   // CPU copy throughput (a DDR clock proxy): 4 x 16 MiB memcpy and a 16 MiB read sweep
+        const size_t n = 16u << 20;
+        void *x = IOMallocData(n), *y = IOMallocData(n);
+        if (!x || !y) {if (x) IOFreeData(x, n); if (y) IOFreeData(y, n); return appendf(out, cap, 0, "no memory\n");}
+        memset(x, 1, n); memset(y, 2, n);
+        const uint64_t t0 = nowUs();
+        for (int i = 0; i < 4; ++i) memcpy(i & 1 ? x : y, i & 1 ? y : x, n);
+        const uint64_t t1 = nowUs();
+        uint64_t sum = 0;
+        for (size_t i = 0; i < n / 8; i += 8) sum += static_cast<volatile uint64_t *>(x)[i];
+        const uint64_t t2 = nowUs();
+        IOFreeData(x, n); IOFreeData(y, n);
+        return appendf(out, cap, 0, "memcpy 64 MiB in %llu us = %llu MB/s; read 16 MiB in %llu us = %llu MB/s (%llx)\n",
+                       (unsigned long long)(t1 - t0), (unsigned long long)(64ull * 1048576 / (t1 - t0 ? t1 - t0 : 1)),
+                       (unsigned long long)(t2 - t1), (unsigned long long)(16ull * 1048576 / (t2 - t1 ? t2 - t1 : 1)), (unsigned long long)(sum & 0xf));
+    }
+    if (!strncmp(a, "set", 3)) {
+        // A/B in one boot: "set import-skip|ro-skip|uncached-skip 0|1" changes the publish policy of the next submissions.
+        const char *v = a + 3;
+        while (*v == ' ') ++v;
+        const char *name = v;
+        while (*v && *v != ' ') ++v;
+        const size_t nl = size_t(v - name);
+        while (*v == ' ') ++v;
+        const unsigned on = *v == '1';
+        if (nl == 11 && !strncmp(name, "import-skip", nl) && &native_adreno_skip_written_imports) native_adreno_skip_written_imports = on;
+        else if (nl == 7 && !strncmp(name, "ro-skip", nl) && &native_adreno_skip_readonly_imports) native_adreno_skip_readonly_imports = on;
+        else if (nl == 13 && !strncmp(name, "uncached-skip", nl) && &native_adreno_page_uncached) native_adreno_page_uncached = on ? pageUncached : nullptr;
+        else if (nl == 9 && !strncmp(name, "uacq-skip", nl) && &native_adreno_uncached_acquire_skip) native_adreno_uncached_acquire_skip = on;
+        else if (nl == 9 && !strncmp(name, "wpub-skip", nl) && &native_adreno_skip_written_publish) native_adreno_skip_written_publish = on;
+        else if (nl == 5 && !strncmp(name, "trace", nl) && &native_adreno_trace) native_adreno_trace = int(*v - '0');
+        else if (nl) return appendf(out, cap, 0, "usage: gpu set import-skip|ro-skip|wpub-skip|uacq-skip|uncached-skip|trace 0|1\n");
+        return appendf(out, cap, 0, "trace %d uacq-skip %u wpub-skip %u import-skip %u ro-skip %u uncached-skip %u\n", &native_adreno_trace ? (int)native_adreno_trace : 9,
+                       &native_adreno_uncached_acquire_skip ? (unsigned)native_adreno_uncached_acquire_skip : 9u,
+                       &native_adreno_skip_written_publish ? (unsigned)native_adreno_skip_written_publish : 9u,
+                       &native_adreno_skip_written_imports ? (unsigned)native_adreno_skip_written_imports : 9u,
+                       &native_adreno_skip_readonly_imports ? (unsigned)native_adreno_skip_readonly_imports : 9u,
+                       &native_adreno_page_uncached ? (unsigned)(native_adreno_page_uncached != nullptr) : 9u);
+    }
+    if (!strncmp(a, "raw", 3)) {
+        // For the host sampler: "raw [FROM]" = now and the cumulative counters in us (one line), then each submission after FROM
+        // still in the 64-entry ring as "n start total publish done acquire" (us; done = submit end to the release that saw it complete). Counters: n retire wc publish tlb ring total max | imported owned
+        // (bytes) | uncached-skipped bytes | handoff offers done | display copies.
+        mach_timebase_info_data_t tb; clock_timebase_info(&tb);
+        auto us = [&](uint64_t ticks) {return (unsigned long long)(ticks * tb.numer / tb.denom / 1000);};
+        unsigned long long from = 0;
+        for (const char *p = a + 3; *p; ++p) if (*p >= '0' && *p <= '9') from = from * 10 + unsigned(*p - '0');
+        const uint64_t n = &native_adreno_submit_time ? native_adreno_submit_time[0] : 0;
+        w = appendf(out, cap, w, "now %llu n %llu", us(mach_absolute_time()), (unsigned long long)n);
+        for (unsigned i = 1; i < 8 && &native_adreno_submit_time; ++i) w = appendf(out, cap, w, " %llu", us(native_adreno_submit_time[i]));
+        w = appendf(out, cap, w, " | %llu %llu | %llu | %llu %llu | %llu | %llu %llu\n",
+                    (unsigned long long)(&native_adreno_maint_stats ? native_adreno_maint_stats[0] : 0),
+                    (unsigned long long)(&native_adreno_maint_stats ? native_adreno_maint_stats[1] : 0),
+                    (unsigned long long)(&native_adreno_uncached_skipped ? native_adreno_uncached_skipped : 0),
+                    (unsigned long long)(&native_gop_gpu_offers ? native_gop_gpu_offers : 0),
+                    (unsigned long long)(&native_gop_gpu_completions ? native_gop_gpu_completions : 0),
+                    (unsigned long long)(&native_legacy_copy_n ? native_legacy_copy_n : 0),
+                    (unsigned long long)(&native_adreno_acquire_stats ? native_adreno_acquire_stats[0] : 0),
+                    (unsigned long long)(&native_adreno_acquire_stats ? native_adreno_acquire_stats[1] : 0));
+        if (&native_adreno_submit_ring) {
+            uint64_t k = n > 64 ? n - 64 : 0;
+            if (from > k) k = from;
+            for (; k < n && w + 64 < cap; ++k) {
+                const volatile uint64_t *e = native_adreno_submit_ring[k & 63];
+                w = appendf(out, cap, w, "%llu %llu %llu %llu %llu %llu\n", (unsigned long long)(k + 1), us(e[0]), us(e[1]), us(e[2]), us(e[3]),
+                            us(e[4]));
+            }
+        }
+        return w;
     }
     if (!strncmp(a, "retry", 5)) {   // run the failed stage again (every stage starts from its own register state)
         if (fajita_gpu_running) return appendf(out, cap, 0, "busy\n");
