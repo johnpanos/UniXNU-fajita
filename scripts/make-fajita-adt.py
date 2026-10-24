@@ -261,7 +261,7 @@ def main():
         # board DT's own strings.
         *( [node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                              # No 'menu' entry: fajita has no Home button. 2 = the non-mechanical answer BSPlatform passes through.
-                             ('button-names', b'hold\0voldown\0volup\0'),
+                             ('button-names', b'hold\0voldown\0volup\0' + (b'ringerab\0' if os.environ.get('FAJITA_RINGER') == '1' else b'')),
                              ('home-button-type', struct.pack('<I', 2))])] if identity else [] ),
         node('product', [('product-name', identity['product-name'] if identity else b'OnePlus 6T\0'),
                          ('model', b'oneplus,fajita\0'),

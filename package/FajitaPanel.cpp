@@ -20,6 +20,10 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSIterator.h>
+#include <IOKit/IORegistryEntry.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
@@ -35,8 +39,13 @@ enum : uint32_t {
     kDsiBase = 0xae94000, kDsiSize = 0x400,
     // The tail of the 36 MiB splash carve-out at 0x9d400000 (the 1080x2340 scanout uses the first ~10 MiB).
     kBufPhys = 0x9d400000 + 0x1800000, kBufSize = 0x1000,
-    kCtrl = 0x000, kStatus0 = 0x004, kCmdDmaCtrl = 0x038, kDmaBase = 0x044, kDmaLen = 0x048, kAckErr = 0x064, kRdbk0 = 0x068,
-    kTrigCtrl = 0x080, kTrigDma = 0x08c, kIntrCtrl = 0x10c, kClkCtrl = 0x118,
+    // This SDM845 DSI (6G, the bootloader's live registers) has one more register before CMD_DMA_CTRL than dsi.xml: everything from
+    // 0x38 up sits 4 higher than Linux's offsets (live: CMD_DMA_CTRL 0x3c = 0x14000000, CMD_CFG0 0x40, CMD_CFG1 0x44 = 0x00013c2c
+    // (WR_MEM_START 0x2c, CONTINUE 0x3c, INSERT_DCS bit 16), DMA_BASE 0x48 = a physical address, DMA_LEN 0x4c = 8, CMD_MDP_STREAM0_CTRL
+    // 0x58 = 0x0ca90039 (DT 0x39, WC 3241), TRIG_CTRL 0x84 = 4 (SW trigger), TRIG_DMA 0x90, INTR_CTRL 0x110 = 0x500).
+    // The first version of this file used Linux's offsets and overwrote CMD_CFG1 and DMA_BASE (restored by hand from the session).
+    kCtrl = 0x000, kStatus0 = 0x004, kCmdDmaCtrl = 0x03c, kCmdCfg0 = 0x040, kCmdCfg1 = 0x044, kDmaBase = 0x048, kDmaLen = 0x04c,
+    kAckErr = 0x068, kRdbk0 = 0x06c, kTrigCtrl = 0x084, kTrigDma = 0x090, kErrIntMask = 0x10c, kIntrCtrl = 0x110, kClkCtrl = 0x120,
     kCtrlEnable = 1u << 0, kCtrlCmdMode = 1u << 2,
     kDmaLowPower = 1u << 26,
     kIntrDmaDone = 1u << 0, kIntrDmaMask = 1u << 1,
@@ -46,6 +55,8 @@ OSSharedPtr<IOMemoryMap> gDsi, gBuf;
 IOLock *gLock;
 bool gEnabled;
 unsigned gMode;
+uint32_t gLastClear, gLastBase, gLastLen;
+uint32_t gPre, gPost, gBaseRb, gLenRb, gStatusRb, gWaitUs;
 
 struct Out {
     char *p; size_t cap, n;
@@ -79,6 +90,8 @@ bool map(Out &o) {
 // The packet is in the MSM memory format: { wc lo (or data0), wc hi (or data1), data type, flags } + payload, padded to 4 with 0xff.
 // Returns 0 when the controller reported CMD_DMA_DONE, else a negative error. *intrOut = INTR_CTRL at the end.
 int dmaSend(const uint8_t *pkt, uint32_t len, bool lp, uint32_t *intrOut) {
+    // Layout guard: refuse to write unless the registers look as on the 6T (CMD_CFG1 INSERT_DCS set, CMD_DMA_CTRL FROM_FRAME_BUFFER set).
+    if (!(dsi(kCmdCfg1) & (1u << 16)) || !(dsi(kCmdDmaCtrl) & (1u << 28))) return -19;
     const uint32_t ctrl = dsi(kCtrl), dma = dsi(kCmdDmaCtrl), intr0 = dsi(kIntrCtrl);
     uint32_t padded = (len + 3) & ~3u;
     if (padded > kBufSize) return -22;
@@ -87,6 +100,8 @@ int dmaSend(const uint8_t *pkt, uint32_t len, bool lp, uint32_t *intrOut) {
     dsi(kCtrl) = ctrl | kCtrlEnable | kCtrlCmdMode;
     dsi(kCmdDmaCtrl) = lp ? (dma | kDmaLowPower) : (dma & ~kDmaLowPower);
     dsi(kIntrCtrl) = (intr0 & ~kIntrDmaDone) | kIntrDmaDone | kIntrDmaMask;   // write-1-to-clear the status, unmask the done interrupt
+    const uint32_t cleared = dsi(kIntrCtrl);
+    gPre = dsi(kIntrCtrl);                   // done should read 0 here (cleared); 1 means the status is sticky or the write did not clear it
     dsi(kDmaBase) = kBufPhys;
     dsi(kDmaLen) = padded;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -94,16 +109,21 @@ int dmaSend(const uint8_t *pkt, uint32_t len, bool lp, uint32_t *intrOut) {
     __asm__ volatile("dsb sy" ::: "memory");
     uint32_t v = 0;
     int ret = -110;
+    gWaitUs = 0;
     for (unsigned i = 0; i < 20000; ++i) {   // 200 ms like dsi_cmd_dma_tx
         v = dsi(kIntrCtrl);
         if (v & kIntrDmaDone) {ret = 0; break;}
         IODelay(10);
+        gWaitUs += 10;
     }
+    gPost = v; gBaseRb = dsi(kDmaBase); gLenRb = dsi(kDmaLen); gStatusRb = dsi(kStatus0);
     dsi(kIntrCtrl) = kIntrDmaDone;           // clear done, mask off
     dsi(kIntrCtrl) = intr0 & ~(kIntrDmaDone | kIntrDmaMask);
     dsi(kCmdDmaCtrl) = dma;
     dsi(kCtrl) = ctrl;
     if (intrOut) *intrOut = v;
+    fajita_panel_state[4] = v;
+    gLastClear = cleared; gLastBase = dsi(kDmaBase); gLastLen = dsi(kDmaLen);
     return ret;
 }
 
@@ -122,10 +142,12 @@ int readBrightness(unsigned *level, uint32_t *intr) {
     r = dmaSend(rd, sizeof rd, false, intr);
     if (r) return r;
     uint32_t raw = dsi(kRdbk0);
-    uint32_t be = __builtin_bswap32(raw);    // ntohl: byte 0 is the first byte of the response packet
-    uint8_t type = uint8_t(be >> 24), d0 = uint8_t(be >> 16), d1 = uint8_t(be >> 8);
+    // dsi_cmd_dma_rx: ntohl(RDBK_DATA(0)), then the bytes in memory order are { data type, data0, data1, ecc }; measured on the 6T after
+    // DBV 60: RDBK 0x22003c22 -> type 0x22 (2-byte short response), data 0x00 0x3c.
+    uint32_t be = __builtin_bswap32(raw);
+    uint8_t type = uint8_t(be), d0 = uint8_t(be >> 8), d1 = uint8_t(be >> 16);
     fajita_panel_state[5] = raw;
-    if (type == 0x22) {*level = unsigned(d0) << 8 | d1; return 0;}   // short response, 2 bytes (DT 0x22); 1 byte is 0x21
+    if (type == 0x22) {*level = unsigned(d0) << 8 | d1; return 0;}   // short response, 2 bytes; 1 byte is 0x21
     if (type == 0x21) {*level = d0; return 0;}
     return -5;
 }
@@ -141,8 +163,8 @@ int setBrightness(unsigned level, char *msg, size_t cap) {
         if (!map(o)) {r = -12; break;}
         r = writeBrightness(level, &intr);
         fajita_panel_state[4] = intr;
-        o.add("dbv %u: %s INTR %08x ACK_ERR %08x STATUS0 %08x", level, r ? "NO DMA DONE" : "dma done", intr, (unsigned)dsi(kAckErr),
-              (unsigned)dsi(kStatus0));
+        o.add("dbv %u: %s INTR pre %08x post %08x wait %uus ACK_ERR %08x STATUS0 %08x DMA_BASE %08x LEN %08x", level, r ? "NO DMA DONE" : "dma done", gPre, intr, gWaitUs,
+              (unsigned)dsi(kAckErr), gStatusRb, gBaseRb, gLenRb);
     } while (0);
     fajita_panel_state[3] = uint32_t(r);
     if (!r) {fajita_panel_state[1] = fajita_panel_state[1] + 1; fajita_panel_state[2] = level;}
@@ -152,7 +174,7 @@ int setBrightness(unsigned level, char *msg, size_t cap) {
 
 void dumpRegs(Out &o) {
     static const struct {const char *n; uint32_t off;} regs[] = {{"CTRL", kCtrl}, {"STATUS0", kStatus0}, {"CMD_DMA_CTRL", kCmdDmaCtrl},
-        {"CMD_CFG0", 0x3c}, {"CMD_CFG1", 0x40}, {"TRIG_CTRL", kTrigCtrl}, {"EOT", 0xc8}, {"LANE_STATUS", 0xa4}, {"INTR", kIntrCtrl},
+        {"CMD_CFG0", kCmdCfg0}, {"CMD_CFG1", kCmdCfg1}, {"DMA_BASE", kDmaBase}, {"DMA_LEN", kDmaLen}, {"TRIG_CTRL", kTrigCtrl}, {"EOT", 0xcc}, {"LANE_STATUS", 0xa8}, {"INTR", kIntrCtrl},
         {"CLK_CTRL", kClkCtrl}, {"ACK_ERR", kAckErr}};
     for (const auto &r : regs) o.add("%s=%08x ", r.n, (unsigned)dsi(r.off));
 }
@@ -193,6 +215,64 @@ size_t kcmdBrightness(const char *args, size_t len, char *out, size_t cap) {
 
 // iOS side. AppleARMBacklight passes the new level through callPlatformFunction("bklU"): the arguments are logged until the
 // calling convention is confirmed on the phone (fajita_panel_state[6] counts calls, [7] the last value).
+
+// Fallback and main path for iOS: AppleARMBacklight (matched on the /backlight ADT node) keeps the level in its IODisplayParameters
+// property: rawBrightness {min 0, max 2047, value} is the DAC/DBV level it would hand to function-backlight_update. The service never
+// registers itself while its update function cannot be resolved (no registerService in start, ioreg shows !registered), so CoreBrightness
+// cannot find it; register it here once, then follow rawBrightness and send it to the panel.
+IOService *findBacklight() {
+    IORegistryEntry *nub = IORegistryEntry::fromPath("/backlight", gIODTPlane);
+    if (!nub) return nullptr;
+    IOService *found = nullptr;
+    if (OSIterator *it = nub->getChildIterator(gIOServicePlane)) {
+        while (OSObject *o = it->getNextObject()) {
+            IOService *svc = OSDynamicCast(IOService, o);
+            if (svc && svc->metaCast("AppleARMBacklight")) {found = svc; break;}
+        }
+        it->release();
+    }
+    nub->release();
+    return found;
+}
+
+int rawLevel(IOService *svc) {
+    int v = -1;
+    OSObject *p = svc->copyProperty("IODisplayParameters");
+    if (OSDictionary *d = OSDynamicCast(OSDictionary, p)) {
+        if (OSDictionary *raw = OSDynamicCast(OSDictionary, d->getObject("rawBrightness")))
+            if (OSNumber *n = OSDynamicCast(OSNumber, raw->getObject("value"))) v = int(n->unsigned32BitValue());
+    }
+    if (p) p->release();
+    return v;
+}
+
+void watchBacklight() {
+    static IOService *svc;
+    static bool registered;
+    static int last = -2;
+    static unsigned tries;
+    if (!svc) {
+        svc = findBacklight();
+        if (!svc) {if (++tries == 30) IOLog("fajita-panel: AppleARMBacklight not found\n"); return;}
+        svc->retain();
+        IOLog("fajita-panel: found AppleARMBacklight %p (iOS-driven brightness follows rawBrightness)\n", svc);
+    }
+    if (!registered && (gMode & 4) == 0) {
+        registered = true;
+        svc->registerService();
+        IOLog("fajita-panel: AppleARMBacklight registered\n");
+    }
+    int raw = rawLevel(svc);
+    if (raw < 0 || raw == last) return;
+    if (last == -2 && raw == 0) return;   // the service starts at 0 before CoreBrightness sets anything: never blank the panel from that
+    last = raw;
+    unsigned dbv = unsigned(unsigned(raw) * kMaxLevel / 2047u);
+    if (raw && dbv < 8) dbv = 8;
+    char msg[160];
+    int r = setBrightness(dbv, msg, sizeof msg);
+    fajita_panel_state[7] = uint32_t(raw);
+    IOLog("fajita-panel: iOS rawBrightness %d -> %s -> %d\n", raw, msg, r);
+}
 }  // namespace
 
 extern "C" int fajita_panel_set_brightness(unsigned dbv) {
@@ -230,7 +310,8 @@ OSDefineMetaClassAndStructors(FajitaLcd, IOService)
 // Called once a second by the boot progress monitor (FajitaCpuFreq.cpp's sheng_cpufreq_poll); the first call after IOKit is up does the work.
 extern "C" void fajita_panel_poll(void) {
     static bool done;
-    if (done || !IOService::getPlatform()) return;
+    if (done) {if (gEnabled && gLock) watchBacklight(); return;}
+    if (!IOService::getPlatform()) return;
     done = true;
     unsigned mode = 0;
     PE_parse_boot_argn("fajita-brightness", &mode, sizeof mode);
@@ -254,7 +335,13 @@ extern "C" void fajita_panel_poll(void) {
     const uint32_t phandle = 0x80;
     OSData *ph = OSData::withBytes(&phandle, sizeof phandle);
     OSData *nm = OSData::withBytes("lcd", 4);
-    if (props && ph && nm) {props->setObject("AAPL,phandle", ph); props->setObject("name", nm); props->setObject("device_type", nm);}
+    if (props && ph && nm) {
+        props->setObject("AAPL,phandle", ph); props->setObject("name", nm); props->setObject("device_type", nm);
+        // AppleARMBacklight (start -> armFunctionCallback) waits for a service with the property "IOFunctionParent<phandle %08lX>"
+        // (addMatchingNotification on that property) before it resolves function-backlight_update/enable.
+        OSData *empty = OSData::withCapacity(0);   // the match value AppleARMBacklight builds is an empty OSData (OSData::withBytes(NULL, 0))
+        if (empty) {props->setObject("IOFunctionParent00000080", empty); empty->release();}
+    }
     const bool ok = lcd && props && lcd->init(props) && lcd->attach(platform) && lcd->start(platform);
     if (ph) ph->release();
     if (nm) nm->release();
