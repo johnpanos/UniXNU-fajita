@@ -520,11 +520,18 @@ bool stage8()
 
 // ---- interrupt --------------------------------------------------------------------------------------------------------
 volatile uint32_t gIrqCount, gIrqSeen, gIrqEmpty;
+volatile uint32_t gIrqError, gIrqHwFault, gIrqRptr;
 void gpuIrq(void *)
 {
     const uint32_t status = gpuRd(A630_RBBM_INT_0_STATUS);
     if (status) gpuWr(A630_RBBM_INT_CLEAR_CMD, status);
     gIrqSeen = gIrqSeen | status;
+    // Anything but CP_CACHE_FLUSH_TS (bit 20) is an error source: keep the first one with the CP's fault registers (kcmd gpu).
+    if ((status & ~0x100000u) && !gIrqError) {
+        gIrqError = status;
+        gIrqHwFault = gpuRd(A630_CP_HW_FAULT);
+        gIrqRptr = gpuRd(A630_CP_RB_RPTR);
+    }
     gIrqCount = gIrqCount + 1;
     gIrqEmpty = status ? 0 : gIrqEmpty + 1;
     if (gIrqEmpty > 100000) gpuWr(A630_RBBM_INT_0_MASK, 0);   // a storm: mask the GPU instead of hanging the CPU
@@ -742,6 +749,7 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
     }
     w = appendf(out, cap, w, "stage %u running %u failed %d status %x iofaults %u\n", (unsigned)fajita_gpu_stage,
                 (unsigned)fajita_gpu_running, (int)fajita_gpu_failed, (unsigned)fajita_gpu_status, (unsigned)gIoFaults);
+    w = appendf(out, cap, w, "irq count %u seen %x first-error %x hwfault %x rptr %x\n", gIrqCount, gIrqSeen, gIrqError, gIrqHwFault, gIrqRptr);
     w = appendf(out, cap, w, "usage: gpu [N | log | regs | retry]  (stages 1..%u)\n", kLastStage);
     return w;
 }
