@@ -650,7 +650,7 @@ size_t kcmdTouch(const char *args, size_t len, char *out, size_t cap) {
     Out o(out, cap);
     const char *dir = nullptr;
     if (!strncmp(a, "swipe ", 6)) dir = a + 6;
-    else if (!strncmp(a, "tap", 3)) dir = "tap";
+    else if (!strncmp(a, "tap", 3)) dir = a;
     if (dir) {
         Gesture g;
         if (!strncmp(dir, "up", 2)) g = {540, 2335, 540, 1100, 24};           // from the bottom edge: the home-bar gesture
@@ -658,11 +658,23 @@ size_t kcmdTouch(const char *args, size_t len, char *out, size_t cap) {
         else if (!strncmp(dir, "left", 4)) g = {900, 1170, 180, 1170, 24};    // the next home screen page
         else if (!strncmp(dir, "right", 5)) g = {180, 1170, 900, 1170, 24};   // the previous page
         else if (!strncmp(dir, "tap", 3)) g = {540, 1170, 540, 1170, 3};
-        else {o.add("usage: touch swipe up|down|left|right [FRAMES] | tap\n"); return o.n;}
+        else if (!strncmp(dir, "xy", 2)) g = {0, 0, 0, 0, 24};   // swipe xy X0 Y0 X1 Y1 [FRAMES] (panel pixels)
+        else {o.add("usage: touch swipe up|down|left|right [FRAMES] | swipe xy X0 Y0 X1 Y1 [FRAMES] | tap [X Y]\n"); return o.n;}
         const char *p = dir;
         while (*p && *p != ' ') ++p;
-        unsigned frames = 0;
-        for (; *p; ++p) if (*p >= '0' && *p <= '9') frames = frames * 10 + unsigned(*p - '0');
+        unsigned v[5] = {}, nv = 0;
+        while (*p && nv < 5) {
+            while (*p == ' ') ++p;
+            if (*p < '0' || *p > '9') break;
+            while (*p >= '0' && *p <= '9') v[nv] = v[nv] * 10 + unsigned(*p++ - '0');
+            ++nv;
+        }
+        const bool xy = !strncmp(dir, "xy", 2), tapAt = !strncmp(dir, "tap", 3) && nv >= 2;
+        if (xy && nv < 4) {o.add("touch swipe xy X0 Y0 X1 Y1 [FRAMES]\n"); return o.n;}
+        if (xy) {g.x0 = v[0]; g.y0 = v[1]; g.x1 = v[2]; g.y1 = v[3];}
+        if (tapAt) {g.x0 = g.x1 = v[0]; g.y0 = g.y1 = v[1];}
+        if (g.x0 >= FTB_PANEL_W || g.x1 >= FTB_PANEL_W || g.y0 >= FTB_PANEL_H || g.y1 >= FTB_PANEL_H) {o.add("outside the panel\n"); return o.n;}
+        const unsigned frames = xy ? (nv >= 5 ? v[4] : 0) : tapAt ? 0 : (nv >= 1 ? v[0] : 0);
         if (frames >= 2 && frames <= 500) g.frames = frames;
         if (gDemand.req != gDemand.done) {o.add("busy: gesture %u not done (done %u)\n", gDemand.req, gDemand.done); return o.n;}
         gDemand.g = g;
