@@ -62,6 +62,10 @@ volatile int native_touch_last_x = -1, native_touch_last_y = -1;
 // (the axis maxima NativeHidInput normalises with), ids = F12 object slot.
 volatile uint32_t native_touch_seq;
 volatile uint32_t native_touch_count;
+// fajita-touch-ts=1: the time the frame was sampled (mach_absolute_time ticks; the IRQ's time in interrupt mode, else the poll's, taken
+// before the bus read), inside the seqlock, for NativeHidInput's handleReportWithTime. native_touch_ts_mode is the arg.
+volatile uint64_t native_touch_ts;
+volatile uint32_t native_touch_ts_mode;
 volatile int native_touch_xs[TOUCH_SLOTS], native_touch_ys[TOUCH_SLOTS], native_touch_ids[TOUCH_SLOTS];
 // Finished strokes {start ms, duration ms, first x, first y, last x, last y, frames} and the extent of every published contact
 // {min x, max x, min y, max y}, in the published units (BootLog.c prints them divided by 10).
@@ -83,6 +87,7 @@ extern volatile uint32_t native_touch_edge_stats[4] __attribute__((weak_import))
 extern volatile uint32_t native_hid_touch_service[8] __attribute__((weak_import));
 }
 
+extern "C" volatile uint32_t native_hid_lat[6] __attribute__((weak_import));
 namespace {
 struct Region {OSSharedPtr<IOMemoryMap> keep; uintptr_t va = 0;};
 
@@ -118,7 +123,7 @@ enum Pin {kSda, kScl, kVio, kRst, kInt, kPins};
 const unsigned kGpio[kPins] = {FTB_GPIO_SDA, FTB_GPIO_SCL, FTB_GPIO_VIO, FTB_GPIO_RST, FTB_GPIO_INT};
 
 struct Options {
-    unsigned stage, hz, power, pdt, rmiReset, maxX, maxY, orient, rate, irq, pollAll, letterbox, view;
+    unsigned stage, hz, power, pdt, rmiReset, maxX, maxY, orient, rate, irq, pollAll, letterbox, view, ts;
     unsigned synth, synthCount, synthInterval, synthKind;   // fajita-touch-synth*: see synthFrame
     unsigned ldo, ldoMv;                                    // fajita-touch-ldo (default 1): vote LDO28 over RPMh in stage 2
 };
@@ -147,6 +152,7 @@ struct Session {
     uint32_t liveIds, droppedIds;   // F12 slots down in the previous frame; of them, those dropped for starting in the letterbox
     struct ftb_view view;           // the display mapping of the last frame
     uint8_t lastStatus;
+    uint64_t sampleTs;              // mach time of the frame being published (0: take it at publication)
     int lastRc;
 };
 
@@ -542,6 +548,8 @@ void publish(Session &s, unsigned count, const struct rmi_contact *c) {
     trackStrokes(count, ids, xs, ys);
     native_touch_seq = native_touch_seq + 1;
     __asm__ volatile("dmb ish" ::: "memory");
+    if (s.opt.ts) native_touch_ts = s.sampleTs ? s.sampleTs : mach_absolute_time();
+    s.sampleTs = 0;
     native_touch_count = count;
     for (unsigned i = 0; i < count; ++i) {native_touch_xs[i] = xs[i]; native_touch_ys[i] = ys[i]; native_touch_ids[i] = ids[i];}
     __asm__ volatile("dmb ish" ::: "memory");
@@ -557,6 +565,10 @@ void publish(Session &s, unsigned count, const struct rmi_contact *c) {
 // panel (x 540, y 2335 -> 1100 over 24 frames of 10 ms, then the lift: the home-bar gesture that unlocks), 1 a tap at the panel
 // centre (3 frames, then the lift). Real contacts are not published while a gesture runs. Row FT6 counts what was sent.
 void loopRow(const Session &s);
+// Timing (kcmd touch): ticks of the 19.2 MHz counter. dt = sample to sample of frames with a contact; rd = the F12 read; pub = sample
+// to the end of publish() (includes the HID dispatch, which the sink runs synchronously).
+struct TimeStats {uint32_t frames, sumDt, maxDt, minDt, over20, sumRd, maxRd, sumPub, maxPub, polls, sumGap, maxGap; uint64_t lastTs, lastPoll;};
+TimeStats gTime;
 // A gesture in panel pixels: (x0, y0) to (x1, y1) over `frames` frames of 10 ms, then the lift.
 struct Gesture {unsigned x0, y0, x1, y1, frames;};
 struct Synth {uint32_t next, sent, frames, gestures; int frame; bool demand; Gesture g;};
@@ -566,6 +578,7 @@ Synth gSynth;
 struct Demand {Gesture g; volatile uint32_t req, taken, done, startMs, endMs;};
 Demand gDemand;
 volatile uint32_t gTouchIrqEvents;
+volatile uint64_t gTouchIrqTs;
 void synthRow(const Session &s) {
     Out o(fajita_touch_rows[9], sizeof fajita_touch_rows[9]);
     o.add("FT6 synth k%u at%u+%ux%u sent%u/%u frames%u hid%u last%d,%d dem%u/%u", s.opt.synthKind, s.opt.synth, s.opt.synthInterval,
@@ -672,7 +685,23 @@ size_t kcmdTouch(const char *args, size_t len, char *out, size_t cap) {
         o.add("queued %u: (%u,%u) -> (%u,%u) in %u frames, now %u ms\n", id, g.x0, g.y0, g.x1, g.y1, g.frames, touchMs());
         return o.n;
     }
+    if (!strncmp(a, "reset", 5)) {bzero(&gTime, sizeof gTime); o.add("timing reset\n"); return o.n;}
     // Status: the last on-demand gesture (start/end in touchMs) and the rows.
+    const uint32_t T = 19200;   // ticks per ms
+    if (gTime.frames) {
+        o.add("TIME frames %u dt avg %u us min %u max %u over20ms %u | f12 read avg %u us max %u | publish+hid avg %u us max %u | poll gap avg %u us max %u (%u polls) ts%u\n",
+              gTime.frames, gTime.sumDt / gTime.frames * 10 / 192, gTime.minDt * 10 / 192, gTime.maxDt * 10 / 192, gTime.over20,
+              gTime.sumRd / (gTime.polls ? gTime.polls : 1) * 10 / 192, gTime.maxRd * 10 / 192,
+              gTime.sumPub / (gTime.polls ? gTime.polls : 1) * 10 / 192, gTime.maxPub * 10 / 192,
+              gTime.sumGap / (gTime.polls > 1 ? gTime.polls - 1 : 1) * 10 / 192, gTime.maxGap * 10 / 192, gTime.polls, native_touch_ts_mode);
+    } else o.add("TIME no contact frames yet; polls %u poll gap avg %u us max %u ts%u\n", gTime.polls,
+                 gTime.sumGap / (gTime.polls > 1 ? gTime.polls - 1 : 1) * 10 / 192, gTime.maxGap * 10 / 192, native_touch_ts_mode);
+    (void)T;
+    if (&native_hid_lat) o.add("HID reports %u dispatch avg %u us max %u | stamped %u age-at-dispatch avg %u us max %u\n", native_hid_lat[0],
+          native_hid_lat[0] ? native_hid_lat[3] / native_hid_lat[0] * 10 / 192 : 0, native_hid_lat[4] * 10 / 192, native_hid_lat[5],
+          native_hid_lat[5] ? native_hid_lat[1] / native_hid_lat[5] * 10 / 192 : 0, native_hid_lat[2] * 10 / 192);
+    o.add("irq armed %u hits %u spurious %u attach %d events %u\n", native_touch_irq_stats[0], native_touch_irq_stats[1], native_touch_irq_stats[2],
+          static_cast<int>(native_touch_irq_stats[3]), gTouchIrqEvents);
     o.add("now %u ms req %u taken %u done %u start %u end %u\n%s\n%s\n%s\n", touchMs(), gDemand.req, gDemand.taken, gDemand.done,
           gDemand.startMs, gDemand.endMs, fajita_touch_rows[9], fajita_touch_rows[6], fajita_touch_rows[8]);
     return o.n;
@@ -711,6 +740,7 @@ static volatile uint32_t *gTouchPin;
 static void touchIrq(void *) {
     if (!(gTouchPin[0xc / 4] & 1)) {native_touch_irq_stats[2] = native_touch_irq_stats[2] + 1; return;}
     gTouchPin[0xc / 4] = 0;
+    gTouchIrqTs = mach_absolute_time();
     native_touch_irq_stats[1] = native_touch_irq_stats[1] + 1;
     __atomic_fetch_add(&gTouchIrqEvents, 1, __ATOMIC_RELEASE);
     thread_wakeup((event_t)&gTouchIrqEvents);
@@ -748,6 +778,13 @@ static void pollLoop(Session &s) {
         ++s.polls;
         uint8_t status = 0;
         uint32_t irq = 0;
+        const uint64_t tPoll = mach_absolute_time();
+        if (gTime.lastPoll) {
+            const uint32_t gap = static_cast<uint32_t>(tPoll - gTime.lastPoll);
+            gTime.sumGap += gap; if (gap > gTime.maxGap) gTime.maxGap = gap;
+        }
+        gTime.lastPoll = tPoll; ++gTime.polls;
+        const bool irqSeen = irqArmed && gTouchIrqEvents != seen;
         int rc = rmi_read_irq(&r, &status, &irq);
         if (!rc) {
             s.lastStatus = status;
@@ -764,11 +801,30 @@ static void pollLoop(Session &s) {
             if (irq & r.abs_mask) ++s.irqHits;
             struct rmi_contact c[RMI_MAX_OBJECTS];
             const int n = rmi_f12_read_contacts(&r, c, RMI_MAX_OBJECTS);
+            const uint64_t tRead = mach_absolute_time();
             if (n >= 0) {
+                s.sampleTs = irqSeen && gTouchIrqTs && gTouchIrqTs <= tRead ? gTouchIrqTs : tPoll;
+                const uint32_t rd = static_cast<uint32_t>(tRead - tPoll);
+                gTime.sumRd += rd; if (rd > gTime.maxRd) gTime.maxRd = rd;
+                if (n > 0) {
+                    if (gTime.lastTs) {
+                        const uint32_t dt = static_cast<uint32_t>(s.sampleTs - gTime.lastTs);
+                        if (dt < 19200 * 100) {   // a gap longer than 100 ms is a new touch, not a sample interval
+                            gTime.sumDt += dt; ++gTime.frames;
+                            if (dt > gTime.maxDt) gTime.maxDt = dt;
+                            if (!gTime.minDt || dt < gTime.minDt) gTime.minDt = dt;
+                            if (dt > 19200 * 20) ++gTime.over20;
+                        }
+                    }
+                    gTime.lastTs = s.sampleTs;
+                } else gTime.lastTs = 0;
                 ++s.frames;
                 native_touch_frames = native_touch_frames + 1;
                 native_touch_valid = native_touch_valid + 1;
+                const uint64_t tPub = mach_absolute_time();
                 publish(s, static_cast<unsigned>(n), c);
+                const uint32_t pub = static_cast<uint32_t>(mach_absolute_time() - tPub);
+                gTime.sumPub += pub; if (pub > gTime.maxPub) gTime.maxPub = pub;
             } else rc = n;
         }
         if (rc) {
@@ -789,6 +845,9 @@ static void pollLoop(Session &s) {
             if (gTouchIrqEvents != seen) clear_wait(current_thread(), THREAD_AWAKENED);
             else thread_block(THREAD_CONTINUE_NULL);
             seen = gTouchIrqEvents;
+        } else if (s.opt.ts) {   // microsecond period (1000/rate truncates: 120 Hz would be 8 ms = 125 Hz)
+            assert_wait_timeout((event_t)&gTime, THREAD_UNINT, 1000000 / s.opt.rate, NSEC_PER_USEC);
+            thread_block(THREAD_CONTINUE_NULL);
         } else IOSleep(period);
     }
 }
@@ -813,7 +872,9 @@ static void readOptions(Options &o) {
     PE_parse_boot_argn("fajita-touch-orient", &o.orient, sizeof o.orient);
     o.orient &= 7;
     PE_parse_boot_argn("fajita-touch-rate", &o.rate, sizeof o.rate);
-    if (o.rate < 10 || o.rate > 250) o.rate = 100;
+    PE_parse_boot_argn("fajita-touch-ts", &o.ts, sizeof o.ts);
+    native_touch_ts_mode = o.ts = o.ts ? 1 : 0;
+    if (o.rate < 10 || o.rate > (o.ts ? 500u : 250u)) o.rate = 100;
     PE_parse_boot_argn("fajita-touch-irq", &o.irq, sizeof o.irq);
     PE_parse_boot_argn("fajita-touch-poll-all", &o.pollAll, sizeof o.pollAll);
     o.ldo = 1; o.ldoMv = FTB_LDO_MV;   // the firmware leaves LDO28 off (run16t-s2b: no ACK without it, run16t-s2l: ACK with it)
