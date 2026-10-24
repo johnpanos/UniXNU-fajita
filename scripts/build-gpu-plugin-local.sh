@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 OUT=${OUT:-$UNIXNU/build/gpu-plugin-local}
-CACHE=$BOARD/.cache
+CACHE=${GPU_LOCAL_CACHE:-$BOARD/.cache}   # SDK, rcodesign and metallib caches (gitignored); share one with GPU_LOCAL_CACHE
 SDKDIR=$CACHE/apple-sdk
 KEY=${SDK_TAR_KEY_FILE:-$HOME/.config/unixnu/sdk_tar_key}
 RCODESIGN_VERSION=0.29.0
