@@ -16,12 +16,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
 extern char **environ;
+
+#ifndef FJDBG_DEV
+#define FJDBG_DEV "/dev/fjdbg"   // host tests point it at a pty
+#endif
 
 static int gDev = -1;
 
@@ -111,11 +118,145 @@ static void runCommand(char **argv)
   say(tail);
 }
 
-// A built-in: `@read PATH` streams a file to the host; `@write PATH` then raw bytes
-// until the connection's next command boundary is not supported (kept simple: @read only).
+static uint32_t crc32Update(uint32_t crc, const unsigned char *p, size_t n)
+{
+  crc = ~crc;
+  while (n--) {
+    crc ^= *p++;
+    for (int k = 0; k < 8; k++)
+      crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1)));
+  }
+  return ~crc;
+}
+
+static int hexVal(char c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// File transfer, hex lines so the line-based channel carries any bytes.
+//   @put PATH MODE SIZE   then `@d HEX` lines (each acked `fjdbg: k BYTES`), then `@end CRC32`: written to PATH.fjtmp, checked, chmod MODE (octal), renamed
+//   @get PATH             replies `fjdbg: get SIZE`, `@d HEX` lines, `fjdbg: get crc CRC32`
+static struct { int fd; char path[1024]; unsigned mode; long size, got; uint32_t crc; } gPut = {.fd = -1};
+
+static void putFinish(const char *arg)
+{
+  char msg[1200];
+  if (gPut.fd < 0) {
+    say("fjdbg: put: no transfer\nfjdbg: eof\n");
+    return;
+  }
+  uint32_t want = (uint32_t)strtoul(arg, NULL, 16);
+  char tmp[1100];
+  snprintf(tmp, sizeof tmp, "%s.fjtmp", gPut.path);
+  int ok = gPut.got == gPut.size && gPut.crc == want && fchmod(gPut.fd, gPut.mode) == 0 && fsync(gPut.fd) == 0;
+  close(gPut.fd);
+  gPut.fd = -1;
+  if (ok && rename(tmp, gPut.path) == 0)
+    snprintf(msg, sizeof msg, "fjdbg: put ok %s %ld bytes crc %08x\nfjdbg: eof\n", gPut.path, gPut.got, gPut.crc);
+  else {
+    unlink(tmp);
+    snprintf(msg, sizeof msg, "fjdbg: put failed %s: got %ld/%ld crc %08x want %08x (%s)\nfjdbg: eof\n", gPut.path, gPut.got,
+             gPut.size, gPut.crc, want, strerror(errno));
+  }
+  say(msg);
+}
+
+static void putData(const char *hex)
+{
+  unsigned char buf[2048];
+  size_t n = 0;
+  if (gPut.fd < 0)
+    return;
+  for (; hex[0] && hex[1] && n < sizeof buf; hex += 2) {
+    int hi = hexVal(hex[0]), lo = hexVal(hex[1]);
+    if (hi < 0 || lo < 0)
+      break;
+    buf[n++] = (unsigned char)(hi << 4 | lo);
+  }
+  if (write(gPut.fd, buf, n) == (ssize_t)n) {
+    gPut.crc = crc32Update(gPut.crc, buf, n);
+    gPut.got += (long)n;
+  }
+  char ack[48];   // flow control: the host waits for this before overrunning NativeDwc3's 8 KiB shell ring
+  snprintf(ack, sizeof ack, "fjdbg: k %ld\n", gPut.got);
+  say(ack);
+}
+
+static void putStart(char *args)
+{
+  char *argv[4];
+  char msg[1200];
+  if (split(args, argv, 4) != 3) {
+    say("fjdbg: usage: @put PATH MODE SIZE\nfjdbg: eof\n");
+    return;
+  }
+  if (gPut.fd >= 0)
+    close(gPut.fd);
+  snprintf(gPut.path, sizeof gPut.path, "%s", argv[0]);
+  gPut.mode = (unsigned)strtoul(argv[1], NULL, 8);
+  gPut.size = strtol(argv[2], NULL, 10);
+  gPut.got = 0;
+  gPut.crc = 0;
+  char tmp[1100];
+  snprintf(tmp, sizeof tmp, "%s.fjtmp", gPut.path);
+  gPut.fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (gPut.fd < 0) {
+    snprintf(msg, sizeof msg, "fjdbg: put: cannot create %s: %s\nfjdbg: eof\n", tmp, strerror(errno));
+    say(msg);
+  }
+}
+
+static void getFile(const char *path)
+{
+  char msg[1200];
+  int fd = open(path, O_RDONLY);
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0) {
+    snprintf(msg, sizeof msg, "fjdbg: get: cannot open %s: %s\nfjdbg: eof\n", path, strerror(errno));
+    say(msg);
+    if (fd >= 0)
+      close(fd);
+    return;
+  }
+  snprintf(msg, sizeof msg, "fjdbg: get %lld\n", (long long)st.st_size);
+  say(msg);
+  static const char digits[] = "0123456789abcdef";
+  unsigned char buf[512];
+  char line[3 + 2 * sizeof buf + 2];
+  uint32_t crc = 0;
+  ssize_t n;
+  while ((n = read(fd, buf, sizeof buf)) > 0) {
+    crc = crc32Update(crc, buf, (size_t)n);
+    size_t o = 0;
+    line[o++] = '@'; line[o++] = 'd'; line[o++] = ' ';
+    for (ssize_t i = 0; i < n; i++) {
+      line[o++] = digits[buf[i] >> 4];
+      line[o++] = digits[buf[i] & 15];
+    }
+    line[o++] = '\n';
+    writeAll(line, o);
+  }
+  close(fd);
+  snprintf(msg, sizeof msg, "fjdbg: get crc %08x\nfjdbg: eof\n", crc);
+  say(msg);
+}
+
+// Built-ins: `@read PATH` streams a text file to the host; @put/@d/@end and @get move any file (see above).
 static void builtin(char *line)
 {
-  if (strncmp(line, "@read ", 6) == 0) {
+  if (strncmp(line, "@d ", 3) == 0)
+    putData(line + 3);
+  else if (strncmp(line, "@put ", 5) == 0)
+    putStart(line + 5);
+  else if (strncmp(line, "@end ", 5) == 0)
+    putFinish(line + 5);
+  else if (strncmp(line, "@get ", 5) == 0)
+    getFile(line + 5);
+  else if (strncmp(line, "@read ", 6) == 0) {
     int fd = open(line + 6, O_RDONLY);
     if (fd < 0) {
       say("fjdbg: open failed\n");
@@ -135,7 +276,7 @@ static void builtin(char *line)
 int main(void)
 {
   for (int tries = 0; gDev < 0 && tries < 600; tries++) {
-    gDev = open("/dev/fjdbg", O_RDWR);
+    gDev = open(FJDBG_DEV, O_RDWR);
     if (gDev < 0)
       sleep(1);   // the node appears once NativeDwc3's poll thread sees the root mount
   }
