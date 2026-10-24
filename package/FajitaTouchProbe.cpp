@@ -557,29 +557,51 @@ void publish(Session &s, unsigned count, const struct rmi_contact *c) {
 // panel (x 540, y 2335 -> 1100 over 24 frames of 10 ms, then the lift: the home-bar gesture that unlocks), 1 a tap at the panel
 // centre (3 frames, then the lift). Real contacts are not published while a gesture runs. Row FT6 counts what was sent.
 void loopRow(const Session &s);
-struct Synth {uint32_t next, sent, frames, gestures; int frame;};
+// A gesture in panel pixels: (x0, y0) to (x1, y1) over `frames` frames of 10 ms, then the lift.
+struct Gesture {unsigned x0, y0, x1, y1, frames;};
+struct Synth {uint32_t next, sent, frames, gestures; int frame; bool demand; Gesture g;};
 Synth gSynth;
+// On-demand gestures (kcmd touch swipe up|down|left|right [FRAMES] | tap): the kcmd stores the gesture and bumps req; the touch
+// thread takes it when no gesture runs (taken = req), runs it like a synthetic one and sets done = taken with its start and end times.
+struct Demand {Gesture g; volatile uint32_t req, taken, done, startMs, endMs;};
+Demand gDemand;
+volatile uint32_t gTouchIrqEvents;
 void synthRow(const Session &s) {
     Out o(fajita_touch_rows[9], sizeof fajita_touch_rows[9]);
-    o.add("FT6 synth k%u at%u+%ux%u sent%u/%u frames%u hid%u last%d,%d", s.opt.synthKind, s.opt.synth, s.opt.synthInterval,
+    o.add("FT6 synth k%u at%u+%ux%u sent%u/%u frames%u hid%u last%d,%d dem%u/%u", s.opt.synthKind, s.opt.synth, s.opt.synthInterval,
           s.opt.synthCount, gSynth.gestures, s.opt.synthCount, gSynth.frames, native_touch_hid_reports, native_touch_last_x,
-          native_touch_last_y);
+          native_touch_last_y, gDemand.done, gDemand.req);
 }
 // True while a gesture owns the publication (one frame published per call; the caller waits 10 ms between calls).
 bool synthFrame(Session &s) {
-    if (!s.opt.synth || gSynth.gestures >= s.opt.synthCount) return false;
     const uint32_t now = touchMs();
     if (gSynth.frame < 0) {
-        if (!gSynth.next) gSynth.next = s.opt.synth * 1000;
-        if (now < gSynth.next) return false;
+        const uint32_t req = __atomic_load_n(&gDemand.req, __ATOMIC_ACQUIRE);
+        if (req != gDemand.taken) {
+            gSynth.g = gDemand.g;
+            gDemand.taken = req;
+            gDemand.startMs = now;
+            gSynth.demand = true;
+        } else {
+            if (!s.opt.synth || gSynth.gestures >= s.opt.synthCount) return false;
+            // The first gesture at fajita-touch-synth s after boot, or now when the probe comes up later; each next one interval s after
+            // the previous one ended (session-223156: a probe up at 139 s with synth=95 sent all six back to back).
+            if (!gSynth.next) gSynth.next = s.opt.synth * 1000 > now ? s.opt.synth * 1000 : now;
+            if (now < gSynth.next) return false;
+            gSynth.g = s.opt.synthKind == 1 ? Gesture{540, 1170, 540, 1170, 3} : Gesture{540, 2335, 540, 1100, 24};
+            gSynth.demand = false;
+        }
         gSynth.frame = 0;
     }
-    const int frames = s.opt.synthKind == 1 ? 3 : 24;
+    const Gesture &g = gSynth.g;
+    const int frames = static_cast<int>(g.frames);
     struct rmi_contact c = {};
     c.id = 9;
     unsigned count = 1;
     if (gSynth.frame < frames) {
-        const unsigned px = 540, py = s.opt.synthKind == 1 ? 1170 : 2335 - (2335 - 1100) * static_cast<unsigned>(gSynth.frame) / (frames - 1);
+        const unsigned f = static_cast<unsigned>(gSynth.frame), d = frames > 1 ? static_cast<unsigned>(frames - 1) : 1u;
+        const unsigned px = static_cast<unsigned>(static_cast<int>(g.x0) + (static_cast<int>(g.x1) - static_cast<int>(g.x0)) * static_cast<int>(f) / static_cast<int>(d));
+        const unsigned py = static_cast<unsigned>(static_cast<int>(g.y0) + (static_cast<int>(g.y1) - static_cast<int>(g.y0)) * static_cast<int>(f) / static_cast<int>(d));
         // publish() maps controller coordinates; give it the panel pixel in the controller's range (inverse of ftb_map_panel
         // without orientation), so the same display mapping applies.
         const unsigned mx = s.map.max_x ? s.map.max_x : FTB_DEFAULT_MAX_X, my = s.map.max_y ? s.map.max_y : FTB_DEFAULT_MAX_Y;
@@ -595,26 +617,66 @@ bool synthFrame(Session &s) {
     ++gSynth.frames;
     if (++gSynth.frame > frames) {
         gSynth.frame = -1;
-        ++gSynth.gestures;
-        gSynth.next += s.opt.synthInterval * 1000;
-        IOLog("fajita-touch: synthetic gesture %u of %u sent (hid reports %u)\n", gSynth.gestures, s.opt.synthCount, native_touch_hid_reports);
+        if (gSynth.demand) {
+            gDemand.endMs = now;
+            __atomic_store_n(&gDemand.done, gDemand.taken, __ATOMIC_RELEASE);
+            IOLog("fajita-touch: on-demand gesture %u done (%u ms, hid reports %u)\n", gDemand.done, now - gDemand.startMs,
+                  native_touch_hid_reports);
+        } else {
+            ++gSynth.gestures;
+            gSynth.next = now + s.opt.synthInterval * 1000;
+            IOLog("fajita-touch: synthetic gesture %u of %u sent (hid reports %u)\n", gSynth.gestures, s.opt.synthCount, native_touch_hid_reports);
+        }
     }
     synthRow(s);
     return true;
 }
-// Without a controller (a stage below 4, or a failed stage) the synthetic gestures still run, on this thread, until they are done.
+// Without a controller (a stage below 4, or a failed stage) the synthetic and on-demand gestures still run, on this thread.
 void synthOnly(Session &s) {
-    if (!s.opt.synth) return;
     s.liveIds = 0;
     synthRow(s);
-    while (gSynth.gestures < s.opt.synthCount) {
-        if (synthFrame(s)) IOSleep(10);
-        else {loopRow(s); summary(s); IOSleep(200);}
+    unsigned idle = 0;
+    for (;;) {
+        if (synthFrame(s)) {IOSleep(10); continue;}
+        if (!(++idle % 20)) {loopRow(s); summary(s);}
+        assert_wait_timeout((event_t)&gTouchIrqEvents, THREAD_UNINT, 50, NSEC_PER_MSEC);
+        thread_block(THREAD_CONTINUE_NULL);
     }
-    loopRow(s);
-    summary(s);
 }
 
+size_t kcmdTouch(const char *args, size_t len, char *out, size_t cap) {
+    char a[48] = {};
+    for (size_t i = 0; i < len && i < sizeof a - 1; ++i) a[i] = args[i];
+    Out o(out, cap);
+    const char *dir = nullptr;
+    if (!strncmp(a, "swipe ", 6)) dir = a + 6;
+    else if (!strncmp(a, "tap", 3)) dir = "tap";
+    if (dir) {
+        Gesture g;
+        if (!strncmp(dir, "up", 2)) g = {540, 2335, 540, 1100, 24};           // from the bottom edge: the home-bar gesture
+        else if (!strncmp(dir, "down", 4)) g = {540, 700, 540, 1700, 24};     // from the upper middle: Spotlight on the home screen
+        else if (!strncmp(dir, "left", 4)) g = {900, 1170, 180, 1170, 24};    // the next home screen page
+        else if (!strncmp(dir, "right", 5)) g = {180, 1170, 900, 1170, 24};   // the previous page
+        else if (!strncmp(dir, "tap", 3)) g = {540, 1170, 540, 1170, 3};
+        else {o.add("usage: touch swipe up|down|left|right [FRAMES] | tap\n"); return o.n;}
+        const char *p = dir;
+        while (*p && *p != ' ') ++p;
+        unsigned frames = 0;
+        for (; *p; ++p) if (*p >= '0' && *p <= '9') frames = frames * 10 + unsigned(*p - '0');
+        if (frames >= 2 && frames <= 500) g.frames = frames;
+        if (gDemand.req != gDemand.done) {o.add("busy: gesture %u not done (done %u)\n", gDemand.req, gDemand.done); return o.n;}
+        gDemand.g = g;
+        const uint32_t id = gDemand.req + 1;
+        __atomic_store_n(&gDemand.req, id, __ATOMIC_RELEASE);
+        thread_wakeup((event_t)&gTouchIrqEvents);
+        o.add("queued %u: (%u,%u) -> (%u,%u) in %u frames, now %u ms\n", id, g.x0, g.y0, g.x1, g.y1, g.frames, touchMs());
+        return o.n;
+    }
+    // Status: the last on-demand gesture (start/end in touchMs) and the rows.
+    o.add("now %u ms req %u taken %u done %u start %u end %u\n%s\n%s\n%s\n", touchMs(), gDemand.req, gDemand.taken, gDemand.done,
+          gDemand.startMs, gDemand.endMs, fajita_touch_rows[9], fajita_touch_rows[6], fajita_touch_rows[8]);
+    return o.n;
+}
 void loopRow(const Session &s) {
     Out o(fajita_touch_rows[6], sizeof fajita_touch_rows[6]);
     o.add("FT4 polls%u irq%u fr%u cf%u c%u dn%u lb%u/%u raw%d,%d ext x%d..%d y%d..%d st%02x err%u back%u recfg%u gpio%u/%u",
@@ -645,7 +707,6 @@ void loopRow(const Session &s) {
 // The controller's interrupt (GPIO 125, falling edge) through the TLMM summary interrupt, SPI 208 = INTID 240, as sheng's
 // TouchProbe does with its GPIO 25. Opt-in (fajita-touch-irq=1); the loop keeps a timeout so a lost edge only costs latency.
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *) __attribute__((weak_import));
-static volatile uint32_t gTouchIrqEvents;
 static volatile uint32_t *gTouchPin;
 static void touchIrq(void *) {
     if (!(gTouchPin[0xc / 4] & 1)) {native_touch_irq_stats[2] = native_touch_irq_stats[2] + 1; return;}
@@ -769,6 +830,8 @@ static void readOptions(Options &o) {
     if (o.synthKind > 1) o.synthKind = 0;
 }
 
+extern "C" int fajita_usbdbg_register_kcmd(const char *name, size_t (*fn)(const char *, size_t, char *, size_t), const char *help)
+    __attribute__((weak));
 static void touchThread(void *, wait_result_t) {
     thread_set_thread_name(current_thread(), "fajita-touch");
     Session *s = static_cast<Session *>(IOMallocType(Session));
@@ -776,6 +839,8 @@ static void touchThread(void *, wait_result_t) {
     bzero(static_cast<void *>(s), sizeof *s);   // Session has member initializers: clang 19+ -Wnontrivial-memcall wants the cast
     s->ackRc = 1;   // not probed
     gSynth.frame = -1;
+    if (fajita_usbdbg_register_kcmd)
+        fajita_usbdbg_register_kcmd("touch", kcmdTouch, "synthetic touch: touch [swipe up|down|left|right [FRAMES] | tap]");
     s->opt.stage = native_touch_stage_req;
     readOptions(s->opt);
     do {
