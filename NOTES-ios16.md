@@ -145,3 +145,24 @@ end - 1 GiB           reserve: log export region and the 32 MiB log (sheng-log)
 7. **Trust caches.** The static and System trust caches of 20H392, pinned in `ios16/board.toml`.
 
 The state of each item is in the status table of `ios16/README.md`.
+
+## Release switches (2026-10-24)
+
+All default off; each is one flag, so a run can A/B it.
+
+| Switch | Where | Effect |
+| --- | --- | --- |
+| `FAJITA_KIT_RELEASE=1` (build env) | build-fajita-{gpu,touch,pmic,cpufreq,rtc}.py, build-native-spmi.py | the kits without the DEVELOPMENT kernel's minimal UBSan and IOASSERT, with NDEBUG; the configuration defines stay |
+| `sheng-log-period=<ms>` (boot arg, default 2000) | package/BootLog.c | the UFS log round period; the autoreset deadline is checked once per round |
+| `usb-debug-poll-ms=<n>` (boot arg, default 1, max 20) | NativeDwc3 | idle poll period after the bulk endpoints started and 250 ms without a controller event; any event goes back to 1 ms |
+| `debug=0 pgz=0` (boot args) | XNU | no debugger flags; no probabilistic guard zalloc (on by default in DEVELOPMENT) |
+| `NGPU_PLUGIN_NDEBUG=1`, `NGPU_PLUGIN_OPT`, `NMB_LTO=1` (build env) | UniXNU branch release-variant: build-adreno-metal-plugin.py, build-native-metal-bridge.py | plugin NDEBUG (NativeMetal has no assert(): a no-op) and -O level; bridge fat LTO + codegen-units=1 (executable 22.2 -> 16.0 MB) |
+
+XNU stays DEVELOPMENT: RELEASE would change 43 build and audit scripts that name DEVELOPMENT_ARM64_BCM2837, and its
+no_printf_str / no_kprintf_str options strip the kernel log strings.
+
+Measured (sessions 090535..094442, ios16-port 295561b, gpu-ab two passes per boot, 4 swipes): shipping debug 9.4/9.5 fps;
+release kernel + args 8.8/8.7; release kernel + args + release plugin 9.0/8.9; GPU 91-94% busy in every row, lock and home
+screens identical. None of the switches moves the frame rate: the kernel's hot paths were already quiet, and the frame is
+GPU-bound. With all release args the USB channel (hello 53 ms, run 70 ms), charging, and sheng-autoreset
+(sheng-autoreset=150: back in fastboot after 172 s) keep working.

@@ -385,6 +385,7 @@ extern "C" volatile uint32_t native_adreno_skip_written_publish __attribute__((w
 extern "C" volatile uint32_t native_adreno_uncached_acquire_skip __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_acquire_stats[2] __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_import_check[3] __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_uche_invalidate __attribute__((weak));
 extern "C" bool (*native_adreno_page_uncached)(uint64_t physical) __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_uncached_skipped __attribute__((weak));
 extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
@@ -936,11 +937,13 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         if (nl == 11 && !strncmp(name, "import-skip", nl) && &native_adreno_skip_written_imports) native_adreno_skip_written_imports = on;
         else if (nl == 7 && !strncmp(name, "ro-skip", nl) && &native_adreno_skip_readonly_imports) native_adreno_skip_readonly_imports = on;
         else if (nl == 13 && !strncmp(name, "uncached-skip", nl) && &native_adreno_page_uncached) native_adreno_page_uncached = on ? pageUncached : nullptr;
+        else if (nl == 8 && !strncmp(name, "uche-inv", nl) && &native_adreno_uche_invalidate) native_adreno_uche_invalidate = on;
         else if (nl == 9 && !strncmp(name, "uacq-skip", nl) && &native_adreno_uncached_acquire_skip) native_adreno_uncached_acquire_skip = on;
         else if (nl == 9 && !strncmp(name, "wpub-skip", nl) && &native_adreno_skip_written_publish) native_adreno_skip_written_publish = on;
         else if (nl == 5 && !strncmp(name, "trace", nl) && &native_adreno_trace) native_adreno_trace = int(*v - '0');
         else if (nl) return appendf(out, cap, 0, "usage: gpu set import-skip|ro-skip|wpub-skip|uacq-skip|uncached-skip|trace 0|1\n");
-        return appendf(out, cap, 0, "trace %d uacq-skip %u wpub-skip %u import-skip %u ro-skip %u uncached-skip %u\n", &native_adreno_trace ? (int)native_adreno_trace : 9,
+        return appendf(out, cap, 0, "uche-inv %u trace %d uacq-skip %u wpub-skip %u import-skip %u ro-skip %u uncached-skip %u\n", &native_adreno_uche_invalidate ? (unsigned)native_adreno_uche_invalidate : 9u,
+                       &native_adreno_trace ? (int)native_adreno_trace : 9,
                        &native_adreno_uncached_acquire_skip ? (unsigned)native_adreno_uncached_acquire_skip : 9u,
                        &native_adreno_skip_written_publish ? (unsigned)native_adreno_skip_written_publish : 9u,
                        &native_adreno_skip_written_imports ? (unsigned)native_adreno_skip_written_imports : 9u,

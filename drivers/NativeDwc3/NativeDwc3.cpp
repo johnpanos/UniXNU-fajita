@@ -227,8 +227,17 @@ static void dwc3GadgetThread(void *, wait_result_t)
     thread_bind(cpu1);
     thread_block(THREAD_CONTINUE_NULL);
   }
+  // usb-debug-poll-ms=<n> (default 1, at most 20): the idle poll period once the channel is up. ep0 needs the 1 ms poll while
+  // enumerating, so a longer period applies only after the bulk endpoints started and no controller event came for 250 ms;
+  // any event goes back to 1 ms at once. The kernel log mirror runs once per poll, so it slows with it.
+  uint32_t idleMs = 1;
+  PE_parse_boot_argn("usb-debug-poll-ms", &idleMs, sizeof(idleMs));
+  if (idleMs < 1) idleMs = 1;
+  if (idleMs > 20) idleMs = 20;
+  uint32_t quietMs = 0;
   for (;;) {
     if (gGadget) {
+      if (gGadget->eventsPending() || gGadget->shotActive || !gGadget->bulkStarted) quietMs = 0;
       native_dwc3_polls = native_dwc3_polls + 1;
       gGadget->poll();
       gGadget->pumpLog();
@@ -243,7 +252,11 @@ static void dwc3GadgetThread(void *, wait_result_t)
     // Control transfers have tight host timeouts: keep the poll period at 1 ms, and do not sleep at all while the
     // controller still has events queued.
     // ...nor while a screenshot is streaming (the ring drains in well under a millisecond per 16 KiB transfer).
-    if (!gGadget || (!gGadget->eventsPending() && !gGadget->shotActive)) IOSleep(1);
+    if (!gGadget || (!gGadget->eventsPending() && !gGadget->shotActive)) {
+      const uint32_t ms = quietMs >= 250 ? idleMs : 1;
+      IOSleep(ms);
+      if (quietMs < 250) quietMs += ms;
+    }
   }
 }
 

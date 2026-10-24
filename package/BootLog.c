@@ -897,6 +897,12 @@ static void writer(void *arg, wait_result_t result) {
   // fajita: without sheng-diag-export, a run with sheng-autoreset exports 60 s before the reset (the iOS 16 command line has no
   // room for both arguments); sheng-diag-export=0 is not distinguishable from absent and gets the default too.
   if (!diag_at && autoreset > 90 && &boot_diag_scan && &boot_diag_stream) diag_at = autoreset - 60;
+  // sheng-log-period=<ms> (default 2000, 500..30000): the time between rounds. A longer period writes less to UFS; the autoreset
+  // deadline above is checked once per round, so it fires up to one period late.
+  uint32_t period = LogPeriodMs;
+  PE_parse_boot_argn("sheng-log-period", &period, sizeof period);
+  if (period < 500) period = 500;
+  if (period > 30000) period = 30000;
   uint32_t errors = 0;
   boot_log_state = 2;
   for (;;) {
@@ -941,7 +947,7 @@ static void writer(void *arg, wait_result_t result) {
         strlcat(boot_log_reset_result, tail, sizeof boot_log_reset_result);
       }
     }
-    IOSleep(LogPeriodMs);
+    IOSleep(period);
   }
 }
 

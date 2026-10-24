@@ -46,7 +46,26 @@ def command_for(rec, source, obj):
         elif not arg.startswith('-W'):
             command.append(arg)
         i += 1
-    return command
+    return kit_release(command)
+
+
+def kit_release(command):
+    """FAJITA_KIT_RELEASE=1: the kit without the DEVELOPMENT kernel's checks (minimal UBSan, IOKit asserts), with NDEBUG.
+    The configuration defines (DEVELOPMENT, IOTRACKING, ...) stay: they shape the kernel's structures the kit shares."""
+    if __import__('os').environ.get('FAJITA_KIT_RELEASE') != '1':
+        return command
+    out, i = [], 0
+    while i < len(command):
+        arg = command[i]
+        if arg.startswith('-fsanitize'):
+            pass
+        elif arg == '-D' and i + 1 < len(command) and command[i + 1] == 'IOASSERT=1':
+            out += ['-D', 'IOASSERT=0']
+            i += 1
+        else:
+            out.append(arg)
+        i += 1
+    return out + ['-DNDEBUG']
 
 
 def check_object(path):
