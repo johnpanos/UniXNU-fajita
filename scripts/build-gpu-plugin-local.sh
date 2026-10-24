@@ -14,6 +14,7 @@
 #
 # Usage:
 #   scripts/build-gpu-plugin-local.sh [--unixnu DIR] [--out DIR] [--pack OUT.ngpu [--base BASE.ngpu]] [--tools]
+#     --dev builds a tree whose inputs are dirty or whose submodules are off their pins (work in progress); sources.txt says so
 #     --tools also builds the "GPU userland tools" CI artifact (gpu-tools.yml: ngpu-probe, ngpu-metal, ngpu-vk) into <out>-tools
 #   scripts/build-gpu-plugin-local.sh --fetch-sdk [RUN_ID]     # the encrypted SDK export (apple-sdk-export.yml) -> .cache/apple-sdk
 #   scripts/build-gpu-plugin-local.sh --seed-metallib RUN_ID   # a "GPU plugin (iOS 16)" run's metallib -> .cache/gpu-local/metallib
@@ -24,7 +25,7 @@
 set -euo pipefail
 BOARD=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 UNIXNU=${UNIXNU:-/home/john/src/UniXNU-ios16-stack-gpuuser}
-OUT= PACK= BASE= FETCH_SDK= SEED= TOOLS= SETUP_MW=
+OUT= PACK= BASE= FETCH_SDK= SEED= TOOLS= SETUP_MW= DEV=
 REPO=johnpanos/UniXNU-fajita
 while [ $# -gt 0 ]; do
   case $1 in
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --fetch-sdk) FETCH_SDK=1; shift; if [ $# -gt 0 ] && [[ $1 =~ ^[0-9]+$ ]]; then FETCH_SDK=$1; shift; fi ;;
     --seed-metallib) SEED=$2; shift 2 ;;
     --tools) TOOLS=1; shift ;;
+    --dev) DEV=1; shift ;;
     --setup-metal-win) SETUP_MW=1; shift ;;
     -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
@@ -49,7 +51,7 @@ RCODESIGN=$CACHE/toolchain/apple-codesign-$RCODESIGN_VERSION-x86_64-unknown-linu
 METALLIB_CACHE=$CACHE/gpu-local/metallib
 # The Metal Developer Tools for Windows: the newest installed prefix (3.1 is metalfe-31001.660; Xcode 16.4 is 32023.620).
 METAL_WIN=$CACHE/metal-win
-METAL_WINEPREFIX=${GPU_LOCAL_METAL_WINEPREFIX:-$(ls -d "$METAL_WIN"/prefix-* 2>/dev/null | sort -V | tail -1)}
+METAL_WINEPREFIX=${GPU_LOCAL_METAL_WINEPREFIX:-$(ls -d "$METAL_WIN"/prefix-* 2>/dev/null | sort -V | tail -1 || true)}
 t0=$(date +%s.%N)
 stamp() { printf '[%6.1fs] %s\n' "$(echo "$(date +%s.%N) - $t0" | bc)" "$*"; }
 
@@ -81,7 +83,7 @@ fi
 if [ -n "$SEED" ]; then
   tmp=$(mktemp -d "$CACHE/seed.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   gh run download "$SEED" -R $REPO -n gpu-plugin -D "$tmp"
-  NM=$(awk '/drivers\/NativeMetal/{print $1}' "$tmp/sources.txt"); NM=${NM#[-+ ]}
+  NM=$(awk '/drivers\/NativeMetal/{print $1; exit}' "$tmp/sources.txt"); NM=${NM#[-+ ]}
   git -C "$UNIXNU/drivers/NativeMetal" cat-file -e "$NM" 2>/dev/null || git -C "$UNIXNU/drivers/NativeMetal" fetch -q origin "$NM"
   git -C "$UNIXNU/drivers/NativeMetal" show "$NM:shaders/scanout_scale.metal" > "$tmp/scanout_scale.metal"
   # The key is what tool.py's metal stand-in computes for the plugin script's call (build-adreno-metal-plugin.py, iOS 16 target).
@@ -99,6 +101,33 @@ rustup target list --toolchain 1.98.0 --installed 2>/dev/null | grep -q aarch64-
 for t in glslangValidator glslc spirv-val llvm-as ld64.lld bison ccache; do command -v $t >/dev/null || echo "warning: $t missing" >&2; done
 
 cd "$UNIXNU"
+# The tree must be what git says it is. A file copy of a worktree keeps the original's .git file, so git there reports the ORIGINAL's HEAD,
+# index and submodule checkouts while the build reads the copy's files (int: a copy of the gpuuser stack built translator d489756 while git
+# showed fa4fdf0). Refused always. Dirty inputs (scripts/, patches/) or plugin submodules off their pin or modified are refused unless --dev.
+SUBS="drivers/NativeMetal drivers/NativeAdreno drivers/NativeMobileDisplay"
+tree_problems() {
+  local gd wt sm pin have
+  if [ -f .git ]; then
+    gd=$(sed -n 's/^gitdir: //p' .git); case $gd in /*) ;; *) gd=$PWD/$gd ;; esac
+    wt=$(cat "$gd/gitdir" 2>/dev/null || true)
+    [ "$(realpath -m "${wt%/.git}")" = "$(realpath "$PWD")" ] || { echo "FATAL: $PWD/.git points at $gd, the worktree of ${wt%/.git}: this tree is a file copy (make it with git worktree add)"; return; }
+  fi
+  for sm in $SUBS; do
+    [ -e "$sm/.git" ] || { echo "FATAL: $sm is not checked out"; continue; }
+    wt=$(git -C "$sm" rev-parse --show-toplevel 2>/dev/null || true)
+    [ "$(realpath -m "$wt")" = "$(realpath "$sm")" ] || { echo "FATAL: $sm's git metadata belongs to $wt: file copy"; continue; }
+    pin=$(git ls-tree HEAD "$sm" | awk '{print $3}'); have=$(git -C "$sm" rev-parse HEAD)
+    [ "$pin" = "$have" ] || echo "dirty: $sm at ${have:0:12}, pinned ${pin:0:12}"
+    [ -z "$(git -C "$sm" status --porcelain --untracked-files=no)" ] || echo "dirty: $sm has uncommitted changes"
+  done
+  git status --porcelain --untracked-files=no -- scripts patches | sed 's/^/dirty: input /'
+}
+PROBLEMS=$(tree_problems)
+if [ -n "$PROBLEMS" ]; then
+  echo "$PROBLEMS" >&2
+  if grep -q '^FATAL' <<<"$PROBLEMS"; then echo "refused: $UNIXNU is not a real checkout" >&2; exit 1; fi
+  [ -n "$DEV" ] || { echo "refused: $UNIXNU differs from its commit (above); commit it, or pass --dev for a work-in-progress build" >&2; exit 1; }
+fi
 # The pinned Mesa and translator sources, as the CI's "Pinned Mesa and translator" step makes them.
 MESA=$(python3 -c "import json;print(json.load(open('scripts/data/adreno-compiler-inputs.json'))['mesa']['commit'])")
 if [ ! -d .cache/mesa-work/.git ] || [ "$(git -C .cache/mesa-work rev-parse HEAD)" != "$MESA" ]; then
@@ -152,7 +181,10 @@ python3 scripts/build-adreno-metal-plugin.py
 P=build/adreno-metal-plugin
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp -R $P/NativeAdrenoMetal.bundle $P/scanout_scale.metallib $P/adrenoprobed $P/*.plist $P/trust.json "$OUT/"
-( git rev-parse HEAD; git submodule status drivers/NativeMetal drivers/NativeAdreno; echo "local $(hostname) $(date -u +%FT%TZ)" ) > "$OUT/sources.txt"
+( git rev-parse HEAD; git submodule status drivers/NativeMetal drivers/NativeAdreno; echo "local $(hostname) $(date -u +%FT%TZ)"
+  echo "built translator $M2V mesa $MESA"
+  for sm in $SUBS; do echo "built $sm $(git -C "$sm" rev-parse HEAD)"; done
+  [ -z "$PROBLEMS" ] || { echo "DEV BUILD (--dev): not the commit above"; echo "$PROBLEMS"; } ) > "$OUT/sources.txt"
 codesign -dvvv "$OUT/NativeAdrenoMetal.bundle" 2>&1 | grep -E 'CDHash|Page size|Identifier' > "$OUT/codesign.txt"
 stamp "built $OUT ($(grep -o '"cdhash": "[0-9a-f]*' "$OUT/trust.json" | cut -c12-))"
 if [ -n "$PACK" ]; then
