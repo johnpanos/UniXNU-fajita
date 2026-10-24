@@ -105,7 +105,7 @@ static void runCommand(char **argv)
   close(fds[1]);
   if (rc != 0) {
     char msg[128];
-    snprintf(msg, sizeof msg, "fjdbg: cannot run %s: %s\n", argv[0], strerror(rc));
+    snprintf(msg, sizeof msg, "fjdbg: cannot run %s: %s\nfjdbg: exit 127\n", argv[0], strerror(rc));
     say(msg);
     close(fds[0]);
     return;
@@ -331,7 +331,10 @@ int main(void)
     }
     line[len] = '\0';
     if (len > 0) {
-      if (strncmp(line, "@t ", 3) == 0) {   // @t SECONDS CMD...: one command with its own time limit
+      if (strncmp(line, "fjdbg-hub-", 10) == 0) {   // the hub's exchange marker: echo it, run nothing
+        say(line);
+        say("\n");
+      } else if (strncmp(line, "@t ", 3) == 0) {   // @t SECONDS CMD...: one command with its own time limit
         char *rest = NULL;
         long t = strtol(line + 3, &rest, 10);
         char *argv[64];
