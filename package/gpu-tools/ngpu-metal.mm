@@ -20,9 +20,8 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IOLBF, 0);
         const double t0 = nowMs();
-        NSArray<id<MTLDevice>> *all = MTLCopyAllDevices();
-        printf("ok 1 MTLCopyAllDevices: %lu device(s) in %.0f ms\n", (unsigned long)all.count, nowMs() - t0);
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();   // MTLCopyAllDevices is iOS 18+
+        printf("ok 1 discovery returned in %.0f ms\n", nowMs() - t0);
         if (!device) {printf("FAIL 2 MTLCreateSystemDefaultDevice: nil\n"); return 2;}
         printf("ok 2 device '%s' class %s registryID 0x%llx apple3 %d common2 %d maxBuffer %llu\n", device.name.UTF8String,
                object_getClassName(device), (unsigned long long)device.registryID, [device supportsFamily:MTLGPUFamilyApple3],
