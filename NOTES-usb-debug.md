@@ -193,3 +193,16 @@ The pmOS log reader's reboot helper (`/tmp/rb`) can hang in D state in the pmOS 
 shutdown path (seen after usb-enum12: nine `/tmp/rb` stuck, phone left in pmOS).
 `echo b > /proc/sysrq-trigger` over the telnet shell resets at once and lands in fastboot;
 `cycle.sh` could fall back to it.
+
+## Screenshots over USB (no pmOS)
+
+Op `shot` (u32 scale: 2 = half resolution, the default; 1 = full 1080x2340) replies with the frame
+geometry, then the gadget streams the console scanout (PE_current_console, mapped like the diag
+export) as BGR on the FILE channel; the host writes an RGB PNG (stdlib zlib). Half resolution
+(540x1170, 1.9 MB) takes about 1 s; it matches the diag export's screen.png pixel for pixel in layout
+and colour (usb-shot1 vs pmic-k2).
+
+- one-off, tty free: `scripts/fajita-usbdbg.py screenshot OUT.png [--scale 1]`
+- during a cycle (the hub owns the tty): `scripts/fajita-usbdbg-hub.py call screenshot OUT.png [--scale 1]`
+- in a run: `CYCLE_SHOTS=45,100 cycle.sh NAME PAYLOAD BOOT` writes logs/NAME/shot-45.png, shot-100.png
+  (seconds after "XNU booting"; results in shots.txt). `CYCLE_HUB_SCRIPT=` selects the hub script.
