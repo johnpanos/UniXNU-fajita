@@ -8,7 +8,8 @@ build-adreno-metal-plugin.py), so those scripts run unchanged on Linux. Dispatch
   codesign  ad-hoc signing with rcodesign (GPU_LOCAL_RCODESIGN); --display / -d --entitlements / --verify in codesign's output format
   strip, nm, ar  llvm-strip / llvm-nm / llvm-ar
   metal, metallib  the scanout metallib is Apple-compiler output: served from GPU_LOCAL_METALLIB_CACHE by the sha256 of the .metal
-            source and flags (seeded from a CI artifact by build-gpu-plugin-local.sh --seed-metallib RUN)
+            source and flags (seeded from a CI artifact by build-gpu-plugin-local.sh --seed-metallib RUN); on a miss, compiled with Apple's
+            Metal Developer Tools for Windows under Wine (GPU_LOCAL_METAL_WINEPREFIX, set up by --setup-metal-win) into <cache>/wine/
 
 Set up by scripts/build-gpu-plugin-local.sh; not meant to be run directly."""
 import base64
@@ -343,24 +344,64 @@ def metal_key(source, flags):
     return hashlib.sha256(Path(source).read_bytes() + b'\0' + ' '.join(sorted(flags)).encode()).hexdigest()
 
 
+WINE_METAL_BIN = 'C:\\metal\\ios\\bin\\'
+
+
+def wine_metal_env():
+    """The Wine environment for the Metal Developer Tools for Windows, or None when Wine or the installed tools are missing."""
+    prefix = os.environ.get('GPU_LOCAL_METAL_WINEPREFIX', '')
+    if not prefix or not (Path(prefix) / 'drive_c/metal/ios/bin/metal.exe').is_file() or not shutil.which('wine'):
+        return None
+    return dict(os.environ, WINEPREFIX=prefix, WINEDEBUG='-all')
+
+
+def wine_metallib(source, flags, out):
+    """Compile source to a metallib at out with metal.exe + metallib.exe under Wine (paths as Z: drive paths: the tools mishandle a bare
+    Unix output path)."""
+    env = wine_metal_env()
+    if env is None:
+        return False
+    air = Path(str(out) + '.air')
+    z = lambda path: 'Z:' + str(Path(path).resolve()).replace('/', '\\')
+    for cmd in (['wine', WINE_METAL_BIN + 'metal.exe', *flags, '-c', z(source), '-o', z(air)],
+                ['wine', WINE_METAL_BIN + 'metallib.exe', z(air), '-o', z(out)]):
+        if subprocess.run(cmd, env=env).returncode:
+            die('%s failed under Wine' % Path(cmd[1].replace('\\', '/')).name)
+    air.unlink()
+    return True
+
+
 def run_metal(argv):
     out = argv[argv.index('-o') + 1]
     sources = [a for a in argv if a.endswith('.metal')]
     flags = [a for a in argv if a.startswith(('-std=', '-mios-version-min=', '-O'))]
     if len(sources) != 1:
         die('expected one .metal source')
-    Path(out).write_text('GPU-LOCAL-AIR %s\n' % metal_key(sources[0], flags))
+    key = metal_key(sources[0], flags)
+    # A CI (Xcode) metallib for this source wins; otherwise build one with the Windows Metal tools, kept by key under <cache>/wine.
+    cache = Path(os.environ.get('GPU_LOCAL_METALLIB_CACHE', ''))
+    wine_lib = cache / 'wine' / (key + '.metallib')
+    if not (cache / (key + '.metallib')).is_file() and not wine_lib.is_file():
+        wine_lib.parent.mkdir(parents=True, exist_ok=True)
+        tmp = wine_lib.with_suffix('.tmp')
+        if wine_metallib(sources[0], flags, tmp):
+            tmp.rename(wine_lib)
+            sys.stderr.write('gpu-local metal: %s compiled with the Metal Developer Tools for Windows (no CI metallib for key %s)\n'
+                             % (Path(sources[0]).name, key[:16]))
+    Path(out).write_text('GPU-LOCAL-AIR %s\n' % key)
 
 
 def run_metallib(argv):
     out = argv[argv.index('-o') + 1]
     air = [a for a in argv if a.endswith('.air')][0]
     key = Path(air).read_text().split()[1]
-    cache = Path(os.environ.get('GPU_LOCAL_METALLIB_CACHE', '')) / (key + '.metallib')
-    if not cache.is_file():
-        die('no cached metallib for this .metal source (key %s); the Metal compiler is macOS-only: run the "GPU plugin (iOS 16)" CI for the '
-            'changed shader, then build-gpu-plugin-local.sh --seed-metallib RUN_ID' % key[:16])
-    shutil.copyfile(cache, out)
+    cache = Path(os.environ.get('GPU_LOCAL_METALLIB_CACHE', ''))
+    for lib in (cache / (key + '.metallib'), cache / 'wine' / (key + '.metallib')):
+        if lib.is_file():
+            shutil.copyfile(lib, out)
+            return
+    die('no metallib for this .metal source (key %s) and no Metal Developer Tools for Windows under Wine: run build-gpu-plugin-local.sh '
+        '--setup-metal-win, or the "GPU plugin (iOS 16)" CI for the changed shader and then --seed-metallib RUN_ID' % key[:16])
 
 
 # ---- xcrun ---------------------------------------------------------------------------------------------------------------------------

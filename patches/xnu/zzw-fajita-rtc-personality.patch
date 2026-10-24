@@ -1,0 +1,21 @@
+Add the FajitaRtc built-in personality: the PM8998 RTC driver (drivers/FajitaRtc) matches the
+/arm-io/rtc nub of the ADT (make-fajita-adt.py --rtc, compatible qcom,pm8941-rtc) and serves the
+wall clock as the IORTC resource. Unconditional, like the NativeDwc3 one: without the FajitaRtc
+archive IOKit finds no such class, and without the ADT node there is no nub to match. Applies after
+zzv-native-dwc3-personality.patch, whose block it follows; the kernel script reverses it first
+(LATE list of scripts/build-xnu-4k-baseline.sh).
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -106,4 +106,11 @@
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+     "     'IOProbeScore'    = 400:32;"
+     "   }"
++    "   ,{"
++    "     'IOClass'         = FajitaRtc;"
++    "     'IOMatchCategory' = FajitaRtc;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'qcom,pm8941-rtc';"
++    "     'IOProbeScore'    = 1000:32;"
++    "   }"
+     ")";

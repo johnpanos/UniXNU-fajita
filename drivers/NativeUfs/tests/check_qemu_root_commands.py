@@ -44,6 +44,8 @@ lib.ufs_test_store_open.argtypes = [C.c_uint64,C.c_uint64]
 lib.ufs_test_store_open.restype = C.c_uint32
 lib.ufs_test_log_open.argtypes = [C.c_uint64,C.c_uint64]
 lib.ufs_test_log_open.restype = C.c_uint32
+lib.ufs_test_rtc_open.argtypes = [C.c_uint64,C.c_uint64]
+lib.ufs_test_rtc_open.restype = C.c_uint32
 lib.ufs_test_write.argtypes = [C.c_uint8,C.c_uint64,C.c_uint32,C.c_void_p]
 lib.ufs_test_write.restype = C.c_uint32
 lib.ufs_test_sync.restype = C.c_uint32
@@ -190,6 +192,13 @@ with tempfile.TemporaryDirectory(prefix='ufs-qtest-') as td:
                 logblock = (C.c_uint8 * 4096)(*([0x6c] * 4096))
                 assert lib.ufs_test_write(0, 480, 1, logblock) == 0 and lib.ufs_test_write(0, 495, 1, logblock) == 0, 'Log window refused'
                 assert lib.ufs_test_sync() == 0
+                # RTC offset record window: at most two blocks, clear of the store and log windows.
+                assert lib.ufs_test_rtc_open(495, 2) == 0, 'RTC window overlapping the log window accepted'
+                assert lib.ufs_test_rtc_open(496, 3) == 0, 'RTC window of three blocks accepted'
+                assert lib.ufs_test_rtc_open(496, 2) == 1 and lib.ufs_test_rtc_open(496, 2) == 0, 'RTC window must open exactly once'
+                assert lib.ufs_test_write(0, 498, 1, block) == 0xe00002c2, 'Write past the RTC window accepted'
+                rtcblock = (C.c_uint8 * 8192)(*([0x72] * 8192))
+                assert lib.ufs_test_write(0, 496, 2, rtcblock) == 0, 'RTC window refused'
                 assert not lib.ufs_test_poisoned() and not errors, errors
                 results.append({'dma': hex(physical), 'nop': 'pass', 'power_query': value.value, 'store_window': 'pass',
                     'root_path': path_result, 'read_4k': 'pass', 'read_128k': 'pass', 'bad_lba_no_copy': 'pass'})
@@ -200,10 +209,11 @@ with tempfile.TemporaryDirectory(prefix='ufs-qtest-') as td:
 original = (out / 'disk.raw').read_bytes(); after = (out / 'disk-rw.raw').read_bytes()
 assert len(original) == len(after)
 changed = [i for i in range(len(original) // 4096) if original[i*4096:(i+1)*4096] != after[i*4096:(i+1)*4096]]
-assert changed and all(448 <= i < 496 for i in changed), f'Blocks outside the windows changed: {changed}'
+assert changed and all(448 <= i < 498 for i in changed), f'Blocks outside the windows changed: {changed}'
+assert after[496*4096:498*4096] == bytes([0x72]) * 8192
 assert after[480*4096:481*4096] == bytes([0x6c]) * 4096 and after[495*4096:496*4096] == bytes([0x6c]) * 4096
 assert after[479*4096:480*4096] == bytes([0x5a]) * 4096 and after[448*4096:449*4096] == bytes([0x5a]) * 4096
-results.append({'image_after': 'only blocks %d..%d of the two windows changed' % (changed[0], changed[-1])})
+results.append({'image_after': 'only blocks %d..%d of the three windows changed' % (changed[0], changed[-1])})
 report = {'qemu': version, 'pci_id': hex(pci_id), 'cap': hex(cap), 'version': hex(ver),
     'results': results, 'source_sha256': {str(f.relative_to(source.parent)): hashlib.sha256(f.read_bytes()).hexdigest()
         for f in [source.parent / 'RootDiagnostics.h', source.parent / 'RootCommands.h', source.parent / 'RootQueue.h', source.parent / 'RootTransportLayout.h', source.parent / 'TransferPoll.h', source / 'RootCommandsBridge.cpp', source / 'RootPathBridge.cpp', source / 'root_path_fixture.py', source.parent / 'RootLayout.h', source.parent / 'RootWindowRead.h']},

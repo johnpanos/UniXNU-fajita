@@ -3,7 +3,8 @@
 #
 # Runs UniXNU's own build scripts (build-turnip-darwin.py --target ios, build-adreno-metal-plugin.py with the bridge) unchanged, with the
 # Xcode tools replaced by scripts/gpu-local/tool.py: LLVM clang + ld64.lld against the CI's own iPhoneOS 18.5 SDK, rcodesign for the ad-hoc
-# 4 KiB signatures, and the scanout metallib (Apple's Metal compiler is macOS-only) taken from a CI artifact by the .metal source's hash.
+# 4 KiB signatures, and the scanout metallib taken from a CI artifact by the .metal source's hash or, for a shader the cache lacks,
+# compiled with Apple's Metal Developer Tools for Windows under Wine (--setup-metal-win).
 # The output directory has the CI artifact's layout (NativeAdrenoMetal.bundle, scanout_scale.metallib, adrenoprobed, plists, trust.json,
 # sources.txt, codesign.txt), so plugin-addon.sh / make-fajita-gpu-addon.py take it as they take a downloaded artifact.
 #
@@ -16,12 +17,14 @@
 #     --tools also builds the "GPU userland tools" CI artifact (gpu-tools.yml: ngpu-probe, ngpu-metal, ngpu-vk) into <out>-tools
 #   scripts/build-gpu-plugin-local.sh --fetch-sdk [RUN_ID]     # the encrypted SDK export (apple-sdk-export.yml) -> .cache/apple-sdk
 #   scripts/build-gpu-plugin-local.sh --seed-metallib RUN_ID   # a "GPU plugin (iOS 16)" run's metallib -> .cache/gpu-local/metallib
+#   scripts/build-gpu-plugin-local.sh --setup-metal-win        # install the newest .cache/metal-win/Metal_Developer_Tools*Windows.exe
+#     (Apple ID download from developer.apple.com) into the Wine prefix .cache/metal-win/prefix-<version>; needs wine
 # Defaults: --unixnu $UNIXNU or /home/john/src/UniXNU-ios16-stack-gpuuser, --out <UNIXNU>/build/gpu-plugin-local.
-# Never commit .cache/apple-sdk: it is Apple's SDK (gitignored).
+# Never commit .cache/apple-sdk or .cache/metal-win: they are Apple's SDK and tools (gitignored).
 set -euo pipefail
 BOARD=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 UNIXNU=${UNIXNU:-/home/john/src/UniXNU-ios16-stack-gpuuser}
-OUT= PACK= BASE= FETCH_SDK= SEED= TOOLS=
+OUT= PACK= BASE= FETCH_SDK= SEED= TOOLS= SETUP_MW=
 REPO=johnpanos/UniXNU-fajita
 while [ $# -gt 0 ]; do
   case $1 in
@@ -32,7 +35,8 @@ while [ $# -gt 0 ]; do
     --fetch-sdk) FETCH_SDK=1; shift; if [ $# -gt 0 ] && [[ $1 =~ ^[0-9]+$ ]]; then FETCH_SDK=$1; shift; fi ;;
     --seed-metallib) SEED=$2; shift 2 ;;
     --tools) TOOLS=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --setup-metal-win) SETUP_MW=1; shift ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -43,6 +47,9 @@ KEY=${SDK_TAR_KEY_FILE:-$HOME/.config/unixnu/sdk_tar_key}
 RCODESIGN_VERSION=0.29.0
 RCODESIGN=$CACHE/toolchain/apple-codesign-$RCODESIGN_VERSION-x86_64-unknown-linux-musl/rcodesign
 METALLIB_CACHE=$CACHE/gpu-local/metallib
+# The Metal Developer Tools for Windows: the newest installed prefix (3.1 is metalfe-31001.660; Xcode 16.4 is 32023.620).
+METAL_WIN=$CACHE/metal-win
+METAL_WINEPREFIX=${GPU_LOCAL_METAL_WINEPREFIX:-$(ls -d "$METAL_WIN"/prefix-* 2>/dev/null | sort -V | tail -1)}
 t0=$(date +%s.%N)
 stamp() { printf '[%6.1fs] %s\n' "$(echo "$(date +%s.%N) - $t0" | bc)" "$*"; }
 
@@ -61,6 +68,15 @@ if [ -n "$FETCH_SDK" ]; then
   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$KEY" -in "$tmp/sdk.tgz.enc" | tar -C "$SDKDIR" --warning=no-unknown-keyword -xzf -
   ID=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts" -q '.artifacts[0].id'); gh api -X DELETE "repos/$REPO/actions/artifacts/$ID"
   echo "SDK: $(sed -n 2,3p "$SDKDIR/versions.txt" | tr '\n' ' ') -> $SDKDIR (artifact deleted)"; exit 0
+fi
+if [ -n "$SETUP_MW" ]; then
+  command -v wine >/dev/null || { echo 'no wine: sudo dnf install wine' >&2; exit 1; }
+  INST=$(ls "$METAL_WIN"/Metal_Developer_Tools*Windows.exe 2>/dev/null | sort -V | tail -1)
+  [ -n "$INST" ] || { echo "no installer in $METAL_WIN: download Metal Developer Tools for Windows from developer.apple.com (Apple ID)" >&2; exit 1; }
+  V=$(basename "$INST" | sed -E 's/^Metal_Developer_Tools([0-9.]+)Windows\.exe$/\1/')
+  export WINEPREFIX=$METAL_WIN/prefix-$V WINEDEBUG=-all WINEDLLOVERRIDES='mscoree,mshtml='
+  wineboot -i >/dev/null 2>&1; wine "$INST" /S '/D=C:\metal' >/dev/null 2>&1
+  wine 'C:\metal\ios\bin\metal.exe' -v 2>&1 | head -1; echo "-> $WINEPREFIX"; exit 0
 fi
 if [ -n "$SEED" ]; then
   tmp=$(mktemp -d "$CACHE/seed.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
@@ -107,7 +123,7 @@ fi
 
 export PATH=$BOARD/scripts/gpu-local/bin:$HOME/.cargo/bin:$PATH
 export GPU_LOCAL_SDK=$SDKDIR/iPhoneOS.sdk GPU_LOCAL_CLANG_RT=$SDKDIR/toolchain/clang-rt/libclang_rt.ios.a GPU_LOCAL_RCODESIGN=$RCODESIGN
-export GPU_LOCAL_METALLIB_CACHE=$METALLIB_CACHE GPU_LOCAL_OBJ=$UNIXNU/build/gpu-local-obj
+export GPU_LOCAL_METALLIB_CACHE=$METALLIB_CACHE GPU_LOCAL_OBJ=$UNIXNU/build/gpu-local-obj GPU_LOCAL_METAL_WINEPREFIX=$METAL_WINEPREFIX
 export SDKROOT=$GPU_LOCAL_SDK CCACHE_BASEDIR=$UNIXNU CCACHE_NOHASHDIR=1
 export UNIXNU_IOS_TARGET=16.0 UNIXNU_TURNIP_REPLAY=0 UNIXNU_SCALELIB=1
 # The bridge's cc-built pieces (sha2 asm) target iOS through the same stand-ins.

@@ -1236,6 +1236,59 @@ extern "C" int native_ufs_export_write (uint64_t rel, uint32_t blocks, const voi
   return 1;
 }
 
+// ---- RTC offset record (FajitaRtc) ------------------------------------------------------------------------------
+// The PM8998 RTC is read-only to the apps processor, so the board keeps wall time as RTC seconds plus an offset, in two
+// 4096-byte blocks (alternate copies) just below the log's export region, inside the reserve at the end of userdata that the
+// Data store stays clear of. Same place for every board on this userdata (the iPad and iOS 16 entries share the RTC), and it
+// does not move with sheng-log-reserve. Reads need only the root layout; writable != 0 also opens the write window. Refused
+// unless the reserve holds the log, its export region and these blocks clear of the selected root image plus a 4 MiB guard.
+namespace {
+constexpr uint64_t kRtcBlocks = 2;
+uint64_t gRtcRecordFirst;
+bool gRtcRecordWritable;
+}
+
+// Returns 1 once the record's place is known (reads allowed), 0 while the root layout is not up or on refusal (*why).
+extern "C" int native_ufs_rtc_open (int writable, const char **why)
+{
+  const char *reason = "";
+  int ok = 0;
+  if (!gStoreGeometry.valid || !gHost.ready) reason = "no root layout";
+  else if (gRtcRecordFirst && (!writable || gRtcRecordWritable)) ok = 1;
+  else {
+    uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
+    const uint64_t below = kLogReserveBlocks + kExportBlocks + kRtcBlocks;
+    if (reserveBlocks () < below || partition <= below) reason = "reserve too small";
+    else if (partition - reserveBlocks () < imageBlocks + 1024) reason = "overlaps the root image";
+    else {
+      uint64_t first = gStoreGeometry.last + 1 - below;
+      if (writable && !hostRtcOpen (first, kRtcBlocks)) reason = "window refused";
+      else {
+        gRtcRecordFirst = first;
+        gRtcRecordWritable = writable != 0;
+        ok = 1;
+      }
+    }
+  }
+  if (why) *why = reason;
+  return ok;
+}
+
+// Slot 0 or 1, one 4096-byte block.
+extern "C" int native_ufs_rtc_read (unsigned slot, void *dst)
+{
+  if (!gRtcRecordFirst || slot >= kRtcBlocks || !dst) return 0;
+  return hostRead4k (0, gRtcRecordFirst + slot, 1, dst) == kIOReturnSuccess;
+}
+
+// Forced unit access: the block is on the medium when this returns 1.
+extern "C" int native_ufs_rtc_write (unsigned slot, const void *src)
+{
+  if (!gRtcRecordWritable || slot >= kRtcBlocks || !src) return 0;
+  return hostWrite4k (0, gRtcRecordFirst + slot, 1, src, true) == kIOReturnSuccess;
+}
+
 // Called once by the panic path before its last log round: later commands run lock-free (see hostEnter).
 extern "C" void native_ufs_panic_mode (void) { gPanicMode = true; }
 

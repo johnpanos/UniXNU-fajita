@@ -296,32 +296,53 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
 }
 
 // ---- Persistent store and log windows ------------------------------------------------------------------------------
-// The only place this driver writes. At most two windows of 4096-byte LBAs on LUN 0 (the Data store and the diagnostic log),
-// each opened once by its integration after it has proved that the window lies inside the userdata partition and clear of the
-// root image; every write is checked against them again here, so nothing outside them can be written even if a caller is wrong.
-static bool gStoreOpen = false, gLogOpen = false;
-static uint64_t gStoreFirst = 0, gStoreBlocks = 0, gLogFirst = 0, gLogBlocks = 0;
+// The only place this driver writes. At most three windows of 4096-byte LBAs on LUN 0 (the Data store, the diagnostic log and the
+// two-block RTC offset record), each opened once by its integration after it has proved that the window lies inside the userdata
+// partition and clear of the root image; every write is checked against them again here, so nothing outside them can be written
+// even if a caller is wrong.
+static bool gStoreOpen = false, gLogOpen = false, gRtcOpen = false;
+static uint64_t gStoreFirst = 0, gStoreBlocks = 0, gLogFirst = 0, gLogBlocks = 0, gRtcFirst = 0, gRtcBlocks = 0;
+
+static bool hostOverlaps (bool open, uint64_t a, uint64_t aBlocks, uint64_t b, uint64_t bBlocks)
+{
+  return open && b < a + aBlocks && a < b + bBlocks;
+}
 
 static bool hostLogOpen (uint64_t first, uint64_t blocks)
 {
   if (gLogOpen || !blocks || first > 0xffffffffULL || blocks > 0xffffffffULL - first) return false;
-  if (gStoreOpen && first < gStoreFirst + gStoreBlocks && gStoreFirst < first + blocks) return false;
+  if (hostOverlaps (gStoreOpen, gStoreFirst, gStoreBlocks, first, blocks) ||
+      hostOverlaps (gRtcOpen, gRtcFirst, gRtcBlocks, first, blocks)) return false;
   gLogFirst = first;
   gLogBlocks = blocks;
   gLogOpen = true;
   return true;
 }
 
+// The RTC offset record (FajitaRtc): at most 2 blocks, clear of the other windows.
+static bool hostRtcOpen (uint64_t first, uint64_t blocks)
+{
+  if (gRtcOpen || !blocks || blocks > 2 || first > 0xffffffffULL - blocks) return false;
+  if (hostOverlaps (gStoreOpen, gStoreFirst, gStoreBlocks, first, blocks) ||
+      hostOverlaps (gLogOpen, gLogFirst, gLogBlocks, first, blocks)) return false;
+  gRtcFirst = first;
+  gRtcBlocks = blocks;
+  gRtcOpen = true;
+  return true;
+}
+
 static bool hostInWindow (uint64_t lba, uint32_t blocks)
 {
   if (gStoreOpen && lba >= gStoreFirst && lba - gStoreFirst < gStoreBlocks && blocks <= gStoreBlocks - (lba - gStoreFirst)) return true;
+  if (gRtcOpen && lba >= gRtcFirst && lba - gRtcFirst < gRtcBlocks && blocks <= gRtcBlocks - (lba - gRtcFirst)) return true;
   return gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks && blocks <= gLogBlocks - (lba - gLogFirst);
 }
 
 static bool hostStoreOpen (uint64_t first, uint64_t blocks)
 {
   if (gStoreOpen || !blocks || first > 0xffffffffULL || blocks > 0xffffffffULL - first) return false;
-  if (gLogOpen && first < gLogFirst + gLogBlocks && gLogFirst < first + blocks) return false;
+  if (hostOverlaps (gLogOpen, gLogFirst, gLogBlocks, first, blocks) ||
+      hostOverlaps (gRtcOpen, gRtcFirst, gRtcBlocks, first, blocks)) return false;
   gStoreFirst = first;
   gStoreBlocks = blocks;
   gStoreOpen = true;
