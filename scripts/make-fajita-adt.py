@@ -113,6 +113,9 @@ def main():
                         help='/chosen/memory-map RAMDisk placeholder; the loader fills in the real range for a scratch Data seed')
     parser.add_argument('--persistent-data', action='store_true',
                         help='The Data disk keeps its writes across boots (sheng-data-persist): no ephemeral-storage, so first-boot data migration runs')
+    parser.add_argument('--rtc', action='store_true',
+                        help='/arm-io/rtc: the PM8998 RTC (pm8998.dtsi rtc@6000, SID 0) for FajitaRtc; device_type rtc makes ArmDTPlatform wait '
+                             'for the IORTC resource before the calendar starts')
     parser.add_argument('--trust-cache', action='store_true', help='Zeroed TrustCache sidecar handoff placeholder')
     parser.add_argument('--gpu-addon', action='store_true', help='Zeroed GpuAddon sidecar handoff placeholder (the loader fills in kernel.macho.gpuaddon)')
     parser.add_argument('--board-args', default='',
@@ -229,7 +232,10 @@ def main():
                             ('reg', struct.pack('<4Q',
                                                 GIC_DIST - ARMIO_BASE, GIC_DIST_SIZE,
                                                 GIC_REDIST - ARMIO_BASE, GIC_REDIST_SIZE)),
-                            ('redistributor-stride', struct.pack('<Q', GIC_REDIST_STRIDE))])])
+                            ('redistributor-stride', struct.pack('<Q', GIC_REDIST_STRIDE))]),
+              # No reg: the RTC sits behind the SPMI arbiter, at spmi-base of PMIC slave spmi-sid.
+              *([node('rtc', [('compatible', b'qcom,pm8941-rtc\0'), ('device_type', b'rtc\0'),
+                              ('spmi-sid', struct.pack('<I', 0)), ('spmi-base', struct.pack('<I', 0x6000))])] if args.rtc else [])])
 
     ])
     args.output.parent.mkdir(parents=True, exist_ok=True)
