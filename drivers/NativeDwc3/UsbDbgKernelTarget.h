@@ -44,8 +44,9 @@ int pmap_valid_address(uint64_t addr);           // osfmk/arm/pmap/pmap.h (boole
 #if defined(__aarch64__)
 int boot_reset_bootloader(char *text, unsigned cap) __attribute__((weak_import));   // package/BootReset.c: PSCI SYSTEM_RESET
 #define USBDBGK_HAVE_RESET (&boot_reset_bootloader != nullptr)
-#else   // host tests define it
+#else   // host tests define them
 int boot_reset_bootloader(char *text, unsigned cap);
+void panic(const char *fmt, ...);
 #define USBDBGK_HAVE_RESET true
 #endif
 volatile uint32_t native_dwc3_mmio_maps = 0, native_dwc3_kcmds = 0, native_dwc3_mmio_refused = 0;
@@ -253,8 +254,26 @@ static int32_t reset(void *, uint32_t)
   gResetCountdown = 30;   // about 30 ms of 1 ms polls
   return usbdbg::kOk;
 }
+// panic (op panic, a write: usb-debug>=2): a deliberate panic for testing the panic path (screen, BootLog, USB drain). Like reset,
+// it is raised from the poll thread a few polls after the reply went out.
+static volatile uint32_t gPanicCountdown;
+static char gPanicText[128];
+static int32_t raisePanic(void *, const char *text, size_t len)
+{
+  size_t n = len < sizeof gPanicText - 1 ? len : sizeof gPanicText - 1;
+  for (size_t i = 0; i < n; i++) gPanicText[i] = text[i];
+  gPanicText[n] = 0;
+  gPanicCountdown = 30;
+  return usbdbg::kOk;
+}
+
 static void pollReset()
 {
+  uint32_t pleft = gPanicCountdown;
+  if (pleft) {
+    gPanicCountdown = pleft - 1;
+    if (pleft == 1) panic("fjdbg: %s", gPanicText);
+  }
   uint32_t left = gResetCountdown;
   if (!left) return;
   gResetCountdown = left - 1;
@@ -276,6 +295,7 @@ static void fill(usbdbg::Target &t, bool writes)
   t.writeVirt = writeVirt;
   t.kcmd = kcmd;
   t.reset = reset;
+  t.raisePanic = raisePanic;
 }
 
 }  // namespace usbdbgk

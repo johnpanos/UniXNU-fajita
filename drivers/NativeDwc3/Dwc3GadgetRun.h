@@ -87,6 +87,7 @@ public:
   void poll();                     // drain the event buffer once
   void pumpLog();                  // mirror new kernel-log bytes to the host
   void kickTx();                   // poll thread: start the next bulk-IN transfer if idle
+  void panicDrain(const char *text);   // panic path: last queued frames plus the panic text, lock-free, bounded
   bool eventsPending() const { return m.core && (m.core_rd(kDwc3GEVNTCOUNT0) & 0xffff) != 0; }
   // any thread; seq < 0 stamps the next device sequence number, a reply passes the request's seq to echo it
   bool queueFrame(uint8_t channel, const uint8_t *data, size_t len, uint32_t keepFree = 0, int seq = -1);
@@ -506,6 +507,58 @@ inline void Gadget::onBulkInDone()
   native_dwc3_in_xfers = native_dwc3_in_xfers + 1;
   inFlight = false;
   native_dwc3_in_flight = 0;
+}
+
+// The panic path, with interrupts masked and the other CPUs stopped (BootLog's boot_log_panic_flush calls it first): wait for
+// the bulk-IN transfer in flight, then send what is still queued (whole frames, so the kernel log up to the panic) and the
+// panic text as console text, which the hub appends to usb-console.txt. No locks, no event buffer: the poll thread may have
+// stopped anywhere. Bounded to about 0.5 s + 1 s + 1 s before the panic screen's reset.
+inline bool panicWaitTrb(Trb *t, int us)
+{
+  for (int i = 0; i < us / 100; i++) {
+    cache_flush(t, sizeof *t);
+    if (!(t->ctrl & kDwc3TrbHwo)) return true;
+    IODelay(100);
+  }
+  cache_flush(t, sizeof *t);
+  return !(t->ctrl & kDwc3TrbHwo);
+}
+
+inline void Gadget::panicDrain(const char *text)
+{
+  if (!bulkStarted || !txRing || !text) return;
+  Trb *t = dma.trb(GadgetDma::kBulkInTrb);
+  if (inFlight) {
+    if (!panicWaitTrb(t, 500000)) return;   // the controller still owns the buffer
+    txTail += inFlightLen;
+    inFlight = false;
+  }
+  uint8_t *out = dma.at(GadgetDma::kBulkInData);
+  for (int pass = 0; pass < 2; pass++) {
+    uint32_t n = 0;
+    if (pass == 0) {   // whole frames still queued: the log lines just before the panic
+      uint32_t avail = txHead - txTail;
+      n = avail < kTxChunk ? avail : kTxChunk;
+      for (uint32_t i = 0; i < n; i++) out[i] = txRing[(txTail + i) & (kTxRing - 1)];
+      txTail += n;
+    } else {
+      static const char head[] = "\n*** PANIC: ";
+      for (uint32_t i = 0; head[i] && n < kTxChunk - 2; i++) out[n++] = uint8_t(head[i]);
+      for (uint32_t i = 0; text[i] && i < 256 && n < kTxChunk - 2; i++) out[n++] = uint8_t(text[i]);
+      out[n++] = '\n';
+    }
+    if (!n) continue;
+    if (n % 512 == 0) out[n++] = pass ? '\n' : 0;   // never an exact multiple of the max packet (no short packet)
+    cache_flush(out, n);
+    t->bpl = uint32_t(dma.pa(GadgetDma::kBulkInData));
+    t->bph = uint32_t(dma.pa(GadgetDma::kBulkInData) >> 32);
+    t->size = n;
+    t->ctrl = kDwc3TrbCtlNormal | kDwc3TrbHwo | kDwc3TrbIoc | kDwc3TrbLst;
+    cache_flush(t, sizeof *t);
+    if (depCmd(m, kPBulkIn, kDwc3DepCmdStartXfer, uint32_t(dma.pa(GadgetDma::kBulkInTrb) >> 32), uint32_t(dma.pa(GadgetDma::kBulkInTrb)), 0) != 0)
+      return;
+    if (!panicWaitTrb(t, 1000000)) return;
+  }
 }
 
 inline void Gadget::onBulkOut(uint32_t remaining)

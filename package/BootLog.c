@@ -22,6 +22,7 @@ extern uint64_t native_ufs_export_blocks(void) __attribute__((weak_import));
 extern int native_ufs_export_write(uint64_t, uint32_t, const void *) __attribute__((weak_import));
 extern int native_ufs_log_sync(void) __attribute__((weak_import));
 extern void native_ufs_panic_mode(void) __attribute__((weak_import));
+extern void native_dwc3_panic_drain(const char *) __attribute__((weak_import));
 extern unsigned native_ufs_store_gpt_check(void) __attribute__((weak_import));
 extern uint32_t cs_text_fixup_parsed __attribute__((weak_import));
 extern uint32_t cs_text_fixup_applied __attribute__((weak_import));
@@ -948,6 +949,8 @@ static void writer(void *arg, wait_result_t result) {
 // copied to boot_progress_panic_text): one last slot with the panic text, the message buffer and the header (state 5), then a cache sync,
 // all through NativeUfs's lock-free panic mode. Nothing that takes a lock runs here; a command in flight makes it give up.
 void boot_log_panic_flush(void) {
+  // USB first, so the host sees the panic even when the UFS write below fails (NativeDwc3's lock-free drain)
+  if (&native_dwc3_panic_drain && &boot_progress_panic_text) native_dwc3_panic_drain(boot_progress_panic_text);
   struct boot_log_header *h = boot_log_live;
   if (!h || !boot_log_buffer || !boot_log_slot_count || !&native_ufs_panic_mode) return;
   native_ufs_panic_mode();

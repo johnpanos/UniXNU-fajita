@@ -16,6 +16,7 @@ boot_ui_trace_rows
 boot_ui_trace_snapshot
 fajita_cpufreq_rows
 fajita_pmic_poll
+native_dwc3_panic_drain
 fajita_touch_rows
 native_adreno_audit_attr
 native_button_set_sink
