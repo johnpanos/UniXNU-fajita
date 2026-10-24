@@ -20,7 +20,16 @@ int main(int argc, char **argv) {
 		NSString *cmd = argc > 1 ? @(argv[1]) : @"list";
 		Class W = NSClassFromString(@"LSApplicationWorkspace");
 		id ws = [W performSelector:@selector(defaultWorkspace)];
-		if ([cmd isEqual:@"mi"]) {
+		if ([cmd isEqual:@"mkt"]) {
+			dlopen("/System/Library/PrivateFrameworks/InstalledContentLibrary.framework/InstalledContentLibrary", RTLD_NOW);
+			NSURL *u = [NSURL fileURLWithPath:@(argv[2]) isDirectory:YES];
+			NSURL *t = [u URLByAppendingPathComponent:@"temp.XXXXXX" isDirectory:YES];
+			printf("fsrep %s path %s\n", [t fileSystemRepresentation], [[t path] UTF8String]);
+			id fm = [NSClassFromString(@"MIFileManager") performSelector:NSSelectorFromString(@"defaultManager")];
+			NSError *e = nil;
+			id r = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(fm, NSSelectorFromString(@"createTemporaryDirectoryInDirectoryURL:error:"), u, &e);
+			printf("createTemporaryDirectoryInDirectoryURL -> %s err %s\n", [[r description] UTF8String], [[e description] UTF8String]);
+		} else if ([cmd isEqual:@"mi"]) {
 			int (*inst)(CFStringRef, CFDictionaryRef, void *, void *) = dlsym(mi, "MobileInstallationInstall");
 			printf("MobileInstallationInstall %p\n", inst);
 			int r = inst((__bridge CFStringRef)@(argv[2]), (__bridge CFDictionaryRef)@{@"PackageType": @"Developer"}, cb, NULL);
