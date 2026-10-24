@@ -33,6 +33,16 @@ int main(int c, char **v) {
 	if (c > 2 && !strcmp(v[1], "rmr")) { rmr(v[2]); return 0; }
 	if (c > 2 && !strcmp(v[1], "mk")) { char b[1024]; strlcpy(b, v[2], sizeof b); for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0755); *s = '/'; } int r = mkdir(b, 0755); if (c > 4) { chown(b, atoi(v[3]), atoi(v[4])); for (char *s = b + 1; *s; s++) {} } printf("mkdir -> %d\n", r); return 0; }
 	if (c > 3 && !strcmp(v[1], "tmpd")) { if (atoi(v[3])) { setgid(atoi(v[3])); setuid(atoi(v[3])); } char b[1024]; snprintf(b, sizeof b, "%s/temp.XXXXXX%s", v[2], c > 4 ? "/" : ""); char *r = mkdtemp(b); printf("mkdtemp %s -> %s errno %d uid %d\n", b, r ? r : "NULL", errno, getuid()); if (r) rmdir(r); return 0; }
+	if (c > 3 && !strcmp(v[1], "unpack")) { // unpack ARCHIVE DESTDIR
+		FILE *f = fopen(v[2], "rb"); if (!f) { printf("cannot open archive\n"); return 1; }
+		char kind; unsigned mode, size, plen; int nf = 0, nd = 0, bad = 0;
+		while (fscanf(f, "%c %o %u %u\n", &kind, &mode, &size, &plen) == 4) {
+			char rel[1024], path[2048]; if (plen >= sizeof rel || fread(rel, 1, plen, f) != plen) break; rel[plen] = 0;
+			snprintf(path, sizeof path, "%s/%s", v[3], rel);
+			if (kind == 'D') { char b[2048]; strlcpy(b, path, sizeof b); for (char *q = b + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(b, 0755); *q = '/'; } mkdir(b, 0755); chmod(b, mode); nd++; }
+			else { char *buf = malloc(size ? size : 1); if (fread(buf, 1, size, f) != size) { bad++; break; } FILE *o = fopen(path, "wb"); if (!o) bad++; else { fwrite(buf, 1, size, o); fclose(o); chmod(path, mode); nf++; } free(buf); }
+		}
+		printf("unpacked %d files %d dirs, %d failed\n", nf, nd, bad); return 0; }
 	if (c > 4 && !strcmp(v[1], "chown")) { printf("chown -> %d\n", chown(v[2], atoi(v[3]), atoi(v[4]))); return 0; }
 	if (c > 2 && !strcmp(v[1], "cat")) { FILE *f = fopen(v[2], "r"); int ch; while (f && (ch = fgetc(f)) != EOF) putchar(ch); return 0; }
 	int a = c > 1 && !strcmp(v[1], "ls"); walk(v[1 + a], 0, c > 2 + a ? atoi(v[2 + a]) : 0); return 0;
