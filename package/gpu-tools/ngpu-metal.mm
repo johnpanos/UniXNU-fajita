@@ -7,6 +7,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #include <signal.h>
 // libproc (no header in the iPhoneOS SDK; the functions are in libSystem)
 extern "C" int proc_listallpids(void *buffer, int buffersize);
@@ -45,6 +46,26 @@ int main(int argc, char **argv) {
             }
             printf("%d killed\n", killed);
             return killed ? 0 : 1;
+        }
+        if (argc > 1 && !strcmp(argv[1], "constants")) {
+            // The private accessors of MTLFunctionConstantValues the native frontend reads: classes and type encodings on this OS.
+            MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
+            bool b = true; uint32_t u = 7;
+            [values setConstantValue:&b type:MTLDataTypeBool withName:@"fc_generic"];
+            [values setConstantValue:&u type:MTLDataTypeUInt atIndex:3];
+            auto show = [](id object, const char *selector) {
+                Method m = class_getInstanceMethod(object_getClass(object), sel_registerName(selector));
+                printf("  %s %s: %s\n", class_getName(object_getClass(object)), selector, m ? method_getTypeEncoding(m) : "(none)");
+            };
+            show(values, "newIndexedConstantArray");
+            show(values, "newNamedConstantArray");
+            for (const char *sel : {"newIndexedConstantArray", "newNamedConstantArray"}) {
+                if (![values respondsToSelector:sel_registerName(sel)]) continue;
+                NSArray *array = ((NSArray * (*)(id, SEL))objc_msgSend)(values, sel_registerName(sel));
+                printf("%s -> %s count %lu\n", sel, class_getName(object_getClass(array)), (unsigned long)array.count);
+                for (id v in array) {show(v, "dataType"); show(v, "data"); show(v, "index"); show(v, "name");}
+            }
+            return 0;
         }
         if (argc > 1 && !strcmp(argv[1], "ps")) {
             static int pids[4096];
