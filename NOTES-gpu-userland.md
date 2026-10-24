@@ -212,3 +212,38 @@ scripts/fajita/test/rows.py (readv of native_adreno_metal_rows).
 2. The scanout path on fajita (NativeLegacyDisplay) for GPU-rendered frames.
 3. Stage 10/11 early in boot (stage 10 hung at ~51 s uptime), so backboardd finds the device without a restart.
 4. GetTimestamp inside a GMU OOB_PERFCOUNTER pair; the BO pool size.
+
+## Frame trace and the worst frames (2026-10-24)
+
+Per-frame timing of the render server's Metal stream, off by default (NativeMetal `FrameTrace.h`):
+
+```sh
+printf 'NGPU_FRAME_TRACE=1\n' > .cache/fajita-work/gpu-env-trace
+scripts/fajita/test/session.sh push .cache/fajita-work/gpu-env-trace /private/var/ngpu/gpu-env 644
+scripts/fajita/test/session.sh run /usr/sbin/ngpu-metal killall backboardd      # the new backboardd opens its device with the trace on
+scripts/fajita/test/fps.sh
+# the file: the "X frametrace PATH" line of /private/var/mobile/Library/Caches/com.apple.backboardd/m2v/pipelines.log
+scripts/fajita/test/session.sh pull /var/mobile/Library/Caches/com.apple.backboardd/m2v/frametrace/backboardd-PID.csv .cache/fajita-work/ft.csv
+python3 tools/gpu/frametrace.py .cache/fajita-work/ft.csv          # distribution, worst frames, ranked causes (worst vs median)
+```
+
+Lines: `C` per command buffer (made, commit, commit returned, translator kernel and GPU times, completion, work counts, pipeline
+creation / waits / flushes while it was encoded), `W` waits, `P` pipeline/library/function creation, `S` per scanout swap (wait, offer,
+copy returned, completed). The presenter's queue is labelled `ngpu.present`. GPU times are the translator's timestamps (uncalibrated on
+Turnip: the duration is exact, the end is the completion seen). Per-pass GPU time: `MESA_GPU_TRACES=print_csv` and
+`MESA_GPU_TRACEFILE=/var/mobile/Library/Caches/com.apple.backboardd/m2v/utrace.csv` in gpu-env, one swipe, then the plain gpu-env back
+and the file pulled (1.5 MB a swipe), `scripts/fajita/test/passes.py`. Command capture for replay: `NGPU_CAPTURE=1 NGPU_CAPTURE_FRAMES=N`
+(PipelineCapture.h; pull and replay with metal2vulkan m2v-census `scripts/pipeline-census/fajita-pull`, command-replay).
+
+Findings (stack eded357, frame trace of 429 frames, u_trace of 135 frames):
+- Frames are GPU-bound: the CA command buffer takes 27 ms of GPU, the presenter's scale 7.9 ms, back to back (median frame 35.6 ms).
+  The GPU runs at 710 MHz during swipes (perf.py); SP is ~100% busy.
+- Worst frames add CPU time on top: encode (incl. pipeline creation, up to 30 ms), the CPU gap before encoding, and the
+  commit (vkQueueSubmit, ~6 ms a frame).
+- u_trace per presented frame (22 ms): presenter scale 7.86 ms, CA full-screen pass 7.6 ms, shadow copy-ins (copy_buffer_to_image,
+  BGRA surfaces 0.7-2.8 ms each) 4.2 ms, copy backs 1.0 ms.
+
+Fixes:
+- `scanout_scale4v` (NGPU_SCALE4V=0 opts out): 16-byte source and tap loads, scale 7.86 -> 3.70 ms; GPU 22.0 -> 19.0 ms a frame.
+- NGPU_XR_AS_F16 left IOSurface-backed XR attachments with RGBA16Float pipelines: those passes refused their command buffers
+  (App Library backdrop black). Pipelines now make a variant per combination of attachments a pass keeps XR on.
