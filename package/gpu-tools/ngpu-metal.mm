@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include <initializer_list>
 #include <signal.h>
 // libproc (no header in the iPhoneOS SDK; the functions are in libSystem)
 extern "C" int proc_listallpids(void *buffer, int buffersize);
