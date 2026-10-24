@@ -188,8 +188,13 @@ class Hub:
             limit = time.time() + timeout
             for i in range(0, len(data), 512):
                 self.shell_send([b'@d ' + data[i:i + 512].hex().encode()], marker)
-                if (i // 512) % 4 == 3 and not self.shell_wait(marker, rb'fjdbg: k %d\n' % min(len(data), i + 512), limit):
-                    return {'ok': False, 'out': 'push: no ack at %d bytes\n' % (i + 512)}
+                if (i // 512) % 4 == 3:
+                    # the agent acks every data line; a create failure (missing directory, read-only path) ends the exchange
+                    r = self.shell_wait(marker, rb'fjdbg: k %d\n|fjdbg: put: [^\n]*\n' % min(len(data), i + 512), limit)
+                    if not r:
+                        return {'ok': False, 'out': 'push: no ack at %d bytes\n' % (i + 512)}
+                    if b'put: ' in r[1].group(0):
+                        return {'ok': False, 'out': r[1].group(0).decode(errors='replace')}
             self.shell_send([b'@end %08x' % zlib.crc32(data)], marker)
             body = self.shell_collect(marker, limit)
             if body is None:
