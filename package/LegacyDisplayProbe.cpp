@@ -478,6 +478,24 @@ __attribute__((noreturn,noinline)) void native_legacy_backend_guard(unsigned slo
       (unsigned)native_legacy_transfer_status,native_legacy_transfer_bytes,native_legacy_retirement_calls,
       native_legacy_prepare_reason,native_legacy_prepare_attempts);
 }
+// A display API miss must never take the phone down. The guarded leaves are the abstract slots of IOMobileFramebufferLegacy that a
+// platform subclass fills in; the render server reached one (slot 329 in 20H392 is the diagnostic call made after "swap_wait_gated:
+// CommandWake didn't happen even after 5 seconds", i.e. when backboardd was restarted with a swap in flight, session-084109). Log it
+// loudly (the first 50 misses, then every 1000th) and let the leaf return kIOReturnUnsupported; native-legacy-guard-panic=1 restores
+// the old panic for bring-up.
+volatile uint32_t native_legacy_guard_misses;
+volatile uint32_t native_legacy_guard_last_slot;
+void native_legacy_backend_miss(unsigned slot,void *object,void *caller);
+void native_legacy_backend_miss(unsigned slot,void *object,void *caller) {
+    static int panicMode=-1;
+    if(panicMode<0){unsigned v=0;PE_parse_boot_argn("native-legacy-guard-panic",&v,sizeof v);panicMode=v==1;}
+    if(panicMode)native_legacy_backend_guard(slot,object,caller);
+    native_legacy_guard_last_slot=slot;
+    const uint32_t n=native_legacy_guard_misses+1;native_legacy_guard_misses=n;
+    if(n<=50 || n%1000==0)
+        IOLog("NativeLegacyDisplay: UNIMPLEMENTED SLOT %u called from %llx (miss %u, stage %u PM %u swap %u/%u): returning kIOReturnUnsupported\n",
+              slot,(uint64_t)(uintptr_t)caller,n,native_legacy_stage,native_legacy_pm_stage,native_legacy_swap_validation_result,native_legacy_swap_validation_reason);
+}
 void native_legacy_display_probe(void);
 void native_legacy_display_probe(void) {
     // The registration path and optional original-userclient inspection both
