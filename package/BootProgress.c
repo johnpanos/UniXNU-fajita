@@ -650,12 +650,16 @@ void boot_progress_exit(int pid,const char *name,int status,unsigned ns,uint64_t
   }
   bp_exit_add(&exit_records,pid,name,status,ns,code);
   unsigned signal=(unsigned)status&127;
-  if(signal>=3 && signal<=12 && signal!=9 && boot_progress_exit_fault)
+  if(signal>=3 && signal<=12 && signal!=9 && boot_progress_exit_fault) {
     boot_progress_exit_fault(pid,signal,exit_records.crash[(exit_records.crashes-1)%3],400);
+    // Also in the live kernel log (the USB console): the crash row, so a crash loop is attributable without the UFS log.
+    printf("CRASH %.400s\n",exit_records.crash[(exit_records.crashes-1)%3]);
+  }
   if(signal==6 && boot_progress_exit_reason) {
     if(&boot_progress_throw_text)boot_progress_throw_text[0]=0;
     boot_progress_exit_reason(pid,signal,exit_records.reason,sizeof(exit_records.reason));
     if(&boot_progress_throw_text && boot_progress_throw_text[0])strlcpy(exit_records.thrown,boot_progress_throw_text,sizeof(exit_records.thrown));
+    printf("ABORT %s reason %.300s | %.300s\n",name?name:"?",exit_records.reason,exit_records.thrown);
   }
   __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
 }
