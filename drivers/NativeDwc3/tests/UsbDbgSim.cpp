@@ -89,7 +89,32 @@ int main(int argc, char **argv)
     if (n <= 0) return 0;
     for (ssize_t i = 0; i < n; i++) {
       if (d.feed(buf[i]) != Decoder::kFrame) continue;
-      if (d.channel() == kChCmd) {
+      if (d.channel() == kChCmd && d.length() >= 2 && getLe16(d.data()) == kOpShot) {
+        // A synthetic 300x7 BGR frame (pixel R,G,B = (7x+y, x+3y, x^y) & 255), in whole-pixel FILE frames like the
+        // gadget's; the first frame goes out before the reply, as it can on the device.
+        const uint32_t w = 300, h = 7, total = w * h * 3, per = (kMaxData - 8) / 3 * 3;
+        static uint8_t img[w * h * 3];
+        for (uint32_t y = 0; y < h; y++)
+          for (uint32_t x = 0; x < w; x++) {
+            uint8_t *px = img + (y * w + x) * 3;
+            px[0] = uint8_t(x ^ y); px[1] = uint8_t(x + y * 3); px[2] = uint8_t(x * 7 + y);
+          }
+        auto frame = [&](uint32_t off) {
+          static uint8_t data[kMaxData];
+          uint32_t n = total - off < per ? total - off : per;
+          putLe32(data, 1); putLe32(data + 4, off);
+          memcpy(data + 8, img + off, n);
+          emit(kChFile, 0, data, 8 + n);
+          return n;
+        };
+        uint32_t off = frame(0);
+        alignas(4) uint8_t r[40];
+        putLe16(r, uint16_t(kOpShot | kOpReplyBit)); putLe16(r + 2, 0); putLe32(r + 4, 0);
+        putLe32(r + 8, 1); putLe32(r + 12, w); putLe32(r + 16, h); putLe32(r + 20, 3);
+        putLe64(r + 24, total); putLe32(r + 32, 2); putLe32(r + 36, w * 8);
+        emit(kChRsp, d.seq(), r, sizeof r);
+        while (off < total) off += frame(off);
+      } else if (d.channel() == kChCmd) {
         size_t len = handleCommand(t, d.data(), d.length(), rsp);
         emit(kChRsp, d.seq(), rsp, len);
       } else if (d.channel() == kChShell) {
