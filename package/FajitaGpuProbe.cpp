@@ -543,8 +543,59 @@ bool stage9()
     return matched == 1023;
 }
 
+// ---- stage 10: publish the user-client service (NativeAdrenoGpuPublished) --------------------------------------------
+// The device info the userland agent's Turnip backend reads (NativeAdrenoABI.h v1): the A630 identity and the render
+// server's GPU address window. chip_id is the msm/kgsl form 0x06030002 (not the GMU-massaged value); gmem is 1 MiB at
+// 0x100000 (= UCHE_GMEM_RANGE_MIN); the UBWC fields match A630Gpu.c's a6xx_calc_ubwc_config defaults; flags are IOVA-only
+// (A630 BOs are not IO-coherent). The window is 1 GiB at 0x20000000, inside the 2 GiB GPU context aperture and clear of the
+// GMEM window at 1-2 MiB.
+extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
+    const void *timer, const void *info, uint32_t input_bits, uint32_t output_bits) __attribute__((weak));
+extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed) __attribute__((weak));
+// NativeAdrenoSubmit and NativeAdrenoTimer are opaque here; the board keeps raw storage sized from the headers and the
+// service objects outlive the system. Their attach is done through the C++ objects in NativeAdrenoPublish's own translation
+// unit, so here we only pass VM/ring/clock and the timer I/O the publish wires up.
+#include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoTimer.h"
+static NativeAdrenoSubmit gSubmit;
+static NativeAdrenoTimer gTimer;
+static NativeAdrenoTimeIo gTimerIo;
+static int timerRead(void *, uint32_t reg, uint32_t *value) {*value = gpuRd(reg); return 0;}
+static const NativeAdrenoAbiDeviceInfo gDeviceInfo = {
+    0x06030002u,            // chip_id (msm/kgsl form)
+    0x100000u,              // gmem_bytes (1 MiB)
+    0x100000ull,            // gmem_base (= UCHE_GMEM_RANGE_MIN)
+    0x1fffffffff000ull,     // uche_trap_base
+    0x20000000ull,          // va_start (render server window)
+    0x40000000ull,          // va_size (1 GiB, inside the 2 GiB aperture)
+    15u,                    // highest_bank_bit
+    6u,                     // ubwc_swizzle (levels 1+2)
+    0u,                     // macrotile_mode (four channel)
+    2u,                     // ubwc_version (UBWC 2.0)
+    NativeAdrenoDeviceClientIova,
+    0u};
+bool stage10()
+{
+    if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
+    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm ? NativeAdrenoGpuContextVm() : nullptr;
+    if (!vm) {gpuLog("S10 no vm"); return false;}
+    const IOReturn attached = gSubmit.attach(vm, &gRing);
+    if (attached) {gpuLog("S10 submit attach %x", attached); return false;}
+    gTimerIo = NativeAdrenoTimeIo{nullptr, timerRead};
+    const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
+    // input_bits 32 (the GPU SMMU context is a 32-bit input lower region over the 2 GiB aperture); output_bits from ID2.OAS
+    // (36 on this SMMU, reported by the context bring-up).
+    const uint32_t output_bits = gGpuCtx.output_bits ? gGpuCtx.output_bits : 40;
+    const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &kClock, timer ? nullptr : &gTimer, &gDeviceInfo,
+                                                     32, output_bits);
+    uint32_t closed = 0, opened = native_adreno_publish_stats ? native_adreno_publish_stats(&closed) : 0;
+    gpuLog("S10 publish %x timer %x output_bits %u opened %u closed %u", published, timer, output_bits, opened, closed);
+    if (!published) gpuLog("S10 NativeAdrenoGpu service registered (open type 0); userland may probe it");
+    return published == kIOReturnSuccess;
+}
+
 // ---- runner -------------------------------------------------------------------------------------------------------------
-bool (*const kStages[])() = {nullptr, stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9};
+bool (*const kStages[])() = {nullptr, stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10};
 constexpr unsigned kLastStage = sizeof kStages / sizeof *kStages - 1;
 volatile uint32_t gTarget;
 
