@@ -41,6 +41,14 @@ def macho(path):
             'entitlements': ents, 'signature_valid': problems or True}
 
 
+# Imports that only one compiler/linker emits, for the same source: Apple clang 17's register-variant and fused ObjC ARC entry points
+# (objc_retain_xN/objc_release_xN, objc_claimAutoreleasedReturnValue, objc_opt_*), its constant NSNumber literals, ___chkstk_darwin
+# stack probes; upstream clang's plain objc_retain/objc_release/objc_retainAutoreleasedReturnValue; and lld's dyld_stub_binder
+# symbol-table entry. All of them are in iOS 16's libobjc/libSystem.
+TOOLCHAIN_IMPORT = re.compile(r'^(_objc_(retain|release)(_x\d+)?|_objc_claimAutoreleasedReturnValue|_objc_retainAutoreleasedReturnValue|'
+                              r'_objc_retainAutoreleaseReturnValue|_objc_opt_\w+|_OBJC_CLASS_\$_NSConstant\w+|___chkstk_darwin|dyld_stub_binder)$')
+
+
 def describe(a, b):
     if isinstance(a, set):
         only_a, only_b = sorted(a - b), sorted(b - a)
@@ -52,36 +60,49 @@ def describe(a, b):
 def main():
     ci, local = Path(sys.argv[1]), Path(sys.argv[2])
     rows, bad = [], False
-    for rel in ['NativeAdrenoMetal.bundle/NativeAdrenoMetal', 'NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib', 'adrenoprobed']:
+    common = sorted(f.relative_to(ci).as_posix() for f in ci.rglob('*') if f.is_file() and (local / f.relative_to(ci)).is_file())
+    machos = [r for r in common if (ci / r).read_bytes()[:4] == b'\xcf\xfa\xed\xfe']
+    for rel in machos:
         a, b = macho(ci / rel), macho(local / rel)
         for key in a:
             d = describe(a[key], b[key])
             same = d.startswith('same')
             if key == 'sections' and not same:
                 same = None   # layout detail: reported, judged by hand
+            if key == 'exports' and not same and len(a[key]) == len(b[key]) and all(n.startswith('__R') for n in a[key] ^ b[key]):
+                # Identical-body Rust functions (ash's per-extension loaders) are merged by LLVM's MergeFunctions; which name of each group
+                # survives follows the symbol order, and so the crate hashes (source paths). Non-Rust exports are all the same.
+                same, d = None, 'same count %d; %d Rust names of merged identical-body functions differ (MergeFunctions picks by crate-hash order)' % (
+                    len(a[key]), len(a[key] - b[key]))
+            if key == 'imports' and not same and all(TOOLCHAIN_IMPORT.match(n) for n in a[key] ^ b[key]):
+                same, d = None, 'same apart from toolchain runtime entry points: ' + d
             bad |= same is False
             rows.append((rel, key, 'yes' if same else ('note' if same is None else 'NO'), d))
         ca, cb = (ci / rel).stat().st_size, (local / rel).stat().st_size
         rows.append((rel, 'bytes', 'identical' if (ci / rel).read_bytes() == (local / rel).read_bytes() else 'differ',
                      'CI %d / local %d (%+.1f%%)' % (ca, cb, 100.0 * (cb - ca) / ca)))
-    for rel in ['NativeAdrenoMetal.bundle/Info.plist', 'adrenoprobed-entitlements.plist', 'org.blu-sharky.adrenoprobed.plist',
-                'com.apple.iomfb_fdr_loader.plist', 'com.apple.bluetoothd.plist']:
+    for rel in [r for r in common if r.endswith('.plist') and '_CodeSignature' not in r]:
         pa, pb = plistlib.loads((ci / rel).read_bytes()), plistlib.loads((local / rel).read_bytes())
         exact = (ci / rel).read_bytes() == (local / rel).read_bytes()
         bad |= pa != pb
         rows.append((rel, 'content', 'yes' if pa == pb else 'NO', 'byte-identical' if exact else ('same keys/values' if pa == pb else 'differ')))
-    for rel in ['scanout_scale.metallib']:
+    for rel in [r for r in common if r.endswith('.metallib')]:
         ha, hb = hashlib.sha256((ci / rel).read_bytes()).hexdigest(), hashlib.sha256((local / rel).read_bytes()).hexdigest()
         bad |= ha != hb
         rows.append((rel, 'sha256', 'yes' if ha == hb else 'NO', ha[:16] + (' both' if ha == hb else ' / ' + hb[:16])))
         sa = run('llvm-otool', '-s', '__DATA', '__scalelib', local / 'NativeAdrenoMetal.bundle/NativeAdrenoMetal')
         rows.append((rel, 'embedded __scalelib', 'yes' if sa else 'NO', 'present in local plugin' if sa else 'missing'))
+    if not (ci / 'NativeAdrenoMetal.bundle').is_dir():
+        return finish(rows, bad)
     ra = plistlib.loads((ci / 'NativeAdrenoMetal.bundle/_CodeSignature/CodeResources').read_bytes())
     rb = plistlib.loads((local / 'NativeAdrenoMetal.bundle/_CodeSignature/CodeResources').read_bytes())
     same = {k: sorted(v) for k, v in ra.items()} == {k: sorted(v) for k, v in rb.items()} and ra['rules'] == rb['rules'] and ra['rules2'] == rb['rules2']
     bad |= not same
     rows.append(('_CodeSignature/CodeResources', 'files/files2/rules', 'yes' if same else 'NO', 'same entries and rules' if same else 'differ'))
-    width = [max(len(str(r[i])) for r in rows) for i in range(3)]
+    finish(rows, bad)
+
+
+def finish(rows, bad):
     print('| file | check | equivalent | detail |\n| --- | --- | --- | --- |')
     for r in rows:
         print('| %s | %s | %s | %s |' % r)

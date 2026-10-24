@@ -12,7 +12,8 @@
 # frontend .mm compile plus the link and signing.
 #
 # Usage:
-#   scripts/build-gpu-plugin-local.sh [--unixnu DIR] [--out DIR] [--pack OUT.ngpu [--base BASE.ngpu]]
+#   scripts/build-gpu-plugin-local.sh [--unixnu DIR] [--out DIR] [--pack OUT.ngpu [--base BASE.ngpu]] [--tools]
+#     --tools also builds the "GPU userland tools" CI artifact (gpu-tools.yml: ngpu-probe, ngpu-metal, ngpu-vk) into <out>-tools
 #   scripts/build-gpu-plugin-local.sh --fetch-sdk [RUN_ID]     # the encrypted SDK export (apple-sdk-export.yml) -> .cache/apple-sdk
 #   scripts/build-gpu-plugin-local.sh --seed-metallib RUN_ID   # a "GPU plugin (iOS 16)" run's metallib -> .cache/gpu-local/metallib
 # Defaults: --unixnu $UNIXNU or /home/john/src/UniXNU-ios16-stack-gpuuser, --out <UNIXNU>/build/gpu-plugin-local.
@@ -20,7 +21,7 @@
 set -euo pipefail
 BOARD=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 UNIXNU=${UNIXNU:-/home/john/src/UniXNU-ios16-stack-gpuuser}
-OUT= PACK= BASE= FETCH_SDK= SEED=
+OUT= PACK= BASE= FETCH_SDK= SEED= TOOLS=
 REPO=johnpanos/UniXNU-fajita
 while [ $# -gt 0 ]; do
   case $1 in
@@ -30,6 +31,7 @@ while [ $# -gt 0 ]; do
     --base) BASE=$2; shift 2 ;;
     --fetch-sdk) FETCH_SDK=1; shift; if [ $# -gt 0 ] && [[ $1 =~ ^[0-9]+$ ]]; then FETCH_SDK=$1; shift; fi ;;
     --seed-metallib) SEED=$2; shift 2 ;;
+    --tools) TOOLS=1; shift ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
@@ -141,4 +143,23 @@ if [ -n "$PACK" ]; then
   S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad/gpuuser
   python3 -I "$BOARD/scripts/make-fajita-gpu-addon.py" "$PACK" --base "${BASE:-$S/metal.ngpu}" --tree "addons/NativeAdrenoMetal.bundle=$OUT/NativeAdrenoMetal.bundle"
   stamp "packed $PACK"
+fi
+if [ -n "$TOOLS" ]; then
+  # As .github/workflows/gpu-tools.yml, with this UniXNU checkout's NativeAdreno/NativeMetal and the smoke header the plugin build made.
+  TO=$OUT-tools VH=$CACHE/gpu-local/Vulkan-Headers-v1.4.309 GT=$BOARD/package/gpu-tools
+  [ -d "$VH/include" ] || git clone -q --depth 1 -b v1.4.309 https://github.com/KhronosGroup/Vulkan-Headers "$VH"
+  rm -rf "$TO"; mkdir -p "$TO"
+  C=(xcrun --sdk iphoneos clang++ -std=c++17 -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra)
+  "${C[@]}" -Werror -I "$GT/include" -I drivers/NativeAdreno "$GT/ngpu-probe.cpp" -framework IOKit -o "$TO/ngpu-probe" &
+  "${C[@]}" -Werror -fobjc-arc -x objective-c++ "$GT/ngpu-metal.mm" -framework Foundation -framework Metal -o "$TO/ngpu-metal" &
+  "${C[@]}" -Wno-unused-parameter -Wno-missing-field-initializers -I drivers/NativeMetal -I "$VH/include" -I build/turnip-smoke \
+    "$GT/ngpu-vk.cpp" -o "$TO/ngpu-vk" &
+  wait %1 && wait %2 && wait %3
+  for t in ngpu-probe ngpu-metal ngpu-vk; do
+    codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.$t --entitlements "$GT/ngpu-probe-entitlements.plist" "$TO/$t" 2>/dev/null
+    codesign --verify --strict "$TO/$t"
+  done
+  codesign -dvvv "$TO/ngpu-probe" 2>&1 | grep -E 'CDHash|Page size|Identifier' > "$TO/codesign.txt"
+  git -C drivers/NativeAdreno rev-parse HEAD > "$TO/native-adreno.txt"
+  stamp "tools -> $TO"
 fi

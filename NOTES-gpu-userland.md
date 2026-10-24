@@ -63,6 +63,71 @@ From the 20H392 dyld cache (scratchpad/dsc16) and kernelcache (.cache/ipsw/20H39
   written under /private/var/ngpu/sbin (seen as /usr/sbin with usb-debug=3) and run with
   `fajita-usbdbg-hub.py call run /usr/sbin/ngpu-probe`.
 
+## Local build on Linux (instead of the CI round-trip)
+
+`scripts/build-gpu-plugin-local.sh` builds the "GPU plugin (iOS 16)" artifact on the Linux host in the CI's layout, so
+`make-fajita-gpu-addon.py` / plugin-addon.sh take it as a downloaded artifact. The CI workflows stay as the fallback.
+
+```sh
+B=/home/john/src/UniXNU-fajita-gpulocal     # any board worktree with this script; GPU_LOCAL_CACHE=$B/.cache shares the caches
+$B/scripts/build-gpu-plugin-local.sh --unixnu /home/john/src/UniXNU-ios16-stack-gpuuser [--pack OUT.ngpu [--base BASE.ngpu]] [--tools]
+# -> <unixnu>/build/gpu-plugin-local/{NativeAdrenoMetal.bundle,scanout_scale.metallib,adrenoprobed,*.plist,trust.json,sources.txt,codesign.txt}
+#    --tools: <unixnu>/build/gpu-plugin-local-tools/{ngpu-probe,ngpu-metal,ngpu-vk} (gpu-tools.yml)
+python3 -I $B/scripts/gpu-local/compare.py CI_ARTIFACT_DIR <unixnu>/build/gpu-plugin-local   # functional comparison table
+```
+
+How: UniXNU's own scripts (build-turnip-darwin.py --target ios, build-adreno-metal-plugin.py, build-native-metal-bridge.py) run
+unchanged with `scripts/gpu-local/bin` first on PATH. Its `xcrun`, `clang`, `codesign`, `strip`, `nm`, `metal` and `metallib`
+stand-ins come from `scripts/gpu-local/tool.py`:
+
+- Compiler and linker: Fedora LLVM 22 clang + ld64.lld, `-target arm64-apple-ios16.0`, against the CI's own iPhoneOS 18.5 SDK
+  (Xcode 16.4) and Xcode's `libclang_rt.ios.a`. The SDK's libc++ headers are used, never /usr/include/c++/v1, plus
+  `-fno-sized-deallocation` (Apple clang's default).
+- Compile-and-link calls are split: each source compiles on its own, in parallel, through ccache.
+- Rust: 1.98.0 `aarch64-apple-ios`; cc-built pieces go through the same clang.
+- Signing: rcodesign 0.29.0 (ad-hoc, 4 KiB pages, entitlements). CodeResources is written in codesign's format (byte-identical for
+  the same files). `--verify` and `--display` use a built-in CodeDirectory check, because rcodesign's verify rejects every ad-hoc
+  signature.
+- metallib: Apple's Metal compiler is macOS-only, so scanout_scale.metallib is served from `.cache/gpu-local/metallib`, keyed by
+  the sha256 of the .metal source and flags. After a shader change, run the CI once, then `--seed-metallib RUN_ID`.
+- SDK: `--fetch-sdk [RUN_ID]` downloads the `Apple SDK export (encrypted)` artifact (.github/workflows/apple-sdk-export.yml:
+  AES-256 with the repo secret SDK_TAR_KEY, kept for 1 day). It decrypts the artifact with ~/.config/unixnu/sdk_tar_key into the
+  gitignored `.cache/apple-sdk`, then deletes the artifact. The repos are public: never commit or publish the SDK.
+
+Times on this host:
+
+| Build | Time |
+| --- | --- |
+| Cold build of everything (Mesa 700 steps, plugin) | about 70 s |
+| First Rust bridge build | about 80 s |
+| NativeMetal .mm change (rebuild, link, sign) | about 10 s |
+| `--pack` | +1 s |
+
+Turnip rebuilds only when the CI's mesa cache key changes. The tree restarts when tool.py, the compiler or the SDK changes.
+Rebuilds are reproducible: the same inputs give the same CDHash.
+
+Equivalence with CI run 40080075126 (same ref 8190417 and submodules). Results from `compare.py`:
+
+- Identical:
+  - linked dylibs and their versions;
+  - LC_BUILD_VERSION (iOS, minos 16.0, sdk 18.5);
+  - signature identifier, flags, CodeDirectory version, 4 KiB pages, blob slots, entitlements and validity;
+  - Info.plist and every job plist (byte for byte);
+  - CodeResources entries and rules;
+  - scanout_scale.metallib (byte for byte, also as `__DATA,__scalelib`);
+  - every non-Rust export.
+- Differences, all from the toolchain:
+  - Imports: Apple clang 17 uses objc_retain_xN/objc_release_xN, objc_claimAutoreleasedReturnValue, objc_opt_*,
+    NSConstantIntegerNumber literals and ___chkstk_darwin stack probes. Upstream clang uses objc_retain, objc_release and
+    objc_retainAutoreleasedReturnValue. lld lists dyld_stub_binder. All of these are in iOS 16's libobjc and libSystem.
+  - Exports: 55 of 6644 Rust names differ. Identical-body functions (ash's per-extension loaders) are merged, and which name
+    survives follows the crate hashes, which are derived from source paths.
+  - Sections: ld-prime emits `__objc_stubs`, `__objc_methtype`, `__objc_intobj` and merges categories. lld emits `__literals` and
+    `__objc_catlist`.
+  - The local Turnip uses chained fixups instead of CI's dyld info. Sizes differ by -0.4% to +1.8% (adrenoprobed -12%).
+  - LC_SOURCE_VERSION is absent locally.
+- The tools (`--tools`) compare the same way against the "GPU userland tools" artifact.
+
 ## Fork branches
 
 | Repo | Branch | Content |
