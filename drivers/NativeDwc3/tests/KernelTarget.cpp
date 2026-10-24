@@ -28,6 +28,7 @@ vm_offset_t ml_io_map(vm_offset_t pa, vm_size_t size)
 }
 static int gResets;
 int boot_reset_bootloader(char *, unsigned) { gResets++; return 99; }
+void panic(const char *, ...) { gResets += 100; }
 int pmap_valid_address(uint64_t a) { return a >= 0x80000000ull && a < 0x80000000ull + gRam.size(); }
 unsigned int ml_phys_read_word(vm_offset_t a) { uint32_t v; memcpy(&v, &gRam[a - 0x80000000ull], 4); return v; }
 unsigned int ml_phys_read_byte(vm_offset_t a) { return gRam[a - 0x80000000ull]; }

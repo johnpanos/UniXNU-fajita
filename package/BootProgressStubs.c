@@ -23,6 +23,7 @@ __attribute__((weak)) unsigned boot_ui_trace_role_rows(unsigned p0, char p1[][12
 __attribute__((weak)) char boot_ui_trace_rows[4096] __attribute__((aligned(16)));
 __attribute__((weak)) void boot_ui_trace_snapshot(unsigned p0) { (void)p0;  }
 __attribute__((weak)) void fajita_pmic_poll(void) {   }
+__attribute__((weak)) void native_dwc3_panic_drain(const char *text) { (void)text; }
 __attribute__((weak)) char fajita_touch_rows[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_button_state[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_hid_button_stats[4096] __attribute__((aligned(16)));

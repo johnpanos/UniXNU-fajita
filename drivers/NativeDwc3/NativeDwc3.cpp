@@ -115,6 +115,13 @@ static uintptr_t dwc3MapPhys(uint64_t phys, uint64_t length, OSSharedPtr<IOMemor
 // correct initial state. It lives for the driver's life.
 static dwc3::Gadget *gGadget = nullptr;
 
+// BootLog's panic flush calls this first (weak; a stub in BootProgressStubs.c when NativeDwc3 is not built).
+extern "C" void native_dwc3_panic_drain(const char *text)
+{
+  if (gGadget) gGadget->panicDrain(text);
+}
+
+
 // ---- /dev/fjdbg: the userland end of the SHELL channel ---------------------------
 // A userland agent opens /dev/fjdbg; read() returns bytes the host sent on the SHELL
 // channel, write() sends bytes back to the host as SHELL frames. One opener at a time.
