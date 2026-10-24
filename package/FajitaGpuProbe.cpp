@@ -13,6 +13,9 @@
 //   7 the GPU's SMMU context (bank 0, SID 0), the SQE, A630HwInit, ring 0, CP_ME_INIT, a CP_MEM_WRITE fence
 //   8 zap shader (a630_zap.mbn through SCM PAS 13 into gpu_mem 0x8c415000) and CP_SET_SECURE_MODE 0
 //   9 the GPU interrupt (SPI 300) and a fenced CP_MEMCPY
+//  10 publish NativeAdrenoGpu (NativeAdrenoGpuPublished, the user client)
+//  11 the staged AGXAccelerator (an IOAcceleratorES for Metal's discovery, MetalPluginName NativeAdrenoMetal), after checking the
+//     bound IOAcceleratorES base (scripts/data/fajita-ioaccelerator-base-abi.json) against the live metaclass
 // Linux v6.16 (msm a6xx) is the reference for every value; see drivers/FajitaAdreno/A630Gmu.h.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
@@ -39,6 +42,13 @@ extern "C" {
 extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
     const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t input_bits, uint32_t output_bits) __attribute__((weak));
 extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed) __attribute__((weak));
+// The staged AGXAccelerator (drivers/NativeAdreno/NativeAdrenoAccelerator.cpp, built by scripts/build-fajita-gpu.py): its static
+// initializer is out of __mod_init_func and exported under this name, its IOAcceleratorES imports are bound to the audited original
+// addresses. All weak: a kernel without the staged class links and stage 11 reports "nolink".
+extern "C" void fajita_agx_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp") __attribute__((weak));
+extern "C" IOService *native_adreno_accelerator_allocate(void) __attribute__((weak));
+extern "C" const uint8_t fajita_bound_ioacceleratores_meta[] __asm__("__ZN15IOAcceleratorES10gMetaClassE") __attribute__((weak));
+extern "C" OSReturn OSKextLoadKextWithIdentifier(const char *kextIdentifier);
 
 // Firmware, embedded by scripts/build-fajita-gpu.py from the ignored .cache copies (sha256-pinned); weak so a kernel built
 // without them still links and stage 5 reports "nofw".
@@ -592,8 +602,51 @@ bool stage10()
     return published == kIOReturnSuccess;
 }
 
+// Stage 11: Metal's discovery (Metal _MTLRegisterDevices: IOServiceMatching("IOAcceleratorES"), MetalPluginName) finds the staged
+// AGXAccelerator. Its base is bound statically to the 20H392 IOGPUFamily addresses, so before its initializer runs the bound
+// metaclass must be the live IOAcceleratorES one: same object, 136 bytes, IOService parent. Anything else refuses.
+const OSMetaClass *metaNamed(const char *name)
+{
+    const OSSymbol *symbol = OSSymbol::withCString(name);
+    const OSMetaClass *meta = symbol ? OSMetaClass::getMetaClassWithName(symbol) : nullptr;
+    if (symbol) symbol->release();
+    return meta;
+}
+bool stage11()
+{
+    if (!fajita_agx_static_init || !native_adreno_accelerator_allocate || !fajita_bound_ioacceleratores_meta) {gpuLog("S11 nolink"); return false;}
+    const OSMetaClass *live = metaNamed("IOAcceleratorES");
+    if (!live) {
+        const OSReturn loaded = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
+        live = metaNamed("IOAcceleratorES");
+        gpuLog("S11 IOGPUFamily load %x meta %p", loaded, live);
+    }
+    const void *bound = fajita_bound_ioacceleratores_meta;
+    const unsigned size = live ? live->getClassSize() : 0;
+    const OSMetaClass *parent = live ? live->getSuperClass() : nullptr;
+    gpuLog("S11 IOAcceleratorES live %p bound %p size %u parent %s", live, bound, size,
+           parent ? parent->getClassName() : "-");
+    if (!live || (const void *)live != bound || size != 136 || parent != IOService::metaClass) {gpuLog("S11 base mismatch: refused"); return false;}
+    static bool constructed;
+    if (!constructed) {fajita_agx_static_init(); constructed = true;}
+    const OSMetaClass *agx = metaNamed("AGXAccelerator");
+    if (!agx || agx->getSuperClass() != live) {gpuLog("S11 AGXAccelerator metaclass %p not under IOAcceleratorES", agx); return false;}
+    IOService *accelerator = native_adreno_accelerator_allocate();
+    OSDictionary *properties = OSDictionary::withCapacity(2);
+    const OSString *plugin = OSString::withCString("NativeAdrenoMetal");
+    if (properties && plugin) properties->setObject("MetalPluginName", plugin);
+    const bool made = accelerator && properties && plugin && accelerator->init(properties) && accelerator->attach(IOService::getPlatform());
+    if (plugin) plugin->release();
+    if (properties) properties->release();
+    if (!made) {gpuLog("S11 accelerator init/attach failed"); if (accelerator) accelerator->release(); return false;}
+    accelerator->setName("AGXAccelerator");
+    accelerator->registerService();
+    gpuLog("S11 AGXAccelerator registered (IOAcceleratorES, MetalPluginName NativeAdrenoMetal, open type 0x4147)");
+    return true;
+}
+
 // ---- runner -------------------------------------------------------------------------------------------------------------
-bool (*const kStages[])() = {nullptr, stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10};
+bool (*const kStages[])() = {nullptr, stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10, stage11};
 constexpr unsigned kLastStage = sizeof kStages / sizeof *kStages - 1;
 volatile uint32_t gTarget;
 

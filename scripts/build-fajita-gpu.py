@@ -13,6 +13,8 @@ probe's weak reference then reports it) instead of failing the kernel.
 """
 import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 import struct
 import subprocess
@@ -36,8 +38,8 @@ WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-de
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers', '-Wno-incompatible-sysroot']
 INCLUDES = ['-I', str(A630), '-I', str(ADRENO), '-I', str(SMMU), '-I', str(PM4), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
-# NativeAdreno sources left out: the staged accelerator (its initializer must not run at boot), the service and client
-# (the publish step, later), exactly as sheng's build-native-adreno-kits.py leaves them out.
+# NativeAdreno sources left out: the staged accelerator (built separately below: its initializer must not run at boot), the service
+# and client, exactly as sheng's build-native-adreno-kits.py leaves them out.
 ADRENO_SKIP = {'NativeAdrenoAccelerator.cpp', 'NativeAdrenoService.cpp', 'NativeAdrenoClient.cpp',
                # sheng's A740 GMU (ShengGmu, the modern HFI kit): the A630 GMU is drivers/FajitaAdreno
                'NativeAdrenoGmuConfig.cpp', 'NativeAdrenoGmuPlatform.cpp', 'NativeAdrenoGmuService.cpp', 'NativeAdrenoFirmware.cpp',
@@ -66,6 +68,72 @@ def command_for(rec, source, obj):
     return command
 
 
+ABI_RECORD = ROOT / 'scripts/data/fajita-ioaccelerator-base-abi.json'
+
+
+def staged_accelerator(cpp_rec, commands):
+    """The staged AGXAccelerator (FajitaGpuProbe stage 11): NativeAdrenoAccelerator.cpp with its static initializer moved out of
+    __mod_init_func and exported, and its IOAcceleratorES imports set to the addresses audit-fajita-accelerator-base.py derived from
+    the 20H392 kernelcache this kernel is prelinked with. Left out (with a warning) when the record is for another kernelcache."""
+    record = json.loads(ABI_RECORD.read_text())
+    pinned = os.environ.get('UNIXNU_KERNELCACHE_SHA256', '')
+    if pinned != record['kernelcache_sha256']:
+        print('WARNING: the IOAcceleratorES record is for kernelcache %s, this kernel is prelinked with %s: staged accelerator left out'
+              % (record['kernelcache_sha256'][:16], pinned[:16] or 'an unpinned one'))
+        return []
+    if record['operational_overrides'] or record['instance_bytes'] != 136 or record['virtual_entries'] != 168:
+        raise SystemExit('the IOAcceleratorES record is not a 136-byte, 168-entry base without operational overrides')
+    source = ADRENO / 'NativeAdrenoAccelerator.cpp'
+    obj = OUT / 'NativeAdrenoAccelerator.o'
+    command = command_for(cpp_rec, source, obj) + WARNINGS + ['-Wno-overloaded-virtual'] + INCLUDES
+    commands[source.name] = command
+    result = subprocess.run(command, cwd=cpp_rec['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+    (OUT / 'NativeAdrenoAccelerator.log').write_text(result.stdout)
+    if result.returncode:
+        raise SystemExit(f'{source}:\n' + result.stdout[-4000:])
+    raw = obj.read_bytes()
+    symoff, nsyms, stroff = next(struct.unpack_from('<3I', raw, p + 8) for c, p in _load_commands(raw) if c == 2)
+    undefined = set()
+    for i in range(nsyms):
+        n, kind, _, _, _ = struct.unpack_from('<IBBHQ', raw, symoff + 16 * i)
+        name = raw[stroff + n:raw.index(b'\0', stroff + n)].decode()
+        if kind & 0x0e == 0 and kind & 1 and 'IOAcceleratorES' in name:
+            undefined.add(name)
+    bindings = {'__ZN15IOAcceleratorESC2EPK11OSMetaClass': record['protected_compatible_constructor_aliases'][0],
+                '__ZN15IOAcceleratorESD2Ev': record['nondeleting_destructor'],
+                '__ZN15IOAcceleratorES10gMetaClassE': record['metaclass']}
+    if undefined - set(bindings) or not undefined:
+        raise SystemExit('unexpected IOAcceleratorES imports of the staged accelerator: %s' % sorted(undefined))
+    asm = OUT / 'accelerator-bindings.S'
+    # Every bound name is defined, the metaclass too (stage 11 compares it with the live metaclass), even when not imported.
+    asm.write_text(''.join('.globl %s\n.set %s, %s\n' % (n, n, a) for n, a in sorted(bindings.items())))
+    target = [a for a in cpp_rec['arguments'] if a.startswith('--target=')][-1]
+    bound = OUT / 'accelerator-bindings.o'
+    subprocess.run([cpp_rec['arguments'][0], target, '-c', str(asm), '-o', str(bound)], check=True, timeout=60, cwd=cpp_rec['directory'])
+    objcopy = shutil.which('llvm-objcopy') or '/opt/homebrew/opt/llvm/bin/llvm-objcopy'
+    late = OUT / 'NativeAdrenoAccelerator.late.o'
+    subprocess.run([objcopy, '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp',
+                    str(obj), str(late)], check=True, timeout=60)
+    late_raw = late.read_bytes()
+    if b'__mod_init_func' in late_raw[:8192]:
+        raise SystemExit('the staged accelerator still registers its initializer')
+    if b'__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp' not in late_raw:
+        raise SystemExit('the staged accelerator initializer is not exported')
+    check_object(late)
+    check_object(bound)
+    return [late, bound]
+
+
+def _load_commands(raw):
+    count, = struct.unpack_from('<I', raw, 16)
+    at, out = 32, []
+    for _ in range(count):
+        command, size = struct.unpack_from('<II', raw, at)
+        out.append((command, at))
+        at += size
+    return out
+
+
 def check_object(path):
     magic, cpu, subtype, kind = struct.unpack_from('<4I', path.read_bytes())
     if (magic, cpu, subtype, kind) != (0xfeedfacf, 0x100000c, 0, 1):
@@ -92,6 +160,7 @@ def main():
             raise SystemExit(f'{source}:\n' + result.stdout[-4000:])
         check_object(obj)
         objects.append(obj)
+    objects += staged_accelerator(cpp_rec, commands)
     # Firmware blobs
     assembly, embedded = ['.section __DATA_CONST,__const'], {}
     for label, (name, size, digest) in PINS.items():

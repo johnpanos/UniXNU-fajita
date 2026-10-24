@@ -1,0 +1,35 @@
+{
+  "kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "kext": "com.apple.iokit.IOGPUFamily",
+  "kext_version": "65.60.1",
+  "slide": "-0x1000000",
+  "instance_bytes": 136,
+  "virtual_entries": 168,
+  "metadata_overrides": [
+    0,
+    1,
+    7
+  ],
+  "operational_overrides": [],
+  "metaclass": "0xfffffff006bb6448",
+  "vptr": "0xfffffff005fc9e78",
+  "get_meta_class": "0xfffffff005b452b4",
+  "protected_compatible_constructor_aliases": [
+    "0xfffffff005b45228",
+    "0xfffffff005b45248"
+  ],
+  "nondeleting_destructor": "0xfffffff005b4526c",
+  "original": {
+    "metaclass": "0xfffffff007bb6448",
+    "metaclass_constructor_call": "0xfffffff006b48638",
+    "vptr": "0xfffffff006fc9e78"
+  },
+  "original_entry_sha256": {
+    "0xfffffff005b45228": "6ae3681f2b8b1b5a1029e6789b2d89a966855d729f505e079bc1c389d0816da7",
+    "0xfffffff005b45248": "125ae185010ba90753e406f60736d74c9ceb2e2067ffcd02e42b0eb08ecc95a3",
+    "0xfffffff005b4526c": "660b01d996c89acb817bd7f6724aa3ff21cac461430d6a49e9e634ed4b67e308",
+    "0xfffffff005b452b4": "3595b4814ad82ada70a4ce1c8b1837394856bf5f3428e79f6d29fcfd6ea8b42d"
+  },
+  "static_only": true,
+  "runtime_check": "FajitaGpuProbe stage 11: OSMetaClass lookup, size and parent"
+}
