@@ -377,6 +377,7 @@ bool stage7()
     A630HwInitReport hr = {};
     // The ring object programs RB_BASE/RB_CNTL/RPTR_ADDR itself (without NO_UPDATE); A630HwInit writes them again after, with
     // NO_UPDATE and the SQE start, as hw_init does.
+    gRing.setA6xx(true);
     st = gRing.attach(&kRingIo, &kRingCache, const_cast<uint8_t *>(gCpu[kRing]), gBuffers[kRing].bytes, gBuffers[kRing].iova,
                       const_cast<uint8_t *>(gCpu[kMemptrs]), gBuffers[kMemptrs].bytes, gBuffers[kMemptrs].iova);
     if (st) {gpuLog("S7 ring attach %x", st); return false;}

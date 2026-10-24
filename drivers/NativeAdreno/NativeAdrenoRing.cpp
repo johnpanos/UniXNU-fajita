@@ -128,7 +128,8 @@ IOReturn NativeAdrenoRing::emitFence(uint32_t at,uint32_t seqno,uint32_t *end)
     if(AdrenoPM4Type4(RingScratch,1,&words[0])!=AdrenoPM4Success ||
         AdrenoPM4Type7(RingFenceOpcode,4,&words[2])!=AdrenoPM4Success)return poison();
     words[1]=seqno;
-    words[3]=RingFenceEvent|RingFenceEnable|RingFenceIrq;
+    /* A6XX: CACHE_FLUSH_TS (event 4) writes the timestamp and raises CP_CACHE_FLUSH_TS; bit 27 does not exist there. */
+    words[3]=a6xx_?(4u|RingFenceIrq):(RingFenceEvent|RingFenceEnable|RingFenceIrq);
     /* The timestamp goes to +4 (msm_rbmemptrs.fence), where wait() reads it; +0 is the CP's RPTR shadow. */
     const uint64_t at4=fence_iova_+4;
     words[4]=(uint32_t)at4;words[5]=(uint32_t)(at4>>32);words[6]=seqno;
@@ -178,7 +179,8 @@ IOReturn NativeAdrenoRing::attach(const NativeAdrenoRingIo *io,const NativeAdren
     ring_bytes_=ring_bytes;ring_iova_=ring_iova;
     fence_=static_cast<volatile uint32_t *>(fence);fence_bytes_=fence_bytes;fence_iova_=fence_iova;
     for(size_t i=0;i<fence_bytes_/4;++i)fence_[i]=0;
-    const uint32_t control=(uint32_t)(ilog2(ring_bytes/8)&0x3f)|(ilog2(RingBlockBytes/8)<<8);
+    /* A6XX without hardware APRIV: NO_UPDATE (bit 27), the RPTR shadow comes from CP_WHERE_AM_I (hw_init). */
+    const uint32_t control=(uint32_t)(ilog2(ring_bytes/8)&0x3f)|(ilog2(RingBlockBytes/8)<<8)|(a6xx_?(1u<<27):0u);
     const uint32_t base_lo=(uint32_t)ring_iova_,base_hi=(uint32_t)(ring_iova_>>32);
     const uint32_t rptr_lo=(uint32_t)fence_iova_,rptr_hi=(uint32_t)(fence_iova_>>32);
     const uint32_t writes[]={RingBase,base_lo,RingBase+1,base_hi,RingControl,control,
@@ -213,22 +215,31 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,u
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(!words || !word_count || word_count>SIZE_MAX/sizeof(uint32_t))return kIOReturnBadArgument;
     const uint32_t size_words=(uint32_t)(ring_bytes_/4),mask=size_words-1;
-    const bool reset=framed && reset_pending_;
-    const uint32_t extra=framed?RingPrologueWords+(reset?RingResetWords:0)+RingFramedFenceWords:RingFenceWords;
+    const bool reset=framed && reset_pending_ && !a6xx_;
+    const uint32_t extra=a6xx_?(framed?4u:0u)+RingFenceWords:
+        framed?RingPrologueWords+(reset?RingResetWords:0)+RingFramedFenceWords:RingFenceWords;
     if(word_count>size_words-extra-8)return kIOReturnNoResources;
     uint32_t rptr=0;IOReturn status=readRptr(&rptr);
     if(status)return status;
     const uint32_t used=(next_-rptr)&mask;
     if(word_count+extra+8>size_words-used)return kIOReturnNoResources;
     uint32_t at=next_;
-    if(framed) {
+    if(framed && a6xx_) {
+        /* a6xx_submit: CP_EVENT_WRITE PC_CCU_INVALIDATE_DEPTH (0x18), PC_CCU_INVALIDATE_COLOR (0x19) */
+        uint32_t pro[4];
+        if(AdrenoPM4Type7(RingFenceOpcode,1,&pro[0])!=AdrenoPM4Success ||
+            AdrenoPM4Type7(RingFenceOpcode,1,&pro[2])!=AdrenoPM4Success)return poison();
+        pro[1]=RingCcuInvalidateDepth;pro[3]=RingCcuInvalidateColor;
+        for(uint32_t i=0;i<4;++i)ring_[(at+i)&mask]=pro[i];
+        at=(at+4)&mask;
+    } else if(framed) {
         status=emitPrologue(at,reset,&at);
         if(status)return status;
     }
     for(size_t i=0;i<word_count;++i)ring_[(at+i)&mask]=words[i];
     at=(at+(uint32_t)word_count)&mask;
     uint32_t end=0;
-    status=framed?emitFramedFence(at,seqno_+1,&end):emitFence(at,seqno_+1,&end);
+    status=framed && !a6xx_?emitFramedFence(at,seqno_+1,&end):emitFence(at,seqno_+1,&end);
     if(status)return status;
     /* Whole-ring publication is deliberate: a submission may wrap, and one
      * clean of the owned pool is cheaper than a split range proof. */

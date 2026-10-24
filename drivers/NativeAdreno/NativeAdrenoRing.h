@@ -50,7 +50,7 @@ class NativeAdrenoRing final {
     size_t ring_bytes_=0,fence_bytes_=0;
     uint64_t ring_iova_=0,fence_iova_=0;
     uint32_t next_=0,rptr_shadow_=0,seqno_=0,completed_=0,submissions_=0;
-    bool attached_=false,poisoned_=false,reset_pending_=false;
+    bool attached_=false,poisoned_=false,reset_pending_=false,a6xx_=false;
     IOReturn poison();
     IOReturn readRptr(uint32_t *);
     IOReturn emitPrologue(uint32_t at,bool reset,uint32_t *end);
@@ -82,6 +82,9 @@ public:
     /* The next framed submission starts with the A7XX context entry of a6xx_set_pagetable() (BR/BV counters, on-chip
      * timestamps and resource table cleared between thread syncs); a new user client requests it, as Linux does per context. */
     void requestContextReset() {reset_pending_=true;}
+    /* A6XX (gen1, the A630) framing instead of A7XX: the fence is CP_EVENT_WRITE CACHE_FLUSH_TS | IRQ (a6xx_submit), a framed
+     * submission is preceded by the CCU depth/color invalidates and has no BR/BV thread control. Set before attach. */
+    void setA6xx(bool on) {a6xx_=on;}
     /* Polls the CP-written timestamp after invalidating the fence page. Never
      * writes registers and never advances the ring. Timeout is not poison. */
     NativeAdrenoRingFence wait(uint32_t fence,const NativeAdrenoRingClock *,
