@@ -373,11 +373,17 @@ bool cpRun(const uint32_t *words, size_t count, const char *what, uint32_t timeo
     return true;
 }
 
+extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8], native_adreno_pool_status;
 bool stage7()
 {
+    // The user BO pool (sheng's sheng-gpu-pool): user BOs from one write-combined contiguous block skip the per-submission
+    // write-combine re-assertion that walks every scattered BO page (25-40 ms per submission on fajita without it, session-213903).
+    // fajita-gpu-pool=<MiB>, default 768; the context halves it down to 16 MiB when it cannot have it; 0 = scattered BOs only.
+    native_adreno_pool_mib = bootArg("fajita-gpu-pool", 768);
     IOReturn st = NativeAdrenoGpuContextSetLayout(kBufIova, kBufBytes);
     if (!st) st = NativeAdrenoGpuContextBringup(gSmmu.va, gSmmu.bytes, 0, 2, 0, 0, ~0u, 0, ctxProgress, &gGpuCtx);
     ctxReport("S7 gpuctx", st, gGpuCtx);
+    gpuLog("S7 pool %u MiB (asked %u) status %x", native_adreno_pool_stats[0], (unsigned)native_adreno_pool_mib, native_adreno_pool_status);
     if (st) {fajita_gpu_status = st; return false;}
     st = NativeAdrenoGpuContextBuffers(gBuffers);
     if (st) {gpuLog("S7 buffers %x", st); return false;}
