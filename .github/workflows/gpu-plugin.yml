@@ -1,0 +1,89 @@
+name: GPU plugin (iOS 16)
+
+# Builds fajita's GPU userland for plain arm64 iOS 16.0 on a macOS runner (the Linux host has no iOS SDK, Mach-O signer or iOS Rust
+# target): Turnip with the Darwin kernel backend (UniXNU scripts/build-turnip-darwin.py), the metal2vulkan bridge and the NativeAdreno
+# Metal plugin bundle with the probe daemon (scripts/build-adreno-metal-plugin.py), 4 KiB-page ad-hoc signed. Sources: johnpanos/UniXNU
+# (branch below) with its NativeMetal and NativeAdreno submodules taken from the johnpanos forks (the UniXNU org lacks the fajita
+# commits). The A740 submission replay is left out (UNIXNU_TURNIP_REPLAY=0). The artifact is what make-fajita-gpu-addon.py packs.
+on:
+  workflow_dispatch:
+    inputs:
+      unixnu_ref:
+        description: johnpanos/UniXNU branch or commit
+        default: fajita-a630-userland
+  push:
+    paths:
+      - .github/workflows/gpu-plugin.yml
+      - ios16/gpu-plugin.ref
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: UniXNU source
+        run: |
+          set -e
+          REF="${{ github.event.inputs.unixnu_ref }}"
+          [ -n "$REF" ] || REF=$(cat ios16/gpu-plugin.ref)
+          git clone -q --filter=blob:none https://github.com/johnpanos/UniXNU unixnu
+          git -C unixnu checkout -q "$REF"
+          git -C unixnu config submodule.drivers/NativeMetal.url https://github.com/johnpanos/NativeMetal
+          git -C unixnu config submodule.drivers/NativeAdreno.url https://github.com/johnpanos/NativeAdreno
+          git -C unixnu submodule update --init --depth 50 drivers/NativeMetal drivers/NativeAdreno kits/AdrenoPM4 kits/ArmSmmu4K
+          git -C unixnu log --oneline -1
+          git -C unixnu submodule status drivers/NativeMetal drivers/NativeAdreno
+      - name: Tools
+        run: |
+          set -e
+          brew install ninja glslang shaderc spirv-tools bison llvm || true
+          cd unixnu
+          python3 -m venv .cache/mesa-venv
+          .cache/mesa-venv/bin/pip install -q -r scripts/requirements-adreno-compiler.txt
+          mkdir -p .cache/mesa-tools/bin
+          ln -sf "$(brew --prefix bison)/bin/bison" .cache/mesa-tools/bin/bison
+          ln -sf "$(brew --prefix bison)/bin/yacc" .cache/mesa-tools/bin/yacc
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          ~/.cargo/bin/rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Pinned Mesa and translator
+        run: |
+          set -e
+          cd unixnu
+          MESA=$(python3 -c "import json;print(json.load(open('scripts/data/adreno-compiler-inputs.json'))['mesa']['commit'])")
+          git init -q .cache/mesa-work
+          git -C .cache/mesa-work fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa "$MESA"
+          git -C .cache/mesa-work checkout -q FETCH_HEAD
+          for p in $(python3 -c "import json;print(' '.join(json.load(open('scripts/data/adreno-compiler-inputs.json'))['patches']))"); do
+            git -C .cache/mesa-work apply "$PWD/$p"
+          done
+          M2V=$(python3 -c "import json;print(json.load(open('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']['commit'])")
+          git init -q .cache/gpu-reference/metal2vulkan
+          git -C .cache/gpu-reference/metal2vulkan fetch -q --depth 1 https://github.com/steelbrain/metal2vulkan "$M2V"
+          git -C .cache/gpu-reference/metal2vulkan checkout -q FETCH_HEAD
+      - name: Turnip (darwin KMD, iOS 16)
+        env:
+          UNIXNU_IOS_TARGET: '16.0'
+        run: cd unixnu && python3 scripts/build-turnip-darwin.py --target ios || { tail -80 .cache/mesa-tu-ios-*.log; exit 1; }
+      - name: Bridge and plugin
+        env:
+          UNIXNU_IOS_TARGET: '16.0'
+          UNIXNU_TURNIP_REPLAY: '0'
+        run: cd unixnu && python3 scripts/build-adreno-metal-plugin.py
+      - name: Collect
+        run: |
+          set -e
+          mkdir -p out
+          cp -R unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle out/
+          cp unixnu/build/adreno-metal-plugin/adrenoprobed unixnu/build/adreno-metal-plugin/*.plist unixnu/build/adreno-metal-plugin/trust.json out/
+          ( git -C unixnu rev-parse HEAD; git -C unixnu submodule status drivers/NativeMetal drivers/NativeAdreno ) > out/sources.txt
+          codesign -dvvv out/NativeAdrenoMetal.bundle 2>&1 | grep -E 'CDHash|Page size|Identifier' | tee out/codesign.txt
+          ls -la out out/NativeAdrenoMetal.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-plugin
+          path: out/
