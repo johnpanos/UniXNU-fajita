@@ -628,8 +628,17 @@ bool stage11()
     gpuLog("S11 IOAcceleratorES live %p bound %p size %u parent %s", live, bound, size,
            parent ? parent->getClassName() : "-");
     if (!live || (const void *)live != bound || size != 136 || parent != IOService::metaClass) {gpuLog("S11 base mismatch: refused"); return false;}
+    // The initializer constructs AGXAccelerator's metaclass. Outside a kext load OSMetaClass would leave it unregistered (no
+    // preModLoad: "wasn't called for class"), so run it as a load of the kernel's own classes, as OSKext does for a kext.
     static bool constructed;
-    if (!constructed) {fajita_agx_static_init(); constructed = true;}
+    if (!constructed) {
+        void *load = OSMetaClass::preModLoad("__kernel__");
+        fajita_agx_static_init();
+        const OSReturn registered = OSMetaClass::postModLoad(load);
+        constructed = true;
+        gpuLog("S11 staged initializer ran, metaclass registration %x", registered);
+        if (registered) return false;
+    }
     const OSMetaClass *agx = metaNamed("AGXAccelerator");
     if (!agx || agx->getSuperClass() != live) {gpuLog("S11 AGXAccelerator metaclass %p not under IOAcceleratorES", agx); return false;}
     IOService *accelerator = native_adreno_accelerator_allocate();
