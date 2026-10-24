@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // ngpu-probe: the first userland test of fajita's A630 kernel service. It runs from the usb-debug agent (`run /usr/sbin/ngpu-probe`),
 // outside every sandbox, and drives NativeAdreno's user-client ABI (drivers/NativeAdreno/NativeAdrenoABI.h) directly: open the published
-// "NativeAdrenoGpu" service (open type 0, selector = ABI method), Query, GetDeviceInfo, BO alloc/map/CPU-map, an indirect buffer with a
+// "NativeAdrenoGpu" service (open type 0x4147, selector = ABI method), Query, GetDeviceInfo, BO alloc/map/CPU-map, an indirect buffer with a
 // CP_MEM_WRITE written from userspace, Submit, WaitFence, and a read-back of the value the CP wrote. Then two timestamps and the status
 // counters. One line per step on stdout; the exit status is the number of the first failed step (0 = all passed).
 #include <IOKit/IOKitLib.h>
@@ -57,10 +57,12 @@ int main(int argc, char **argv) {
         if (!service) usleep(250000);
     }
     if (!service) return fail(1, "no NativeAdrenoGpu service", 0);
-    kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &gConn);
+    // The driver serves the plugin's open type 0x4147 only (NativeAdrenoPublish.cpp); that connection takes direct selectors as well as the
+    // tunnel. Type 0 is refused with kIOReturnUnsupported (run gpuu1).
+    kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0x4147, &gConn);
     IOObjectRelease(service);
-    if (kr) return fail(2, "IOServiceOpen type 0", kr);
-    printf("ok 2 open\n");
+    if (kr) return fail(2, "IOServiceOpen type 0x4147", kr);
+    printf("ok 2 open type 0x4147\n");
 
     NativeAdrenoAbiParams params{};
     if ((kr = call(NativeAdrenoMethodQuery, nullptr, 0, &params, sizeof params))) return fail(3, "Query", kr);

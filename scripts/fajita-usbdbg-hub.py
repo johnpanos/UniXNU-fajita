@@ -6,7 +6,7 @@
       requests on a Unix socket. Reopens the tty when the phone resets and comes back. Ends on SIGTERM.
   fajita-usbdbg-hub.py call [--sock PATH] OP [ARGS...]
       one request through the hub:  read32 ADDR [COUNT] | write32 ADDR VALUE... | kcmd TEXT... | run CMD... |
-      readp ADDR LEN | readv ADDR LEN | hello | state | wait-up [SECONDS] | screenshot FILE.png [--scale N]
+      readp ADDR LEN | readv ADDR LEN | hello | state | wait-up [SECONDS] | screenshot FILE.png [--scale N] | reset [MODE]
       read32 prints `ADDR: VALUE` lines; kcmd prints the kernel's text; run prints the command's output.
 
 The wire protocol is scripts/fajita-usbdbg.py's (imported from beside this file), so the framing and op codes stay in
@@ -144,6 +144,15 @@ class Hub:
             addr, length = num(a[0]), num(a[1])
             st, data = self.request('read_phys' if op == 'readp' else 'read_virt', struct.pack('<QI', addr, length))
             return {'ok': st == 0, 'out': data.hex() + '\n' if st == 0 else 'status %d\n' % st}
+        if op == 'reset':
+            # reset [MODE]: the kernel resets the phone now (usb-debug=2+), ending a run as soon as its test is done; cycle.sh then sees
+            # fastboot. The reply may not arrive before the reset, so no reply counts as done.
+            try:
+                st, _ = self.request('reset', struct.pack('<I', num(a[0]) if a else 0), timeout=2)
+            except Exception as error:
+                self.note('reset: no reply (%s)' % error)
+                return {'ok': True, 'out': 'reset sent (no reply)\n'}
+            return {'ok': st == 0, 'out': 'reset status %d\n' % st}
         if op == 'kcmd':
             st, data = self.request('kcmd', ' '.join(a).encode(), timeout=float(req.get('timeout', 30)))
             return {'ok': st == 0, 'out': data.decode(errors='replace')}
