@@ -189,7 +189,12 @@ codesign -dvvv "$OUT/NativeAdrenoMetal.bundle" 2>&1 | grep -E 'CDHash|Page size|
 stamp "built $OUT ($(grep -o '"cdhash": "[0-9a-f]*' "$OUT/trust.json" | cut -c12-))"
 if [ -n "$PACK" ]; then
   S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad/gpuuser
-  python3 -I "$BOARD/scripts/make-fajita-gpu-addon.py" "$PACK" --base "${BASE:-$S/metal.ngpu}" --tree "addons/NativeAdrenoMetal.bundle=$OUT/NativeAdrenoMetal.bundle"
+  # Files under /private/var/ngpu persist on the data partition across boots, so the pack states the render settings explicitly: TU_DEBUG
+  # sysmem,nocb (the per-boot A/B: gmem, Turnip's default and sysmem,nocb within 1 fps; sysmem the plugin's own default) and no gpu-env
+  # diagnostics. A later addon layered on this one replaces either.
+  printf 'sysmem,nocb\n' > "$OUT/tu-debug"; printf '# no diagnostics\n' > "$OUT/gpu-env"
+  python3 -I "$BOARD/scripts/make-fajita-gpu-addon.py" "$PACK" --base "${BASE:-$S/metal.ngpu}" --tree "addons/NativeAdrenoMetal.bundle=$OUT/NativeAdrenoMetal.bundle" \
+    --file "tu-debug=$OUT/tu-debug:644" --file "gpu-env=$OUT/gpu-env:644"
   stamp "packed $PACK"
 fi
 if [ -n "$TOOLS" ]; then
