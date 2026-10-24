@@ -112,6 +112,27 @@ Session tools: `ngpu-metal ps|killall NAME|bundle`, `ngpu-vk`, `ngpu-probe` in /
 `fajita-gpu=11 fajita-gpu-delay=90` (stages after userland is up; earlier, stage 10 hung in early boot). The CRASH/ABORT rows of
 BootProgress are in the live log. iOS 16 has no ls/echo/sysctl/kill/launchctl.
 
+## Frame rate (2026-10-23, sessions 225259..232852)
+
+Measured with on-demand swipes: `kcmd touch swipe up|down|left|right [FRAMES] | tap` (FajitaTouchProbe.cpp) and the host sampler
+scratchpad/gpuuser/swipe-rate.py (fires each swipe through the hub, samples `kcmd gpu raw`: presented frames = hand-off completions,
+per-submission ring with publish, completion latency and acquire). Correctness: lock screen after a backboardd restart and home screen
+after a left+right re-render, compared with the all-skips-off baseline (below the clock / status bar).
+
+| Change | Result |
+| --- | --- |
+| skips off (import 1 only) | publish 72-87 ms per submission, 1.7 fps |
+| ro-skip + uncached-skip | publish 15-30 ms (import-skip 0) / 0.2 ms (import-skip 1), 2.3-2.9 fps |
+| import-skip=1 | **wrong**: lock wallpaper red/black after a backboardd restart; default now 0 |
+| acquire dedupe + wpub-skip (default on) | publish 0.2 ms, submit total 0.1-6 ms, 3.6 fps; screens identical |
+| DDR/LLCC BCM vote (FajitaBusVote.cpp, fajita-ddr, on ios16-port) | memcpy 538 -> 3449 MB/s; **3.6 -> 8.9-9.9 fps** |
+| GPU level with the vote: 257 / 520 / 710 MHz | 4.9 / 7.9 / 9.0 fps (GPU-bound); without the vote ~3 fps at any level |
+
+Remaining per-frame cost: GPU execution (completion 70-90 ms per submission at 710 MHz, sysmem rendering forced by the plugin's
+TU_DEBUG=sysmem,nocb for a7xx BV/BR hangs; the A630 has no concurrent binning) and an 7-10 ms acquire per completed fence on the
+waiting thread. kcmd tools: `gpu raw|set|freq N|membw`, `bus [read|off|PEAK [AVG]]`, `touch ...`; frontend telemetry rows with
+scratchpad/gpuuser/rows.py (readv of native_adreno_metal_rows).
+
 ## Left
 
 1. Stages 10/11 before backboardd's first Metal discovery (today: `ngpu-metal killall backboardd` after stage 11).
