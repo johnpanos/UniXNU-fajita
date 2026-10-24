@@ -376,6 +376,7 @@ bool cpRun(const uint32_t *words, size_t count, const char *what, uint32_t timeo
 extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8], native_adreno_pool_status;
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
+extern "C" volatile uint64_t native_legacy_copy_n __attribute__((weak)), native_legacy_copy_sum __attribute__((weak)), native_legacy_copy_max __attribute__((weak));
 bool stage7()
 {
     // The user BO pool (sheng's sheng-gpu-pool): user BOs from one write-combined contiguous block skip the per-submission
@@ -768,6 +769,12 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
                     (unsigned long long)n, us(native_adreno_submit_time[1]), us(native_adreno_submit_time[2]), us(native_adreno_submit_time[3]),
                     us(native_adreno_submit_time[4]), us(native_adreno_submit_time[5]), us(native_adreno_submit_time[6]),
                     (unsigned long long)(native_adreno_submit_time[7] * tb.numer / tb.denom / 1000));
+    }
+    if (&native_legacy_copy_n && native_legacy_copy_n) {
+        mach_timebase_info_data_t tb; clock_timebase_info(&tb);
+        w = appendf(out, cap, w, "display copy n%llu avg us %llu max us %llu\n", (unsigned long long)native_legacy_copy_n,
+                    (unsigned long long)(native_legacy_copy_sum / native_legacy_copy_n * tb.numer / tb.denom / 1000),
+                    (unsigned long long)(native_legacy_copy_max * tb.numer / tb.denom / 1000));
     }
     w = appendf(out, cap, w, "usage: gpu [N | log | regs | retry]  (stages 1..%u)\n", kLastStage);
     return w;
