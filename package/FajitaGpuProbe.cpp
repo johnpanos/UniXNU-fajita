@@ -33,6 +33,12 @@ extern "C" {
 #include "NativeAdrenoGpuContext.h"
 #include "NativeAdrenoRing.h"
 #include "NativeAdrenoMemory.h"
+#include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoTimer.h"
+#include "NativeAdrenoABI.h"
+extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
+    const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t input_bits, uint32_t output_bits) __attribute__((weak));
+extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed) __attribute__((weak));
 
 // Firmware, embedded by scripts/build-fajita-gpu.py from the ignored .cache copies (sha256-pinned); weak so a kernel built
 // without them still links and stage 5 reports "nofw".
@@ -549,14 +555,6 @@ bool stage9()
 // 0x100000 (= UCHE_GMEM_RANGE_MIN); the UBWC fields match A630Gpu.c's a6xx_calc_ubwc_config defaults; flags are IOVA-only
 // (A630 BOs are not IO-coherent). The window is 1 GiB at 0x20000000, inside the 2 GiB GPU context aperture and clear of the
 // GMEM window at 1-2 MiB.
-extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
-    const void *timer, const void *info, uint32_t input_bits, uint32_t output_bits) __attribute__((weak));
-extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed) __attribute__((weak));
-// NativeAdrenoSubmit and NativeAdrenoTimer are opaque here; the board keeps raw storage sized from the headers and the
-// service objects outlive the system. Their attach is done through the C++ objects in NativeAdrenoPublish's own translation
-// unit, so here we only pass VM/ring/clock and the timer I/O the publish wires up.
-#include "NativeAdrenoSubmit.h"
-#include "NativeAdrenoTimer.h"
 static NativeAdrenoSubmit gSubmit;
 static NativeAdrenoTimer gTimer;
 static NativeAdrenoTimeIo gTimerIo;
@@ -577,7 +575,7 @@ static const NativeAdrenoAbiDeviceInfo gDeviceInfo = {
 bool stage10()
 {
     if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
-    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm ? NativeAdrenoGpuContextVm() : nullptr;
+    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
     if (!vm) {gpuLog("S10 no vm"); return false;}
     const IOReturn attached = gSubmit.attach(vm, &gRing);
     if (attached) {gpuLog("S10 submit attach %x", attached); return false;}
