@@ -384,6 +384,7 @@ extern "C" volatile int native_adreno_trace __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_publish __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_uncached_acquire_skip __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_acquire_stats[2] __attribute__((weak));
+extern "C" volatile uint64_t native_adreno_import_check[3] __attribute__((weak));
 extern "C" bool (*native_adreno_page_uncached)(uint64_t physical) __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_uncached_skipped __attribute__((weak));
 extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
@@ -1038,6 +1039,9 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
                     (unsigned long long)(&native_gop_gpu_failures ? native_gop_gpu_failures : 0),
                     (unsigned long long)(&native_gop_gpu_abandoned ? native_gop_gpu_abandoned : 0),
                     &native_legacy_gpu_fallbacks ? native_legacy_gpu_fallbacks : 0u, &native_legacy_gpu_last_status ? native_legacy_gpu_last_status : 0u);
+    if (&native_adreno_import_check)
+        w = appendf(out, cap, w, "import check %llu unmapped %llu replaced %llu\n", (unsigned long long)native_adreno_import_check[0],
+                    (unsigned long long)native_adreno_import_check[1], (unsigned long long)native_adreno_import_check[2]);
     w = appendf(out, cap, w, "usage: gpu [N | log | regs | retry]  (stages 1..%u)\n", kLastStage);
     return w;
 }
