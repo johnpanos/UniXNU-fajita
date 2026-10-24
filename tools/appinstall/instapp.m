@@ -29,6 +29,17 @@ int main(int argc, char **argv) {
 			NSError *e = nil;
 			id r = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(fm, NSSelectorFromString(@"createTemporaryDirectoryInDirectoryURL:error:"), u, &e);
 			printf("createTemporaryDirectoryInDirectoryURL -> %s err %s\n", [[r description] UTF8String], [[e description] UTF8String]);
+		} else if ([cmd isEqual:@"reg"]) {
+			// uicache-style: register an app already in place (reg PATH [System|User|Internal])
+			NSString *path = @(argv[2]);
+			NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Info.plist"]];
+			if (!d) { printf("no Info.plist\n"); return 1; }
+			d[@"ApplicationType"] = argc > 3 ? @(argv[3]) : @"User";
+			d[@"Path"] = path; d[@"_LSBundlePath"] = path;
+			d[@"IsDeletable"] = @YES;
+			d[@"Entitlements"] = @{@"application-identifier": d[@"CFBundleIdentifier"], @"get-task-allow": @YES};
+			BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, NSSelectorFromString(@"registerApplicationDictionary:"), d);
+			printf("registerApplicationDictionary %s -> %d\n", [d[@"CFBundleIdentifier"] UTF8String], ok);
 		} else if ([cmd isEqual:@"mi"]) {
 			int (*inst)(CFStringRef, CFDictionaryRef, void *, void *) = dlsym(mi, "MobileInstallationInstall");
 			printf("MobileInstallationInstall %p\n", inst);
