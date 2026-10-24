@@ -6,9 +6,9 @@ iOS 16.7.16 board. Logs of the runs are in the session scratchpad, `logs/pmic-*`
 | --- | --- |
 | SPMI bus (`drivers/NativeSpmi`, `libNativeSpmi.a`) | works on hardware: arbiter v5 (`0x50000000`), 262 APIDs, 208 peripherals mapped, 91 writable by EE 0 (pmic-s1) |
 | Charging (`fajita-pmic=2`, board default) | works: the bootloader leaves charging off; after the pmOS charger setup the battery takes +1.0 A and its voltage rises (pmic-s2) |
-| Keys (`fajita-pmic-keys=1`, `native-hid-buttons=1`) | real keys read correctly while released; the HID path is in test |
-| Battery source (`fajita-pmic-batt=1`) | in test |
-| bq27411 gauge (`fajita-pmic-bq=<n>`) | in test |
+| Keys (`fajita-pmic-keys=1`, `native-hid-buttons=1`) | work: synthetic volume up shows iOS's volume indicator (pmic-k1), synthetic power wakes the lock screen to "Swipe up to open" (pmic-k2); real volume keys pressed by the user in pmic-k1 (t=228-229 s: down 3x, up 2x) reached the event driver, every report accepted |
+| Battery source (`fajita-pmic-batt=1`) | works: `ioreg -r -c AppleSmartBattery -l` shows CurrentCapacity, IsCharging, ExternalConnected; the status bar shows the level with the charging bolt (pmic-k1, -k2) |
+| bq27411 gauge (`fajita-pmic-bq=2`) | works: 4002 mV, +1025 mA, 36 %, 1224 -> 1249 of 3471 mAh in 90 s, SoH 95 % (pmic-k2); the battery source uses it |
 
 ## Pieces
 
@@ -75,3 +75,20 @@ nothing is written. Released state seen: `pon00 vd01 vu01`.
 The PMI8998 fuel gauge's voltage and current are plain register reads (BATT_INFO 0x41a0, 0x41a2) and correct, but its monotonic
 SoC (0x4009) is not a usable percentage on this phone: the FG node is disabled in mainline and pmOS (OnePlus uses the bq27411 on
 i2c10 at 0x55), and in pmic-s2 it rose 18 -> 24 % for about 80 mAh (2 % of 3700 mAh). The percentage comes from the bq27411.
+
+### bq27411 (pmic-k2)
+
+The firmware leaves i2c10 ready: pins 55/56 on qup10 with pull-up (`ctl 007`), the SE2 branch running (`0x18274 = 0x00004220`),
+DFS level 0 = 19.2 MHz, SE firmware `0x0311` (I2C). `fajita-pmic-bq=2` still votes the three wrapper 1 branches (an OR into
+`0x5200c`, never removed), sets the pins as the board does and brings the engine up at 100 kHz; only standard-command reads follow
+(register pointer, repeated START, two bytes). Readings agree with the charger: `4002mV 1025mA soc36% 1224/3471mAh` and the
+remaining charge rises 25 mAh in 90 s at 1.0 A. The PMI8998 FG read 25 % at the same time.
+
+## Evidence that iOS acts on the keys
+
+| Run | Synthetic key (time) | Screenshot (BootDiagExport, time) | Shows |
+| --- | --- | --- | --- |
+| pmic-k1 | volume up 160 s, volume down 163 s | 161 s | lock screen with the iOS 16 compact volume indicator under the battery icon |
+| pmic-k2 | power 166 s | 169 s | lock screen woken: "Swipe up to open" and the Control Center hint, absent in k1 |
+
+The event driver lists the consumer elements 0x40, 0x30, 0xE9, 0xEA of report 2 (ioreg, pmic-k1); every report returned 0.
