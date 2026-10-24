@@ -4,6 +4,8 @@
 #  - APP is a staged system bundle name (MobileCal, Weather, ...) taken from STAGEDDIR (apfswalk output of /private/var/staged_system_apps),
 #    registered as System; "Hello" installs OUTDIR/Hello.app (build.sh) as User.
 #  - UUIDs are deterministic: AAAAAAAA-0000-0000-0000-<crc of the app name>; the bundle id is read from the bundle's Info.plist.
+# STAGEDDIR must come from the 16.7.16 OS image, NOT the 21H461 one (those apps need TipKit etc. and abort in dyld):
+#   dmg2img -i .cache/ipsw/20H392/087-86698-044.dmg -o os16.img; apfswalk os16.img 17408 0 /private/var/staged_system_apps STAGEDDIR
 # Needs OUTDIR/{instapp,fsx} already pushed to /private/var/ngpu/sbin (this script pushes them).
 S=$1; O=$2; ST=$3; shift 3; SS=$S/session.sh; H=$(cd "$(dirname "$0")" && pwd); T=$(mktemp -d); B=/private/var/containers/Bundle/Application
 for t in instapp fsx; do $SS push $O/$t /private/var/ngpu/sbin/$t | grep -q 'put ok' || { echo "push $t failed"; exit 1; }; done
