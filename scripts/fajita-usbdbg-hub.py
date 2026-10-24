@@ -122,6 +122,13 @@ class Hub:
         if op == 'state':
             st, data = self.request('state')
             return {'ok': st == 0, 'out': data.decode(errors='replace')}
+        if op == 'reset':
+            # the phone resets at once (device needs usb-debug=2), so no reply is expected
+            try:
+                st, _ = self.request('reset', struct.pack('<I', num(a[0]) if a else 0), timeout=2)
+            except Exception:
+                st = 0
+            return {'ok': st == 0, 'out': 'reset sent (status %d)\n' % st}
         if op == 'read32':
             addr, count = num(a[0]), num(a[1]) if len(a) > 1 else 1
             out = []
