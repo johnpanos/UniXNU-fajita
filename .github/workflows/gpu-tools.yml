@@ -1,0 +1,43 @@
+name: GPU userland tools
+
+# Builds the fajita GPU userland test tools (package/gpu-tools) for plain arm64 iOS 16 on a macOS runner (the Linux host has no iOS SDK
+# or Mach-O signer), 4 KiB-page ad-hoc signed with the usb-debug agent's minimal entitlements. ngpu-probe drives NativeAdreno's user-client
+# ABI directly; its header comes from the johnpanos/NativeAdreno fork (branch fajita-a630). The kernel embeds the signed binaries and
+# writes them under /private/var/ngpu/sbin (usb-debug=3 mounts that over /usr/sbin), so the usb-debug agent can run them.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - package/gpu-tools/**
+      - .github/workflows/gpu-tools.yml
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: johnpanos/NativeAdreno
+          ref: fajita-a630
+          path: NativeAdreno
+      - name: Build and sign
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          xcrun --sdk iphoneos clang++ -std=c++17 -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Werror \
+            -I package/gpu-tools/include -I NativeAdreno package/gpu-tools/ngpu-probe.cpp -framework IOKit -o out/ngpu-probe
+          codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.ngpu-probe \
+            --entitlements package/gpu-tools/ngpu-probe-entitlements.plist out/ngpu-probe
+          codesign --verify --strict out/ngpu-probe
+          codesign -dvvv out/ngpu-probe 2>&1 | grep -E 'CDHash|Page size|Identifier' | tee out/codesign.txt
+          git -C NativeAdreno rev-parse HEAD > out/native-adreno.txt
+          file out/ngpu-probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-tools
+          path: out/
