@@ -104,12 +104,14 @@ jobs:
         env:
           UNIXNU_IOS_TARGET: '16.0'
           UNIXNU_TURNIP_REPLAY: '0'
+          UNIXNU_SCALELIB: '1'
         run: cd unixnu && python3 scripts/build-adreno-metal-plugin.py
       - name: Collect
         run: |
           set -e
           mkdir -p out
           cp -R unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle out/
+          cp unixnu/build/adreno-metal-plugin/scanout_scale.metallib out/
           cp unixnu/build/adreno-metal-plugin/adrenoprobed unixnu/build/adreno-metal-plugin/*.plist unixnu/build/adreno-metal-plugin/trust.json out/
           ( git -C unixnu rev-parse HEAD; git -C unixnu submodule status drivers/NativeMetal drivers/NativeAdreno ) > out/sources.txt
           codesign -dvvv out/NativeAdrenoMetal.bundle 2>&1 | grep -E 'CDHash|Page size|Identifier' | tee out/codesign.txt

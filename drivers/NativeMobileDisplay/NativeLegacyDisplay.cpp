@@ -385,8 +385,9 @@ public:
         if(!gpuBypass) {
             if(!native_legacy_prepare_scanout()) {native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;}
         }
-        // The GPU presenter copies one to one: a logical display is always scaled by the CPU below.
-        if(!gpuBypass && !logical && native_legacy_gpu_offer(this,memory,sourceStride,width,height)) {
+        // The GPU presenter copies a panel-sized frame one to one and scales a logical one into the fitted rectangle with the same taps as
+        // the CPU copy below (GpuScanoutPresenter.h); it clears the letterbox itself, so the CPU copy's letterbox stays valid if it falls back.
+        if(!gpuBypass && native_legacy_gpu_offer(this,memory,sourceStride,width,height)) {
             // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
             native_legacy_swap_stage(1);
             shadowValid=false;gpuRequest=request;gpuLength=length;transferred=true;return;
