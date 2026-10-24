@@ -769,6 +769,8 @@ void govThread(void *, wait_result_t)
             gGov.maxTempDeci = uint32_t(t); gGov.hotZone = zone;
             const unsigned cap = t >= 840 ? low : t >= 800 ? (top > 4 ? 4u : top) : top;
             if (cap != gGov.cap) {gGov.cap = cap; gpuLog("gov: %d.%d C (zone %u): GPU level capped at %u", t / 10, t % 10, zone, cap);}
+            if (!(gGov.ticks % 500)) gpuLog("gov: level %u bus %u max %d.%d C zone %u changes %u bus-errors %u", gGov.level, gGov.bus, t / 10, t % 10,
+                                            zone, gGov.changes, gGov.busErrors);
         }
         if (active) {
             gGov.lastActiveUs = now;
