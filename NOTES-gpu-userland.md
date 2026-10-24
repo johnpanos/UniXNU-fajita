@@ -86,6 +86,23 @@ Local worktrees: /home/john/src/UniXNU-ios16-stack-gpuuser (UniXNU), /home/john/
 | session-201609 | backboardd takes the device, then SIGSEGV in QuartzCore's newPipelineLibraryWithFilePath:error: (upstream main answers it) |
 | session-202908/210422 | backboardd aborts in create_fragment_shader: QuartzCore 20H392 sets a uchar3 constant the frontend refused (fixed) |
 | session-211948 | **CARenderServer composites through Metal on the A630**: lock screen drawn by the native device, render pipelines compiled on the phone |
+| session-213631 | **Boots straight into the GPU-composited lock screen** (stages at ~36 s, backboardd's first discovery takes the device) |
+
+## Reproduce (GPU-composited boot)
+
+```sh
+S=/tmp/claude-1000/-home-john-src-UniXNU/1375c105-6991-4ff3-9a85-56683ac7fae0/scratchpad
+# kernel (gpu-userland worktree; merges origin/ios16-port first)
+bash $S/build-kernel16-gpuuser.sh
+# userland from CI: "GPU plugin (iOS 16)" (ios16/gpu-plugin.ref) and "GPU userland tools", then the add-on
+python3 scripts/make-fajita-gpu-addon.py $S/gpuuser/metal.ngpu --file sbin/ngpu-metal=gpu-tools/ngpu-metal:755 \
+  --tree addons/NativeAdrenoMetal.bundle=gpu-plugin/NativeAdrenoMetal.bundle --file addons/NativeAdrenoMetal.publish=publish:644 \
+  --file addons/NativeAdrenoMetal.clients=clients:644
+GPU_ADDON=$S/gpuuser/metal.ngpu bash $S/build-payload16-gpuuser.sh usb-debug=3 fajita-gpu=11 fajita-gpu-delay=8 [ngpu-trace=1]
+$S/session.sh start $S/payload16-gpuuser.img $S/boot-gpu.img     # boot-gpu.img: DarwinBoot d099354 + -v, delivers the add-on
+```
+
+On a first boot without the framebuffer preferences in Data, the plugin writes them and restarts backboardd once (marker 68f5).
 
 Before fixing a failure, check UniXNU upstream (NativeMetal/NativeAdreno main, the GPU build scripts): upstream main is merged into the
 fajita-a630 branches (NativeMetal, NativeAdreno 0f851b0) and UniXNU fajita-a630-userland 52c2a4f.
