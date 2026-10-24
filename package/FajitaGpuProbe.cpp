@@ -18,6 +18,7 @@
 //     bound IOAcceleratorES base (scripts/data/fajita-ioaccelerator-base-abi.json) against the live metaclass
 // Linux v6.16 (msm a6xx) is the reference for every value; see drivers/FajitaAdreno/A630Gmu.h.
 #include <IOKit/IOService.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>

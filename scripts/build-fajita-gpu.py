@@ -85,7 +85,14 @@ def staged_accelerator(cpp_rec, commands):
         raise SystemExit('the IOAcceleratorES record is not a 136-byte, 168-entry base without operational overrides')
     source = ADRENO / 'NativeAdrenoAccelerator.cpp'
     obj = OUT / 'NativeAdrenoAccelerator.o'
-    command = command_for(cpp_rec, source, obj) + WARNINGS + ['-Wno-overloaded-virtual'] + INCLUDES
+    # Its "../NativeMetal/OriginalAcceleratorABI.h" include: this tree has no NativeMetal module, so the copy in drivers/FajitaAdreno
+    # is placed where that relative path resolves from an include directory.
+    shim = OUT / 'include/NativeMetal'
+    shim.mkdir(parents=True, exist_ok=True)
+    (shim / 'OriginalAcceleratorABI.h').write_bytes((A630 / 'OriginalAcceleratorABI.h').read_bytes())
+    (OUT / 'include/here').mkdir(exist_ok=True)
+    command = (command_for(cpp_rec, source, obj) + WARNINGS + ['-Wno-overloaded-virtual'] + INCLUDES +
+               ['-I', str(OUT / 'include/here')])
     commands[source.name] = command
     result = subprocess.run(command, cwd=cpp_rec['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
     (OUT / 'NativeAdrenoAccelerator.log').write_text(result.stdout)
