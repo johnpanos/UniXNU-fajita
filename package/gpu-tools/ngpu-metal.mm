@@ -23,7 +23,7 @@ static double nowMs() {
 int main(int argc, char **argv) {
     // A hung GPU or Metal call must not wedge the usb-debug agent (it runs one command at a time): exit after NGPU_LIMIT s (20).
     signal(SIGALRM, [](int) {static const char m[] = "FAIL timeout (alarm)\n"; write(1, m, sizeof m - 1); _exit(124);});
-    alarm(getenv("NGPU_LIMIT") ? (unsigned)atoi(getenv("NGPU_LIMIT")) : 20);
+    alarm(getenv("NGPU_LIMIT") ? (unsigned)atoi(getenv("NGPU_LIMIT")) : 150);   // device creation compiles the runtime's own pipelines
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IOLBF, 0);
         const double t0 = nowMs();
