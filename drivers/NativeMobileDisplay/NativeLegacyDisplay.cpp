@@ -15,6 +15,7 @@
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 extern "C" __attribute__((noreturn)) void native_legacy_backend_guard(unsigned,void *,void *);
+extern "C" void native_legacy_backend_miss(unsigned,void *,void *);   // LegacyDisplayProbe.cpp: logs and returns
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" bool native_legacy_gop_mapping_observed(IOService *,IOMemoryMap *,uint32_t,uint32_t);
 extern "C" void native_legacy_registration_observed(IOService *);
@@ -634,7 +635,8 @@ public:
         }
         OSSafeReleaseNULL(mapping);return valid;
     }
-#define LEAF(n) __attribute__((noreturn,noinline)) void opaque##n() override { native_legacy_backend_guard(n,this,__builtin_return_address(0)); }
+// A leaf the render server reaches logs loudly and fails the call (x0 = kIOReturnUnsupported) instead of panicking the kernel.
+#define LEAF(n) __attribute__((noinline)) void opaque##n() override { native_legacy_backend_miss(n,this,__builtin_return_address(0)); __asm__ volatile("mov w0, #0x2c7\n\tmovk w0, #0xe000, lsl #16":::"x0","memory"); }
     // 211, 245, 246, 306, 307, 338 and 345 on 21H461 (OriginalLegacyLayout.h).
     NATIVE_LEGACY_GUARDED_LEAVES(LEAF)
 #undef LEAF
