@@ -55,25 +55,29 @@ def check_object(path):
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     rec = record('iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
-    source = KIT / 'FajitaCpuFreq.cpp'
-    obj = OUT / 'FajitaCpuFreq.o'
-    command = command_for(rec, source, obj) + WARNINGS + INCLUDES
-    result = subprocess.run(command, cwd=rec['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180)
-    (OUT / 'FajitaCpuFreq.log').write_text(result.stdout)
-    if result.returncode:
-        raise SystemExit(result.stdout[-4000:])
-    check_object(obj)
-    (OUT / 'compile-commands.json').write_text(json.dumps({source.name: command}, indent=2) + '\n')
+    sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
+    objects, commands = [], {}
+    for source in sources:
+        obj = OUT / (source.stem + '.o')
+        command = command_for(rec, source, obj) + WARNINGS + INCLUDES
+        result = subprocess.run(command, cwd=rec['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180)
+        (OUT / (source.stem + '.log')).write_text(result.stdout)
+        if result.returncode:
+            raise SystemExit(result.stdout[-4000:])
+        check_object(obj)
+        objects.append(obj)
+        commands[source.name] = command
+    (OUT / 'compile-commands.json').write_text(json.dumps(commands, indent=2) + '\n')
     archive = OUT / 'libFajitaCpuFreq.a'
     previous = hashlib.sha256(archive.read_bytes()).hexdigest() if archive.is_file() else None
     archive.unlink(missing_ok=True)
-    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj)], check=True, timeout=60)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive)] + [str(o) for o in objects], check=True, timeout=60)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if digest != previous:
         (OBJ_ROOT / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
     (OUT / 'build-report.json').write_text(json.dumps({
         'archive_sha256': digest,
-        'source_sha256': {str(source.relative_to(ROOT)): hashlib.sha256(source.read_bytes()).hexdigest()},
+        'source_sha256': {str(source.relative_to(ROOT)): hashlib.sha256(source.read_bytes()).hexdigest() for source in sources},
         'hardware_execution': False,
     }, indent=2) + '\n')
     print(f'PASS: libFajitaCpuFreq.a (sha256 {digest[:16]})')
