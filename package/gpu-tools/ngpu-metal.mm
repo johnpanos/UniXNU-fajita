@@ -6,6 +6,7 @@
 // One line per step; the exit status is the first failed step (0 = all passed).
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <objc/runtime.h>
 #include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,19 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IOLBF, 0);
         const double t0 = nowMs();
+        if (argc > 1 && !strcmp(argv[1], "bundle")) {
+            // Load the plugin the way Metal's discovery does, with every error visible.
+            NSBundle *bundle = [NSBundle bundleWithPath:@"/System/Library/Extensions/NativeAdrenoMetal.bundle"];
+            printf("bundle %s\n", bundle ? bundle.bundlePath.UTF8String : "nil");
+            NSError *error = nil;
+            const BOOL loaded = [bundle loadAndReturnError:&error];
+            printf("load %d error %s\n", loaded, error ? error.description.UTF8String : "-");
+            Class principal = bundle.principalClass;
+            Class base = NSClassFromString(@"_MTLDevice");
+            printf("principal %s subclass-of-_MTLDevice %d\n", principal ? class_getName(principal) : "nil",
+                   principal && base ? [principal isSubclassOfClass:base] : -1);
+            return loaded && principal ? 0 : 9;
+        }
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();   // MTLCopyAllDevices is iOS 18+
         printf("ok 1 discovery returned in %.0f ms\n", nowMs() - t0);
         if (!device) {printf("FAIL 2 MTLCreateSystemDefaultDevice: nil\n"); return 2;}
