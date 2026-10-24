@@ -91,7 +91,29 @@ void testConversions() {
 }
 }
 
+void testGauge() {
+    // 298.2 K, 3986 mV, flags 0, 1200 of 3500 mAh, +950 mA, 34 %, SoH 96 %.
+    const uint16_t w[8] = {2982, 3986, 0x0000, 1200, 3500, 950, 34, 0x0160};
+    fpm_bq b;
+    fpm_bq_decode(&b, w);
+    CHECK(b.valid && b.mv == 3986 && b.ma == 950 && b.soc == 34 && b.temp_dc == 251 && b.full_mah == 3500 && b.soh == 0x60);
+    const uint16_t neg[8] = {2982, 3700, 1, 1200, 3500, (uint16_t)-420, 30, 0};
+    fpm_bq_decode(&b, neg);
+    CHECK(b.valid && b.ma == -420);
+    const uint16_t junk[8] = {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff};
+    fpm_bq_decode(&b, junk);
+    CHECK(!b.valid);
+    // DFS: level 2 is TCXO (source 0, no divider), the others GPLL0-derived.
+    uint32_t cfg[8] = {0x0105, 0x0605, 0x0000, 0x0101, 0, 0, 0, 0}, m[8] = {}, n[8] = {};
+    CHECK(fpm_xo_level(1, cfg, m, n, 8, 0) == 2);
+    CHECK(fpm_xo_level(0, cfg, m, n, 8, 0x0000) == 0);
+    CHECK(fpm_xo_level(0, cfg, m, n, 8, 0x0105) == -1);
+    CHECK(fpm_pin_offset(55) == 0x537000u && fpm_pin_cfg(1, 2, 0) == 0x04);
+    CHECK(fpm_branch_running(0x80000002) && !fpm_branch_running(0x80000000) && fpm_branch_running(0));
+}
+
 int main() {
+    testGauge();
     testSequence();
     testKeys();
     testConversions();

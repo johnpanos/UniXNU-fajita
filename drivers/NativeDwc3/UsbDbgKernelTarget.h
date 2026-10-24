@@ -2,9 +2,14 @@
 // Kernel hooks of the fjdbg command layer (UsbDbgDevice.h Target): memory and MMIO peek/poke and named kernel commands.
 //
 //   read32/write32  device MMIO: each 4 KiB page is mapped once with ml_io_map (Device-nGnRE) and kept in a small table
-//                   for the driver's life, so poking a register block costs one map. An access to a block whose clock or
-//                   power domain is off can stall the interconnect: that is the caller's risk (the watchdog is the backstop).
-//   readPhys        ml_phys_read_word / _byte (DRAM through the physical aperture, anything else through a copy window)
+//                   for the driver's life, so poking a register block costs one map. Neither XNU nor this hardware can make
+//                   one MMIO load fault-safe: a synchronous external abort in the kernel always ends in panic("Kernel data
+//                   abort.") (sleh.c recovers VM faults only; ml_probe_read is unimplemented on arm64), and a block whose
+//                   power domain is collapsed may simply stall the bus. So the access is refused instead of attempted: DRAM
+//                   (>= 0x80000000) never goes through ml_io_map, and every block of the power table below is touched only
+//                   while its GDSC reports PWR_ON (read from the always-on clock controller first); otherwise the request
+//                   answers kErrDenied. Anything else outside the table is the caller's risk, with the watchdog as backstop.
+//   readPhys        ml_phys_read_word / _byte, only for RAM the pmap manages (pmap_valid_address); else kErrArgs
 //   readVirt        ml_nofault_copy (a kernel address that is not mapped returns kErrFault, it never faults)
 //   writePhys       ml_phys_write_word / _byte
 //   kcmd            "help" lists the commands; every other first word is looked up in the table that drivers fill with
@@ -17,6 +22,14 @@
 
 #include "UsbDbgDevice.h"
 
+#if defined(__aarch64__)
+#define USBDBGK_DSB() __asm__ volatile("dsb sy" ::: "memory")
+#define USBDBGK_YIELD() __asm__ volatile("yield")
+#else   // the host tests (tests/KernelTarget.cpp)
+#define USBDBGK_DSB() __asm__ volatile("" ::: "memory")
+#define USBDBGK_YIELD() __asm__ volatile("" ::: "memory")
+#endif
+
 extern "C" {
 vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 unsigned int ml_phys_read_word(vm_offset_t paddr);
@@ -27,7 +40,8 @@ vm_size_t ml_nofault_copy(vm_offset_t virtsrc, vm_offset_t virtdst, vm_size_t si
 typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out, size_t cap);
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help);
 extern volatile uint32_t native_dwc3_gadget_on;   // NativeDwc3.cpp: the usb-debug value
-volatile uint32_t native_dwc3_mmio_maps = 0, native_dwc3_kcmds = 0;
+int pmap_valid_address(uint64_t addr);           // osfmk/arm/pmap/pmap.h (boolean_t)
+volatile uint32_t native_dwc3_mmio_maps = 0, native_dwc3_kcmds = 0, native_dwc3_mmio_refused = 0;
 }
 
 namespace usbdbgk {
@@ -59,11 +73,43 @@ static volatile uint32_t *mmioWord(uint64_t pa)
 // memory is unpredictable). The SDM845 DRAM starts at 0x80000000; every block a register peek wants is below it.
 static bool isMmio(uint64_t pa) { return pa < 0x80000000ull; }
 
+// Blocks whose registers are only safe to touch while their power domain is up: [start, end) and the GDSC register
+// (clock controller base + gdscr offset) whose bit 31 (PWR_ON) reports it. Offsets from mainline Linux
+// drivers/clk/qcom/{gcc,gpucc,dispcc}-sdm845.c, ranges from arch/arm64/boot/dts/qcom/sdm845.dtsi. The clock controllers
+// themselves (GCC 0x100000, GPUCC 0x5090000, DISPCC 0xaf00000) are always on.
+struct PowerBlock { uint64_t start, end, gdscr; const char *name; };
+static const PowerBlock kPowerBlocks[] = {
+  {0x01c00000, 0x01c08000, 0x00100000 + 0x6b004, "pcie0"},
+  {0x01c08000, 0x01c10000, 0x00100000 + 0x8d004, "pcie1"},
+  {0x01d84000, 0x01d90000, 0x00100000 + 0x77004, "ufs"},
+  {0x0a600000, 0x0a700000, 0x00100000 + 0x0f004, "usb30_prim"},
+  {0x0a800000, 0x0a900000, 0x00100000 + 0x10004, "usb30_sec"},
+  {0x05000000, 0x05040000, 0x05090000 + 0x100c, "gpu (gx)"},
+  {0x0506a000, 0x05090000, 0x05090000 + 0x106c, "gmu (cx)"},
+  {0x0509e000, 0x0509f000, 0x05090000 + 0x106c, "gpu cx_mem (cx)"},
+  {0x0ae00000, 0x0af00000, 0x0af00000 + 0x3000, "mdss"},
+};
+
+static volatile uint32_t *mmioWord(uint64_t pa);
+
+// 0 when pa may be accessed, else the block whose domain is collapsed (or whose GDSC could not be read).
+static const PowerBlock *poweredOff(uint64_t pa)
+{
+  for (const PowerBlock &b : kPowerBlocks) {
+    if (pa < b.start || pa >= b.end) continue;
+    volatile uint32_t *g = mmioWord(b.gdscr);
+    if (!g || !(*g & 0x80000000u)) return &b;
+    return nullptr;
+  }
+  return nullptr;
+}
+
 static int32_t read32(void *, uint64_t pa, uint32_t *out, uint32_t count)
 {
   for (uint32_t i = 0; i < count; i++) {
     uint64_t a = pa + 4ull * i;
     if (!isMmio(a)) return usbdbg::kErrArgs;
+    if (poweredOff(a)) { native_dwc3_mmio_refused = native_dwc3_mmio_refused + 1; return usbdbg::kErrDenied; }
     volatile uint32_t *w = mmioWord(a);
     if (!w) return usbdbg::kErrFault;
     out[i] = *w;
@@ -76,17 +122,28 @@ static int32_t write32(void *, uint64_t pa, const uint32_t *in, uint32_t count)
   for (uint32_t i = 0; i < count; i++) {
     uint64_t a = pa + 4ull * i;
     if (!isMmio(a)) return usbdbg::kErrArgs;
+    if (poweredOff(a)) { native_dwc3_mmio_refused = native_dwc3_mmio_refused + 1; return usbdbg::kErrDenied; }
     volatile uint32_t *w = mmioWord(a);
     if (!w) return usbdbg::kErrFault;
     *w = in[i];
-    __asm__ volatile("dsb sy" ::: "memory");
+    USBDBGK_DSB();
   }
   return usbdbg::kOk;
 }
 
+// Every page of [pa, pa+len) must be RAM the pmap manages: ml_phys_read of anything else (a hole, device memory, the
+// hypervisor's carve-outs) can abort or stall.
+static bool managedRam(uint64_t pa, uint32_t len)
+{
+  if (pa < 0x80000000ull || !len) return false;
+  for (uint64_t p = pa & ~uint64_t(0xfff); p < pa + len; p += 0x1000)
+    if (!pmap_valid_address(p)) return false;
+  return true;
+}
+
 static int32_t readPhys(void *, uint64_t pa, void *out, uint32_t len)
 {
-  if (pa < 0x80000000ull) return usbdbg::kErrArgs;   // MMIO goes through read32
+  if (!managedRam(pa, len)) return usbdbg::kErrArgs;   // MMIO goes through read32
   uint8_t *o = static_cast<uint8_t *>(out);
   uint32_t i = 0;
   while (i < len) {
@@ -105,7 +162,7 @@ static int32_t readPhys(void *, uint64_t pa, void *out, uint32_t len)
 
 static int32_t writePhys(void *, uint64_t pa, const void *in, uint32_t len)
 {
-  if (pa < 0x80000000ull) return usbdbg::kErrArgs;
+  if (!managedRam(pa, len)) return usbdbg::kErrArgs;
   const uint8_t *s = static_cast<const uint8_t *>(in);
   uint32_t i = 0;
   while (i < len) {
@@ -145,13 +202,25 @@ static size_t kcmd(void *, const char *cmd, size_t len, char *out, size_t cap)
   size_t argsLen = len - nameLen;
   while (argsLen && args[0] == ' ') { args++; argsLen--; }
   const unsigned n = gKcmdCount;
+  if (nameLen == 5 && !__builtin_memcmp(cmd, "power", 5)) {   // built in: the guarded blocks and their power state
+    for (const PowerBlock &b : kPowerBlocks) {
+      volatile uint32_t *g = mmioWord(b.gdscr);
+      int k = snprintf(out + w, cap - w, "%-16s %08llx-%08llx gdscr %08llx = %08x %s\n", b.name, (unsigned long long)b.start,
+                       (unsigned long long)b.end, (unsigned long long)b.gdscr, g ? *g : 0u, g && (*g & 0x80000000u) ? "on" : "OFF");
+      if (k < 0 || size_t(k) >= cap - w) break;
+      w += size_t(k);
+    }
+    return w;
+  }
   if (nameLen == 0 || (nameLen == 4 && !__builtin_memcmp(cmd, "help", 4))) {
+    int k0 = snprintf(out, cap, "power  the guarded MMIO blocks and their power state (built in)\n");
+    w = k0 > 0 ? size_t(k0) : 0;
     for (unsigned i = 0; i < n && w < cap; i++) {
       int k = snprintf(out + w, cap - w, "%s  %s\n", gKcmd[i].name, gKcmd[i].help ? gKcmd[i].help : "");
       if (k < 0) break;
       w += size_t(k) < cap - w ? size_t(k) : cap - w;
     }
-    if (!n && cap) { int k = snprintf(out, cap, "no kernel commands registered\n"); w = k > 0 ? size_t(k) : 0; }
+    if (!n && w < cap) { int k = snprintf(out + w, cap - w, "(no driver commands registered)\n"); w += k > 0 ? size_t(k) : 0; }
     return w < cap ? w : cap;
   }
   for (unsigned i = 0; i < n; i++) {
@@ -193,7 +262,7 @@ extern "C" int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_
   if (slot >= usbdbgk::kKcmds) return -1;
   usbdbgk::gKcmd[slot] = usbdbgk::Kcmd{name, fn, help};
   __atomic_thread_fence(__ATOMIC_RELEASE);
-  while (usbdbgk::gKcmdCount != slot) __asm__ volatile("yield");   // publish in claim order
+  while (usbdbgk::gKcmdCount != slot) USBDBGK_YIELD();   // publish in claim order
   usbdbgk::gKcmdCount = slot + 1;
   return 0;
 }

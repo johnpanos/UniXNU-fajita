@@ -12,6 +12,9 @@
 //   `fajita-pmic-keys-synth=<s>`: unattended test, from <s> seconds after boot synthetic presses through the same publication:
 //   volume up, volume down, then power (200 ms each, 3 s apart), `fajita-pmic-keys-synth-count=<n>` rounds (1) 20 s apart;
 //   `fajita-pmic-keys-synth-mask=<bits>` limits them to some keys (7: all; bit 0 power, 1 up, 2 down).
+// `fajita-pmic-bq=1` (with a stage): the bq27411 gauge on i2c10, read only: GCC votes and branch states of QUP wrapper 1 SE2, its
+//   DFS levels and pins 55/56, and the engine only if the firmware left its clocks on. `=2`: also vote the SE2 clocks (shared vote,
+//   never removed), put 55/56 on qup10, bring the engine up at 100 kHz and read the gauge (standard commands only) every period.
 // `fajita-pmic-batt=1` (with a stage): the battery as an IOPMPowerSource (class AppleSmartBattery) for powerd, from the PMI8998 fuel
 //   gauge and the charger status, refreshed every period.
 // Everything runs in its own kernel thread, started from the boot progress monitor (fajita_pmic_poll, once a second) once IOKit is
@@ -25,9 +28,11 @@
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSDictionary.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
 #include <pexpert/pexpert.h>
 
 #include "NativeSpmi.h"
+#include "FajitaGaugeI2c.h"
 #include "FajitaPmicBoard.h"
 
 extern "C" {
@@ -38,17 +43,18 @@ volatile uint32_t native_button_state;        // bit 0 power, 1 volume up, 2 vol
 volatile uint32_t fajita_pmic_keys[8];        // [0] polls, [1] read errors, [2] changes, [3] real mask, [4] synthetic presses, [5] sink calls
 extern volatile uint32_t native_hid_button_stats[4] __attribute__((weak_import));
 kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);
+vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 }
 
 namespace {
-unsigned gStage, gPeriod = 10, gFcc, gIcl, gDump = 1, gKeys, gSynth, gSynthCount = 1, gSynthMask = 7, gBatt;
+unsigned gStage, gPeriod = 10, gFcc, gIcl, gDump = 1, gKeys, gSynth, gSynthCount = 1, gSynthMask = 7, gBatt, gBq;
 bool gStarted;
 void (*gButtonSink)(void *);
 void *gButtonSinkContext;
 
-uint64_t ticks() {uint64_t t; __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(t) :: "memory"); return t;}
-uint64_t tickHz() {uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); return f ? f : 19200000;}
-unsigned uptime() {return (unsigned)(ticks() / tickHz());}
+// Milliseconds since boot (mach_absolute_time, the kernel log's clock; CNTPCT keeps counting across a warm reset).
+uint64_t uptimeMs() {uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000000;}
+unsigned uptime() {return (unsigned)(uptimeMs() / 1000);}
 
 int rd8(unsigned sid, unsigned addr) {return native_spmi_read8(sid, addr);}
 int rd16(unsigned sid, unsigned addr, uint8_t out[2]) {return native_spmi_read(sid, addr, out, 2);}
@@ -188,7 +194,7 @@ void keysThread(void *, wait_result_t) {
         unsigned real = fpm_debounce_step(&d, fpm_keys_decode(pon, vd, vu), 2);
         if (real != fajita_pmic_keys[3]) {fajita_pmic_keys[3] = real; keysRow("real change");}
         if (synthNext && round < gSynthCount) {
-            uint64_t now = ticks() * 1000 / tickHz();
+            uint64_t now = uptimeMs();
             if (now >= synthNext) {
                 uint64_t t = now - synthNext;
                 synthBits = 0;
@@ -260,6 +266,8 @@ OSDefineMetaClassAndStructors(AppleSmartBattery, IOPMPowerSource)
 namespace {
 AppleSmartBattery *gBattery;
 
+bool gaugeLatest(fpm_bq &out);
+
 void batteryReport() {
     uint8_t v[2] = {}, c[2] = {}, s[2] = {}, t[2] = {};
     if (rd16(2, FPM_FG_BATT_VOLTAGE, v) || rd16(2, FPM_FG_BATT_CURRENT, c) || rd16(2, FPM_FG_MSOC, s) || rd16(2, FPM_FG_BATT_TEMP, t)) return;
@@ -269,6 +277,10 @@ void batteryReport() {
     int charging = fpm_charging((uint8_t)st1, (uint8_t)st2, online);
     int percent = fpm_fg_soc_percent(s[0], s[1]);
     int mv = fpm_fg_voltage_mv(v[0], v[1]), ma = fpm_fg_current_ma(c[0], c[1]), temp = fpm_fg_temp_dc(t[0], t[1]);
+    // The bq27411 is the battery's own gauge: its percentage, voltage, average current and temperature when it answers sensibly.
+    fpm_bq bq;
+    bool fromBq = gaugeLatest(bq);
+    if (fromBq) {percent = bq.soc; mv = bq.mv; ma = bq.ma; temp = bq.temp_dc;}
     if (!gBattery) {
         AppleSmartBattery *b = OSTypeAlloc(AppleSmartBattery);
         IOService *platform = IOService::getPlatform();
@@ -283,8 +295,117 @@ void batteryReport() {
     } else {
         gBattery->report(percent, mv, ma, temp, online, charging);
     }
-    snprintf(fajita_pmic_rows[6], sizeof fajita_pmic_rows[6], "[pmic batt] t=%us %d%% %dmV %dmA ext%d chg%d up%d", uptime(), percent, mv,
-             ma, online, charging, gBattery != nullptr);
+    snprintf(fajita_pmic_rows[6], sizeof fajita_pmic_rows[6], "[pmic batt] t=%us %d%% %dmV %dmA ext%d chg%d up%d src %s", uptime(), percent, mv,
+             ma, online, charging, gBattery != nullptr, fromBq ? "bq27411" : "pmi8998-fg");
+}
+
+// ---- the bq27411 on i2c10 ----
+struct Gauge {
+    uintptr_t gccBranch, gccVote, wrapper, se, pin[2];
+    bool up;
+    int level;
+    geni_i2c i2c;
+    fpm_bq last;
+    unsigned reads, errors;
+    int lastErr;
+} gGauge;
+
+uintptr_t mapIo(uint64_t phys, uint64_t size) {return (uintptr_t)ml_io_map((vm_offset_t)phys, (vm_size_t)size);}
+uint32_t mrd(uintptr_t base, uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(base + off);}
+void mwr(uintptr_t base, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t *>(base + off) = v; __asm__ volatile("dsb sy" ::: "memory");}
+uint32_t gIoRd(void *ctx, uint32_t reg) {return mrd(reinterpret_cast<uintptr_t>(ctx), reg);}
+void gIoWr(void *ctx, uint32_t reg, uint32_t value) {mwr(reinterpret_cast<uintptr_t>(ctx), reg, value);}
+void gIoDelay(void *, unsigned us) {
+    if (us > 50) {IODelay(us); return;}
+    uint64_t f = 0, t0 = 0, t = 0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(t0));
+    uint64_t n = (f ? f : 19200000) * us / 1000000 + 1;
+    do {__asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(t));} while (t - t0 < n);
+}
+
+bool gaugeClocksOn(const Gauge &g) {
+    return fpm_branch_running(mrd(g.gccBranch, FPM_HALT_M_AHB & 0xfff)) && fpm_branch_running(mrd(g.gccBranch, FPM_HALT_S_AHB & 0xfff)) &&
+           !(mrd(g.gccBranch, FPM_HALT_S2 & 0xfff) & FPM_CBCR_CLK_OFF);
+}
+
+// Read only: votes, branches, DFS, pins; the engine only with its clocks already running.
+void gaugeSnapshot(Gauge &g) {
+    g.gccBranch = mapIo(FPM_GCC_BASE + 0x18000, 0x1000);
+    g.gccVote = mapIo(FPM_GCC_BASE + 0x52000, 0x1000);
+    g.pin[0] = mapIo(FPM_TLMM_BASE + fpm_pin_offset(FPM_GPIO_BQ_SDA), 0x1000);
+    g.pin[1] = mapIo(FPM_TLMM_BASE + fpm_pin_offset(FPM_GPIO_BQ_SCL), 0x1000);
+    if (!g.gccBranch || !g.gccVote || !g.pin[0] || !g.pin[1]) {IOLog("fajita-pmic: bq map failed\n"); return;}
+    uint32_t cfg[FPM_DFS_LEVELS], m[FPM_DFS_LEVELS], n[FPM_DFS_LEVELS];
+    for (unsigned l = 0; l < FPM_DFS_LEVELS; ++l) {
+        cfg[l] = mrd(g.gccBranch, (FPM_S2_RCG + FPM_RCG_PERF_CFG(l)) & 0xfff);
+        m[l] = mrd(g.gccBranch, (FPM_S2_RCG + FPM_RCG_PERF_M(l)) & 0xfff);
+        n[l] = mrd(g.gccBranch, (FPM_S2_RCG + FPM_RCG_PERF_N(l)) & 0xfff);
+    }
+    uint32_t dfsr = mrd(g.gccBranch, (FPM_S2_RCG + FPM_RCG_DFSR) & 0xfff), rcfg = mrd(g.gccBranch, (FPM_S2_RCG + FPM_RCG_CFG) & 0xfff);
+    g.level = fpm_xo_level(dfsr, cfg, m, n, FPM_DFS_LEVELS, rcfg);
+    IOLog("fajita-pmic: bq clk vote%08x m%08x s%08x s2%08x dfs%x cfg%08x xoL%d pin55 %03x/%x pin56 %03x/%x\n", mrd(g.gccVote, FPM_GCC_VOTE & 0xfff),
+          mrd(g.gccBranch, FPM_HALT_M_AHB & 0xfff), mrd(g.gccBranch, FPM_HALT_S_AHB & 0xfff), mrd(g.gccBranch, FPM_HALT_S2 & 0xfff), dfsr,
+          rcfg, g.level, mrd(g.pin[0], 0) & 0x3ff, mrd(g.pin[0], 4) & 3, mrd(g.pin[1], 0) & 0x3ff, mrd(g.pin[1], 4) & 3);
+    if (!gaugeClocksOn(g)) {IOLog("fajita-pmic: bq se not read: clocks off\n"); return;}
+    g.se = mapIo(FPM_BQ_SE_BASE, FPM_BQ_SE_SIZE);
+    if (!g.se) return;
+    IOLog("fajita-pmic: bq se fw%08x ifdis%x hw0%08x st%08x clk%x/%x\n", mrd(g.se, GI2C_FW_REVISION_RO), mrd(g.se, GI2C_IF_DISABLE_RO),
+          mrd(g.se, GI2C_HW_PARAM_0), mrd(g.se, GI2C_GENI_STATUS), mrd(g.se, GI2C_CLK_SEL), mrd(g.se, GI2C_SER_M_CLK_CFG));
+}
+
+bool gaugeEnable(Gauge &g) {
+    if (!g.gccVote || g.level < 0) {IOLog("fajita-pmic: bq enable refused (no map or no 19.2 MHz level)\n"); return false;}
+    const uint32_t want = FPM_VOTE_M_AHB | FPM_VOTE_S_AHB | FPM_VOTE_S2;
+    mwr(g.gccVote, FPM_GCC_VOTE & 0xfff, mrd(g.gccVote, FPM_GCC_VOTE & 0xfff) | want);   // shared vote, never removed
+    unsigned us = 0;
+    while (!gaugeClocksOn(g) && us < 20000) {IODelay(10); us += 10;}
+    if (!gaugeClocksOn(g)) {IOLog("fajita-pmic: bq clocks stayed off after %uus\n", us); return false;}
+    // qup_i2c10_default: function qup10; 2 mA, no bias, as the i2c pinconf of the board (the gauge's pull-ups are on the board).
+    mwr(g.pin[0], 0, fpm_pin_cfg(FPM_FUNC_QUP10, 2, 0));
+    mwr(g.pin[1], 0, fpm_pin_cfg(FPM_FUNC_QUP10, 2, 0));
+    if (!g.se) g.se = mapIo(FPM_BQ_SE_BASE, FPM_BQ_SE_SIZE);
+    g.wrapper = mapIo(FPM_QUP1_WRAPPER_BASE, 0x1000);
+    if (!g.se || !g.wrapper) return false;
+    g.i2c.se = geni_i2c_io{reinterpret_cast<void *>(g.se), gIoRd, gIoWr, gIoDelay};
+    g.i2c.wrapper = geni_i2c_io{reinterpret_cast<void *>(g.wrapper), gIoRd, gIoWr, gIoDelay};
+    g.i2c.poll_limit = 20000;
+    int rc = geni_i2c_init(&g.i2c);
+    if (!rc) rc = geni_i2c_set_clock(&g.i2c, (unsigned)g.level, FPM_TCXO_HZ, FPM_BQ_HZ);
+    IOLog("fajita-pmic: bq engine %uus fw%04x depth%u init/clock %d\n", us, g.i2c.info.fw_revision & 0xffff, g.i2c.info.tx_fifo_depth, rc);
+    g.up = rc == 0;
+    return g.up;
+}
+
+int gaugeWord(Gauge &g, uint8_t reg, uint16_t &out) {
+    uint8_t b[2] = {};
+    int rc = geni_i2c_write_read(&g.i2c, FPM_BQ_ADDR, &reg, 1, b, 2);
+    if (rc && rc != GI2C_ERR_ADDR_NACK) geni_i2c_recover(&g.i2c);
+    out = (uint16_t)(b[0] | b[1] << 8);
+    return rc;
+}
+
+void gaugeRead(Gauge &g) {
+    if (!g.up) return;
+    static const uint8_t regs[8] = {FPM_BQ_TEMPERATURE, FPM_BQ_VOLTAGE, FPM_BQ_FLAGS, FPM_BQ_REMAINING, FPM_BQ_FULL, FPM_BQ_AVG_CURRENT,
+                                    FPM_BQ_SOC, FPM_BQ_SOH};
+    uint16_t w[8] = {};
+    for (unsigned i = 0; i < 8; ++i) {
+        int rc = gaugeWord(g, regs[i], w[i]);
+        if (rc) {++g.errors; g.lastErr = rc; IOLog("fajita-pmic: bq read %02x err %d\n", regs[i], rc); return;}
+    }
+    ++g.reads;
+    fpm_bq_decode(&g.last, w);
+    snprintf(fajita_pmic_rows[7], sizeof fajita_pmic_rows[7], "[pmic bq] t=%us %dmV %dmA soc%d%% %d/%dmAh soh%d%% %d.%dC flags%04x%s err%u",
+             uptime(), g.last.mv, g.last.ma, g.last.soc, g.last.remaining_mah, g.last.full_mah, g.last.soh, g.last.temp_dc / 10,
+             (g.last.temp_dc % 10 + 10) % 10, g.last.flags, g.last.valid ? "" : " IMPLAUSIBLE", g.errors);
+    IOLog("fajita-pmic: %s\n", fajita_pmic_rows[7]);
+}
+
+bool gaugeLatest(fpm_bq &out) {
+    if (!gGauge.up || !gGauge.last.valid || !gGauge.reads) return false;
+    out = gGauge.last;
+    return true;
 }
 
 void worker(void *, wait_result_t) {
@@ -302,6 +423,7 @@ void worker(void *, wait_result_t) {
     fajita_pmic_state[1] = ok;
     if (gDump) dumpAll();
     statusRow(0);
+    if (gBq) {gaugeSnapshot(gGauge); if (gBq >= 2 && gaugeEnable(gGauge)) gaugeRead(gGauge);}
     if (gBatt) batteryReport();
     if (gStage >= 2 && ok) {
         charge();
@@ -312,6 +434,7 @@ void worker(void *, wait_result_t) {
     for (unsigned pass = 2;; ++pass) {
         IOSleep(gPeriod * 1000);
         statusRow(pass);
+        if (gBq >= 2) gaugeRead(gGauge);
         if (gBatt) {batteryReport(); if (pass % 6 == 0) IOLog("fajita-pmic: %s\n", fajita_pmic_rows[6]);}
         if (pass % 6 == 0) IOLog("fajita-pmic: %s\n", native_spmi_row);
     }
@@ -339,6 +462,7 @@ extern "C" void fajita_pmic_poll(void) {
     PE_parse_boot_argn("fajita-pmic-keys-synth-count", &gSynthCount, sizeof gSynthCount);
     PE_parse_boot_argn("fajita-pmic-keys-synth-mask", &gSynthMask, sizeof gSynthMask);
     PE_parse_boot_argn("fajita-pmic-batt", &gBatt, sizeof gBatt);
+    PE_parse_boot_argn("fajita-pmic-bq", &gBq, sizeof gBq);
     PE_parse_boot_argn("fajita-pmic-period", &gPeriod, sizeof gPeriod);
     PE_parse_boot_argn("fajita-pmic-fcc", &gFcc, sizeof gFcc);
     PE_parse_boot_argn("fajita-pmic-icl", &gIcl, sizeof gIcl);
