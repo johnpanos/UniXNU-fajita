@@ -38,6 +38,15 @@ int main(int argc, char **argv) {
 			d[@"Path"] = path; d[@"_LSBundlePath"] = path;
 			d[@"IsDeletable"] = @YES;
 			d[@"Entitlements"] = @{@"application-identifier": d[@"CFBundleIdentifier"], @"get-task-allow": @YES};
+			if (getenv("REG_CONTAINER")) {
+				NSString *c = @(getenv("REG_CONTAINER"));
+				for (NSString *sub in @[@"", @"Documents", @"Library", @"Library/Caches", @"Library/Preferences", @"tmp", @"SystemData"]) {
+					NSString *dp = [c stringByAppendingPathComponent:sub];
+					[[NSFileManager defaultManager] createDirectoryAtPath:dp withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755, NSFileOwnerAccountID: @501, NSFileGroupOwnerAccountID: @501} error:nil];
+				}
+				d[@"Container"] = c;
+				d[@"EnvironmentVariables"] = @{@"CFFIXED_USER_HOME": c, @"HOME": c, @"TMPDIR": [c stringByAppendingPathComponent:@"tmp"]};
+			}
 			BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, NSSelectorFromString(@"registerApplicationDictionary:"), d);
 			printf("registerApplicationDictionary %s -> %d\n", [d[@"CFBundleIdentifier"] UTF8String], ok);
 		} else if ([cmd isEqual:@"mi"]) {
