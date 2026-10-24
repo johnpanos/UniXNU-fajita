@@ -742,6 +742,50 @@ size_t appendf(char *out, size_t cap, size_t at, const char *fmt, ...)
 
 
 
+// ---- kcmd gpu perf [MS]: a6xx performance counters around a window (fdperf's direct MMIO selection; a6xx.xml / a6xx_perfcntrs.xml) ----
+// CP counter 0 stays PERF_CP_ALWAYS_COUNT (hw_init). Each entry: select register, countable, counter (LO; HI follows).
+struct PerfSel {const char *name; uint32_t sel, countable, lo;};
+const PerfSel kPerf[] = {
+    {"cp_busy", 0x08d0 + 1, 2, 0x0400 + 2 * 1},          // PERF_CP_BUSY_CYCLES
+    {"cp_busy_core_idle", 0x08d0 + 2, 1, 0x0400 + 2 * 2}, // PERF_CP_BUSY_GFX_CORE_IDLE
+    {"rbbm_always", 0x0507 + 0, 0, 0x041c + 2 * 0},       // PERF_RBBM_ALWAYS_COUNT
+    {"gpu_busy", 0x0507 + 1, 6, 0x041c + 2 * 1},          // PERF_RBBM_STATUS_MASKED
+    {"sp_busy", 0xae10 + 0, 0, 0x04a6 + 2 * 0},           // PERF_SP_BUSY_CYCLES
+    {"sp_alu", 0xae10 + 1, 1, 0x04a6 + 2 * 1},            // PERF_SP_ALU_WORKING_CYCLES
+    {"sp_stall_tp", 0xae10 + 2, 4, 0x04a6 + 2 * 2},       // PERF_SP_STALL_CYCLES_TP
+    {"sp_wave_idle", 0xae10 + 3, 22, 0x04a6 + 2 * 3},     // PERF_SP_WAVE_IDLE_CYCLES
+    {"tp_busy", 0xb610 + 0, 0, 0x048e + 2 * 0},           // PERF_TP_BUSY_CYCLES
+    {"tp_stall_uche", 0xb610 + 1, 1, 0x048e + 2 * 1},     // PERF_TP_STALL_CYCLES_UCHE
+    {"tp_l1_req", 0xb610 + 2, 6, 0x048e + 2 * 2},         // PERF_TP_L1_CACHELINE_REQUESTS
+    {"tp_l1_miss", 0xb610 + 3, 7, 0x048e + 2 * 3},        // PERF_TP_L1_CACHELINE_MISSES
+    {"uche_busy", 0x0e1c + 0, 0, 0x0476 + 2 * 0},         // PERF_UCHE_BUSY_CYCLES
+    {"uche_vbif_lat_cyc", 0x0e1c + 1, 2, 0x0476 + 2 * 1}, // PERF_UCHE_VBIF_LATENCY_CYCLES
+    {"uche_vbif_lat_n", 0x0e1c + 2, 3, 0x0476 + 2 * 2},   // PERF_UCHE_VBIF_LATENCY_SAMPLES
+    {"uche_stall_arb", 0x0e1c + 3, 1, 0x0476 + 2 * 3},    // PERF_UCHE_STALL_CYCLES_ARBITER
+};
+size_t perfCmd(const char *args, char *out, size_t cap)
+{
+    if (!gGxOn || !A630GxOn(&gIo)) return appendf(out, cap, 0, "gx off\n");
+    unsigned ms = 1000;
+    while (*args == ' ') ++args;
+    if (*args >= '0' && *args <= '9') {ms = 0; while (*args >= '0' && *args <= '9') ms = ms * 10 + unsigned(*args++ - '0');}
+    if (ms > 5000) ms = 5000;
+    const unsigned n = sizeof kPerf / sizeof *kPerf;
+    uint64_t a[n], b[n];
+    for (unsigned i = 0; i < n; ++i) gpuWr(kPerf[i].sel, kPerf[i].countable);
+    __asm__ volatile("dsb sy" ::: "memory");
+    IODelay(10);
+    auto rd64 = [](uint32_t lo) {uint32_t h0 = gpuRd(lo + 1), l = gpuRd(lo), h1 = gpuRd(lo + 1); if (h0 != h1) l = gpuRd(lo); return uint64_t(h1) << 32 | l;};
+    for (unsigned i = 0; i < n; ++i) a[i] = rd64(kPerf[i].lo);
+    const uint64_t t0 = nowUs();
+    IOSleep(ms);
+    for (unsigned i = 0; i < n; ++i) b[i] = rd64(kPerf[i].lo);
+    const uint64_t t1 = nowUs();
+    size_t w = appendf(out, cap, 0, "window %llu us\n", (unsigned long long)(t1 - t0));
+    for (unsigned i = 0; i < n; ++i) w = appendf(out, cap, w, "%s %llu\n", kPerf[i].name, (unsigned long long)(b[i] - a[i]));
+    return w;
+}
+
 size_t kcmd(const char *args, size_t len, char *out, size_t cap)
 {
     char a[32] = {};
@@ -754,6 +798,7 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         memcpy(out, fajita_gpu_text + from, n - from);
         return n - from;
     }
+    if (!strncmp(a, "perf", 4)) return perfCmd(a + 4, out, cap);
     if (!strncmp(a, "freq ", 5)) {   // DCVS: the GPU perf index (0..gpu_count-1) through the GMU's legacy DCVS OOB, as Linux's set_freq
         unsigned idx = 0;
         for (const char *p = a + 5; *p >= '0' && *p <= '9'; ++p) idx = idx * 10 + unsigned(*p - '0');
