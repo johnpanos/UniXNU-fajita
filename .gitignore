@@ -4,6 +4,8 @@
 /Conf/
 /out/
 /.cache/
+/.cache
+/ios16/.cache/
 /refer/
 /.local*/
 /Mu_Basecore/

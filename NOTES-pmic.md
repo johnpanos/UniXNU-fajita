@@ -6,7 +6,7 @@ iOS 16.7.16 board. Logs of the runs are in the session scratchpad, `logs/pmic-*`
 | --- | --- |
 | SPMI bus (`drivers/NativeSpmi`, `libNativeSpmi.a`) | works on hardware: arbiter v5 (`0x50000000`), 262 APIDs, 208 peripherals mapped, 91 writable by EE 0 (pmic-s1) |
 | Charging (`fajita-pmic=2`, board default) | works: the bootloader leaves charging off; after the pmOS charger setup the battery takes +1.0 A and its voltage rises (pmic-s2) |
-| Keys (`fajita-pmic-keys=1`, `native-hid-buttons=1`) | work: synthetic volume up shows iOS's volume indicator (pmic-k1), synthetic power wakes the lock screen to "Swipe up to open" (pmic-k2); real volume keys pressed by the user in pmic-k1 (t=228-229 s: down 3x, up 2x) reached the event driver, every report accepted |
+| Keys (`fajita-pmic-keys=1`, `native-hid-buttons=1`) | work: synthetic volume up shows iOS's volume indicator (pmic-k1), synthetic power wakes the lock screen to "Swipe up to open" (pmic-k2); real volume keys pressed by the user in pmic-k1 (t=228-229 s: down 3x, up 2x) reached the event driver, every report accepted; the real power key wakes and sleeps the display (pmic-pwr, confirmed by the user) |
 | Battery source (`fajita-pmic-batt=1`) | works: `ioreg -r -c AppleSmartBattery -l` shows CurrentCapacity, IsCharging, ExternalConnected; the status bar shows the level with the charging bolt (pmic-k1, -k2) |
 | bq27411 gauge (`fajita-pmic-bq=2`) | works: 4002 mV, +1025 mA, 36 %, 1224 -> 1249 of 3471 mAh in 90 s, SoH 95 % (pmic-k2); the battery source uses it |
 
@@ -90,5 +90,6 @@ remaining charge rises 25 mAh in 90 s at 1.0 A. The PMI8998 FG read 25 % at the 
 | --- | --- | --- | --- |
 | pmic-k1 | volume up 160 s, volume down 163 s | 161 s | lock screen with the iOS 16 compact volume indicator under the battery icon |
 | pmic-k2 | power 166 s | 169 s | lock screen woken: "Swipe up to open" and the Control Center hint, absent in k1 |
+| pmic-pwr | none: the user pressed the real power key twice (kernel uptime 108 s and 118 s; each press a report 2 byte 0x02, result 0) | - | first press woke the display, second put it to sleep (seen by the user) |
 
 The event driver lists the consumer elements 0x40, 0x30, 0xE9, 0xEA of report 2 (ioreg, pmic-k1); every report returned 0.

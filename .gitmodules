@@ -1,0 +1,4 @@
+[submodule "drivers/NativeAdreno"]
+	path = drivers/NativeAdreno
+	url = https://github.com/johnpanos/NativeAdreno
+	branch = fajita-a630

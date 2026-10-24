@@ -71,6 +71,7 @@ archives = [
   { run = "build-fajita-touch.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },            # libFajitaTouch.a (fajita-touch=<stage>), NOTES-touch.md
   { run = "build-fajita-cpufreq.py", when = "XNU_BOOT_PROGRESS" },                  # libFajitaCpuFreq.a (fajita-cpufreq=<n>)
   { run = "build-fajita-pmic.py", when = "XNU_BOOT_PROGRESS" },                     # libFajitaPmic.a (fajita-pmic=<stage>): charger, keys, battery
+  { run = "build-fajita-gpu.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },              # libFajitaGpu.a (fajita-gpu=<stage>, Adreno 630), NOTES-gpu.md
 ]
 
 # The 20H392 kernelcache (xnu-8796.142.1.703.8). The roots are the iPad list; all of them are in this kernelcache.
