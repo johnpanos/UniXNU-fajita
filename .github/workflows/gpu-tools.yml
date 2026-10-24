@@ -35,6 +35,11 @@ jobs:
             --entitlements package/gpu-tools/ngpu-probe-entitlements.plist out/ngpu-probe
           codesign --verify --strict out/ngpu-probe
           codesign -dvvv out/ngpu-probe 2>&1 | grep -E 'CDHash|Page size|Identifier' | tee out/codesign.txt
+          xcrun --sdk iphoneos clang++ -std=c++17 -fobjc-arc -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Werror \
+            -x objective-c++ package/gpu-tools/ngpu-metal.mm -framework Foundation -framework Metal -o out/ngpu-metal
+          codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.ngpu-metal \
+            --entitlements package/gpu-tools/ngpu-probe-entitlements.plist out/ngpu-metal
+          codesign --verify --strict out/ngpu-metal
           git -C NativeAdreno rev-parse HEAD > out/native-adreno.txt
           file out/ngpu-probe
       - uses: actions/upload-artifact@v4
