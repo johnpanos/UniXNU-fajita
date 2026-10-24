@@ -40,9 +40,10 @@ from pathlib import Path
 FRAME_START, FRAME_END, FRAME_ESC, KDP_START = 0xFC, 0xFB, 0xFE, 0xFA
 ESCAPED = {KDP_START, FRAME_END, FRAME_START, FRAME_ESC, 0x0A}
 PROTO_VERSION, MAX_DATA = 1, 1536
-CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP, CH_SHELL = range(6)
+CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP, CH_SHELL, CH_FILE = range(7)
 OPS = dict(hello=0x0001, state=0x0002, read_virt=0x0010, write_virt=0x0011, read_phys=0x0012, write_phys=0x0013,
-           read32=0x0014, write32=0x0015, log_from=0x0020, kcmd=0x0030, panic=0x0040, reset=0x0041, wdog=0x0042)
+           read32=0x0014, write32=0x0015, log_from=0x0020, kcmd=0x0030, panic=0x0040, reset=0x0041, wdog=0x0042,
+           shot=0x0050)
 REPLY_BIT = 0x8000
 STATUS = {0: 'ok', -1: 'unknown op', -2: 'bad arguments', -3: 'fault', -4: 'denied (boot with usb-debug=2 for writes)',
           -5: 'too big', -6: 'unsupported'}
@@ -189,7 +190,7 @@ class ExecTransport:
 
 # ---- Link: reader thread + request/reply ------------------------------------------
 class Link:
-    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None, on_shell=None):
+    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None, on_shell=None, on_file=None):
         self.t = transport
         self.demux = Demux()
         self.replies = queue.Queue()
@@ -197,6 +198,7 @@ class Link:
         self.on_log = on_log or (lambda off, b: None)
         self.on_kdp = on_kdp or (lambda kind, pkt: None)
         self.on_shell = on_shell or (lambda b: None)
+        self.on_file = on_file or (lambda shot_id, offset, data: None)
         self.seq = 0
         self.lock = threading.Lock()
         self.stop = False
@@ -221,6 +223,9 @@ class Link:
                         self.on_kdp('frame', data)
                     elif ch == CH_SHELL:
                         self.on_shell(data)
+                    elif ch == CH_FILE and len(data) >= 8:
+                        sid, off = struct.unpack_from('<II', data)
+                        self.on_file(sid, off, data[8:])
 
     def send_frame(self, channel, data):
         with self.lock:
@@ -262,6 +267,86 @@ def hexdump(addr, data):
     for i in range(0, len(data), 16):
         row = data[i:i + 16]
         print(f'{addr + i:016x}  {row.hex(" "):<47}  {"".join(chr(c) if 32 <= c < 127 else "." for c in row)}')
+
+
+# ---- Screenshots: op shot, then the frame on the FILE channel ---------------------------------------
+class ShotCollector:
+    """Assembles one screenshot from FILE frames. Feed it from Link(on_file=...); start() sends the request."""
+
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.id = None
+        self.buf = None
+        self.have = 0
+        self.early = []          # frames that beat the reply
+
+    def on_file(self, sid, off, data):
+        with self.cv:
+            if self.id is None:
+                self.early.append((sid, off, bytes(data)))
+                return
+            self._put(sid, off, data)
+
+    def _put(self, sid, off, data):
+        if sid != self.id or self.buf is None or off + len(data) > len(self.buf):
+            return
+        self.buf[off:off + len(data)] = data
+        self.have += len(data)
+        if self.have >= len(self.buf):
+            self.cv.notify_all()
+
+    def take(self, link, scale=2, timeout=60.0):
+        """Returns (width, height, BGR bytes)."""
+        st, out = link.request('shot', struct.pack('<I', scale), timeout=10)
+        if st:
+            raise RuntimeError('shot: %s' % STATUS.get(st, st))
+        sid, w, h, bpp, total, used_scale, stride = struct.unpack_from('<IIIIQII', out)
+        if bpp != 3 or total != w * h * 3:
+            raise RuntimeError('shot: unexpected format %dx%d bpp %d total %d' % (w, h, bpp, total))
+        with self.cv:
+            self.id, self.buf, self.have = sid, bytearray(total), 0
+            for e in self.early:
+                self._put(*e)
+            self.early = []
+            limit = time.monotonic() + timeout
+            while self.have < total:
+                left = limit - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError('shot: %d of %d bytes in %.0f s' % (self.have, total, timeout))
+                self.cv.wait(left)
+            data, self.id, self.buf = bytes(self.buf), None, None
+        return w, h, data
+
+
+def write_png(path, width, height, bgr):
+    """An 8-bit RGB PNG from BGR rows (zlib only)."""
+    row = width * 3
+    raw = bytearray()
+    for y in range(height):
+        line = bytearray(bgr[y * row:(y + 1) * row])
+        line[0::3], line[2::3] = line[2::3], line[0::3]          # BGR -> RGB
+        raw += b'\0' + line
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+    Path(path).write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
+                           chunk(b'IDAT', zlib.compress(bytes(raw), 6)) + chunk(b'IEND', b''))
+
+
+def read_png_rgb(path):
+    """Decode a PNG write_png produced (filter 0 rows), for the self test."""
+    blob = Path(path).read_bytes()
+    assert blob[:8] == b'\x89PNG\r\n\x1a\n'
+    at, w, h, idat = 8, 0, 0, b''
+    while at < len(blob):
+        n, = struct.unpack_from('>I', blob, at)
+        t = blob[at + 4:at + 8]
+        d = blob[at + 8:at + 8 + n]
+        if t == b'IHDR':
+            w, h = struct.unpack_from('>II', d)
+        elif t == b'IDAT':
+            idat += d
+        at += 12 + n
+    raw = zlib.decompress(idat)
+    return w, h, b''.join(raw[y * (w * 3 + 1) + 1:(y + 1) * (w * 3 + 1)] for y in range(h))
 
 
 # ---- KDP bridge: lldb `kdp-remote` speaks UDP; the kernel's KDP link wants Ethernet frames ----
@@ -381,6 +466,15 @@ def selftest(sim):
     r = subprocess.run(me + ['@read', '/etc/hosts'], capture_output=True, timeout=20)
     assert r.returncode == 0 and r.stdout.startswith(b'127.0.0.1'), (r.returncode, r.stdout, r.stderr)
     print('selftest: run (SHELL channel, exit marker) against UsbDbgSim OK')
+    out = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'fjdbg-selftest-%d.png' % os.getpid())
+    r = subprocess.run([sys.executable, '-I', os.path.abspath(__file__), '--exec', sim, 'screenshot', out], capture_output=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    w, h, rgb = read_png_rgb(out)
+    os.unlink(out)
+    assert (w, h) == (300, 7), (w, h)
+    assert all(rgb[(y * w + x) * 3:(y * w + x) * 3 + 3] == bytes(((x * 7 + y) & 255, (x + y * 3) & 255, (x ^ y) & 255))
+               for y in range(h) for x in range(w)), 'pixel mismatch'
+    print('selftest: screenshot (shot op, FILE channel, PNG) against UsbDbgSim OK')
 
 
 def main():
@@ -391,6 +485,8 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('console')
     sub.add_parser('shell')
+    p = sub.add_parser('screenshot', help='save the current scanout as a PNG')
+    p.add_argument('out'); p.add_argument('--scale', type=int, default=2, help='1 full resolution, 2 half (default)')
     p = sub.add_parser('run', help='run one userland command through the agent and wait for its exit')
     p.add_argument('--timeout', type=float, default=60.0)
     p.add_argument('command', nargs=argparse.REMAINDER, help='program and arguments (dashes are passed through)')
@@ -438,6 +534,18 @@ def main():
 
     if a.cmd == 'kdp-proxy':
         return kdp_proxy(make, a.listen, a.target_ip, a.mode)
+    if a.cmd == 'screenshot':
+        shots = ShotCollector()
+        transport = ExecTransport(a.exec_cmd.split()) if a.exec_cmd else TtyTransport(a.port)
+        link = Link(transport, on_file=shots.on_file)
+        try:
+            t0 = time.monotonic()
+            w, h, bgr = shots.take(link, a.scale)
+            write_png(a.out, w, h, bgr)
+            print('%s: %dx%d, %.1f s' % (a.out, w, h, time.monotonic() - t0))
+        finally:
+            link.close()
+        return 0
     if a.cmd == 'run' and not a.command:
         raise SystemExit('run: give a command, e.g. run ps -A')
     if a.cmd == 'run':

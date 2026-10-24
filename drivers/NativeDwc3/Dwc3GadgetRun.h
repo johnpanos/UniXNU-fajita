@@ -19,6 +19,10 @@ extern "C" {
 struct dwc3_msgbuf { int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc; };
 extern struct dwc3_msgbuf *msgbufp __attribute__((weak_import));
 void wakeup(void *chan);   // bsd/sys/systm.h
+// The panel scanout, as package/BootDiagExport.c reaches it: the legacy display's own mapping, else a mapping of
+// the console framebuffer made through ArmCpu (ml_io_map's submap has no room for a 10 MB panel).
+extern volatile uint64_t native_gop_virtual __attribute__((weak_import));
+extern uint64_t armcpu_map_physical(uint64_t physical, uint64_t length) __attribute__((weak_import));
 }
 
 namespace dwc3 {
@@ -68,6 +72,15 @@ public:
   volatile uint32_t shHead, shTail;
   uint8_t *shRx;                    // kShRing bytes, IOMallocZeroData
   volatile uint32_t shOverflow;
+
+  // A screenshot in progress (op shot): BGR bytes of the scanout, every scale-th pixel of every scale-th row, sent
+  // on the FILE channel by the poll thread as ring space allows. One at a time; the log pump pauses meanwhile.
+  bool shotActive;
+  uint32_t shotId, shotWidth, shotHeight, shotScale, shotStride;
+  uint64_t shotBase, shotTotal, shotSent;
+  uint32_t shotsDone;
+  size_t startShot(const uint8_t *req, size_t len, uint8_t *rsp);
+  void pumpShot();
 
   bool bringUp(unsigned mode);
   void poll();                     // drain the event buffer once
@@ -503,7 +516,11 @@ inline void Gadget::onBulkOut(uint32_t remaining)
   const uint8_t *in = dma.at(GadgetDma::kBulkOutData);
   for (uint32_t i = 0; i < got; i++) {
     if (rx.feed(in[i]) != usbdbg::Decoder::kFrame) continue;
-    if (rx.channel() == usbdbg::kChCmd) {
+    if (rx.channel() == usbdbg::kChCmd && rx.length() >= 2 && usbdbg::getLe16(rx.data()) == usbdbg::kOpShot) {
+      alignas(4) static uint8_t shotRsp[64];
+      size_t rn = startShot(rx.data(), rx.length(), shotRsp);
+      queueFrame(usbdbg::kChRsp, shotRsp, rn, 0, rx.seq());
+    } else if (rx.channel() == usbdbg::kChCmd) {
       usbdbg::Target t{};
       t.ident = "fajita-usb-debug";
       t.features = usbdbg::kFeatLog;
@@ -595,7 +612,7 @@ inline void Gadget::pumpLog()
   // logProduced counts bytes written since we first looked (wraps of msg_bufx added in), so the LOG offsets the host
   // sees are monotonic; a backlog is streamed oldest first, one frame per poll, and an overrun skips to the oldest
   // bytes still in the ring.
-  if (!&msgbufp || !msgbufp || !bulkStarted) return;
+  if (!&msgbufp || !msgbufp || !bulkStarted || shotActive) return;   // a screenshot has the bandwidth
   int size = msgbufp->msg_size, head = msgbufp->msg_bufx;
   if (size <= 0 || head < 0 || head >= size) return;
   if (!logInit) {
@@ -617,6 +634,70 @@ inline void Gadget::pumpLog()
   // The log may only fill half the ring, so command replies and agent output are never starved by a log backlog
   // (hardware usb-enum9: hello/state replies were dropped behind the boot-log backlog).
   if (queueFrame(usbdbg::kChLog, data, dn, kTxRing / 2)) logOffset += take;   // ring busy: retry on the next poll
+}
+
+// ---- screenshots (op shot, FILE channel) ------------------------------------------------
+inline size_t Gadget::startShot(const uint8_t *req, size_t len, uint8_t *rsp)
+{
+  using namespace usbdbg;
+  uint32_t scale = len >= 8 ? getLe32(req + 4) : 2;
+  if (scale < 1) scale = 1;
+  if (scale > 8) scale = 8;
+  int32_t status = kOk;
+  PE_Video video = {};
+  uint64_t base = 0;
+  if (shotActive) {
+    status = kErrDenied;   // one at a time
+  } else if (PE_current_console(&video) || !video.v_baseAddr || video.v_depth != 32 || video.v_width < 1 || video.v_height < 1 ||
+             video.v_rowBytes < video.v_width * 4) {
+    status = kErrUnsupported;
+  } else {
+    if (&native_gop_virtual && native_gop_virtual) base = native_gop_virtual;
+    else if (&armcpu_map_physical) base = armcpu_map_physical(video.v_baseAddr, uint64_t(video.v_rowBytes) * video.v_height);
+    if (!base) status = kErrFault;
+  }
+  putLe16(rsp, uint16_t(kOpShot | kOpReplyBit));
+  putLe16(rsp + 2, 0);
+  putLe32(rsp + 4, uint32_t(status));
+  if (status != kOk) return kReplyHeader;
+  shotId = shotId + 1;
+  shotScale = scale;
+  shotWidth = uint32_t(video.v_width) / scale;
+  shotHeight = uint32_t(video.v_height) / scale;
+  shotStride = uint32_t(video.v_rowBytes);
+  shotBase = base;
+  shotTotal = uint64_t(shotWidth) * shotHeight * 3;
+  shotSent = 0;
+  shotActive = shotTotal != 0;
+  uint8_t *o = rsp + kReplyHeader;
+  putLe32(o, shotId); putLe32(o + 4, shotWidth); putLe32(o + 8, shotHeight); putLe32(o + 12, 3);
+  putLe64(o + 16, shotTotal); putLe32(o + 24, shotScale); putLe32(o + 28, shotStride);
+  return kReplyHeader + 32;
+}
+
+inline void Gadget::pumpShot()
+{
+  if (!shotActive || !bulkStarted) return;
+  // Frames of whole pixels (1527 = 509 x 3 bytes); keep 8 KiB of the ring for replies and agent output.
+  static uint8_t data[usbdbg::kMaxData];
+  const uint32_t perFrame = (usbdbg::kMaxData - 8) / 3 * 3;
+  while (shotSent < shotTotal) {
+    uint32_t n = uint32_t(shotTotal - shotSent < perFrame ? shotTotal - shotSent : perFrame);
+    usbdbg::putLe32(data, shotId);
+    usbdbg::putLe32(data + 4, uint32_t(shotSent));
+    uint64_t pixel = shotSent / 3;
+    for (uint32_t i = 0; i < n; i += 3, pixel++) {
+      uint32_t y = uint32_t(pixel / shotWidth), x = uint32_t(pixel % shotWidth);
+      uint32_t v = *reinterpret_cast<volatile uint32_t *>(shotBase + uint64_t(y) * shotScale * shotStride + uint64_t(x) * shotScale * 4);
+      data[8 + i] = uint8_t(v);            // B
+      data[8 + i + 1] = uint8_t(v >> 8);   // G
+      data[8 + i + 2] = uint8_t(v >> 16);  // R
+    }
+    if (!queueFrame(usbdbg::kChFile, data, 8 + n, 8192)) return;   // ring busy: continue on the next poll
+    shotSent += n;
+  }
+  shotActive = false;
+  shotsDone = shotsDone + 1;
 }
 
 }  // namespace dwc3

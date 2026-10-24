@@ -34,6 +34,8 @@ enum Op : uint16_t {
   kOpPanic = 0x0040,      // message text                -> does not return   [write]
   kOpReset = 0x0041,      // u32 mode (0 bootloader)     -> (none)            [write]
   kOpWatchdog = 0x0042,   // u32 action (0 stop petting) -> (none)            [write]
+  kOpShot = 0x0050,       // u32 scale (1 full, 2 half) -> u32 id, width, height, bytes/pixel, u64 total, u32 scale, stride;
+                          //   then the frame streams on the FILE channel as BGR rows (handled by the gadget, not here)
   kOpReplyBit = 0x8000,
 };
 
