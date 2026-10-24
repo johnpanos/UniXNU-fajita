@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
 			printf("-> %d\n", r);
 		} else if ([cmd isEqual:@"ls"]) {
 			NSError *e = nil;
-			BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(ws, NSSelectorFromString(@"installApplication:withOptions:error:"), [NSURL fileURLWithPath:@(argv[2])], @{@"PackageType": @"Developer"}, &e);
+			BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))objc_msgSend)(ws, NSSelectorFromString(@"installApplication:withOptions:error:"), [NSURL fileURLWithPath:@(argv[2])], argc > 3 ? @{@"PackageType": @"Developer", @"CFBundleIdentifier": @(argv[3])} : argc > 3 ? @{@"PackageType": @"Developer", @"CFBundleIdentifier": @(argv[3])} : @{@"PackageType": @"Developer"}, &e);
 			printf("installApplication -> %d err %s\n", ok, [[e description] UTF8String]);
 		} else if ([cmd isEqual:@"uninstall"]) {
 			BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, NSSelectorFromString(@"uninstallApplication:withOptions:"), @(argv[2]));

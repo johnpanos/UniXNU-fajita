@@ -13,3 +13,4 @@ $SS push $O/Hello.app/Hello $D/Hello.app/Hello 755 | grep put
 T=90 $SS run /usr/sbin/instapp mi $D/Hello.app | tee $R/mi.txt
 $SS run /usr/sbin/instapp list | grep -i -E 'hello|Preferences'
 $SS run /usr/sbin/instapp launch org.unixnu.hello; sleep 6; $SS call screenshot $R/hello.png
+$SS run /usr/sbin/fsx rm /private/var/db/.sheng-staged-apps
