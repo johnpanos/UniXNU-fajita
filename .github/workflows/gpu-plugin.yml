@@ -37,6 +37,32 @@ jobs:
           git -C unixnu submodule update --init --depth 50 drivers/NativeMetal drivers/NativeAdreno drivers/NativeMobileDisplay kits/AdrenoPM4 kits/ArmSmmu4K
           git -C unixnu log --oneline -1
           git -C unixnu submodule status drivers/NativeMetal drivers/NativeAdreno
+      # Caches: Turnip's build tree (keyed on the Mesa pin, the Mesa patches and the KMD's ABI header), and the Rust toolchain, crates and
+      # the bridge's target directory (keyed on the translator pin, its patches and the bridge sources). A frontend-only change then
+      # rebuilds nothing but the plugin itself.
+      - name: Cache keys
+        id: keys
+        run: |
+          cd unixnu
+          echo "mesa=$(cat scripts/data/adreno-compiler-inputs.json patches/mesa/*.patch drivers/NativeAdreno/NativeAdrenoABI.h scripts/build-turnip-darwin.py | shasum -a 256 | cut -c1-24)" >> "$GITHUB_OUTPUT"
+          echo "bridge=$(cat scripts/data/gpu-metal-vulkan-inputs.json drivers/NativeMetal/bridge/patches/* drivers/NativeMetal/bridge/*.rs scripts/build-native-metal-bridge.py | shasum -a 256 | cut -c1-24)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            unixnu/.cache/mesa-work
+            unixnu/build/mesa-tu-ios
+            unixnu/build/mesa-tu-ios.cross
+          key: turnip-ios16-${{ steps.keys.outputs.mesa }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/registry
+            ~/.cargo/git
+            unixnu/build/m2v-target
+            unixnu/.cache/gpu-reference/metal2vulkan
+          key: bridge-ios16-${{ steps.keys.outputs.bridge }}
+          restore-keys: bridge-ios16-
       - name: Tools
         run: |
           set -e
@@ -47,7 +73,7 @@ jobs:
           mkdir -p .cache/mesa-tools/bin
           ln -sf "$(brew --prefix bison)/bin/bison" .cache/mesa-tools/bin/bison
           ln -sf "$(brew --prefix bison)/bin/yacc" .cache/mesa-tools/bin/yacc
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          [ -x ~/.cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           ~/.cargo/bin/rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Pinned Mesa and translator
@@ -55,16 +81,21 @@ jobs:
           set -e
           cd unixnu
           MESA=$(python3 -c "import json;print(json.load(open('scripts/data/adreno-compiler-inputs.json'))['mesa']['commit'])")
+          # A cached tree (same pin and patches, by the cache key) keeps its mtimes, so ninja rebuilds nothing.
+          if [ ! -d .cache/mesa-work/.git ]; then
           git init -q .cache/mesa-work
           git -C .cache/mesa-work fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa "$MESA"
           git -C .cache/mesa-work checkout -q FETCH_HEAD
           for p in $(python3 -c "import json;print(' '.join(json.load(open('scripts/data/adreno-compiler-inputs.json'))['patches']))"); do
             git -C .cache/mesa-work apply "$PWD/$p"
           done
+          fi
           M2V=$(python3 -c "import json;print(json.load(open('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']['commit'])")
+          if [ ! -d .cache/gpu-reference/metal2vulkan/.git ]; then
           git init -q .cache/gpu-reference/metal2vulkan
           git -C .cache/gpu-reference/metal2vulkan fetch -q --depth 1 https://github.com/steelbrain/metal2vulkan "$M2V"
           git -C .cache/gpu-reference/metal2vulkan checkout -q FETCH_HEAD
+          fi
       - name: Turnip (darwin KMD, iOS 16)
         env:
           UNIXNU_IOS_TARGET: '16.0'
