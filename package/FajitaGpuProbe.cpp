@@ -25,6 +25,7 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
+#include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 #include <stdarg.h>
@@ -377,6 +378,11 @@ extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8]
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
 extern "C" volatile uint64_t native_adreno_maint_stats[4] __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
+extern "C" bool (*native_adreno_page_uncached)(uint64_t physical) __attribute__((weak));
+extern "C" volatile uint64_t native_adreno_uncached_skipped __attribute__((weak));
+extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
+// Every CPU mapping of the page is uncached (write-combined or device: VM_MEM_NOT_CACHEABLE in the pmap's attribute of the page).
+static bool pageUncached(uint64_t physical) {return pmap_cache_attributes((unsigned int)(physical >> PAGE_SHIFT)) & 0x4u;}
 extern "C" volatile uint64_t native_legacy_copy_n __attribute__((weak)), native_legacy_copy_sum __attribute__((weak)), native_legacy_copy_max __attribute__((weak));
 extern "C" volatile uint64_t native_gop_gpu_offers __attribute__((weak)), native_gop_gpu_completions __attribute__((weak)),
     native_gop_gpu_failures __attribute__((weak)), native_gop_gpu_abandoned __attribute__((weak));
@@ -608,6 +614,8 @@ bool stage10()
     if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
     // fajita-gpu-import-skip (default 1): no per-submission cache maintenance of the imports the GPU writes (see NativeAdrenoVm.cpp).
     if (&native_adreno_skip_written_imports) native_adreno_skip_written_imports = bootArg("fajita-gpu-import-skip", 1);
+    // fajita-gpu-uncached-skip (default 1): publishing an import skips its pages that no CPU mapping caches (NativeAdrenoMemory.cpp).
+    if (&native_adreno_page_uncached) native_adreno_page_uncached = bootArg("fajita-gpu-uncached-skip", 1) ? pageUncached : nullptr;
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
     if (!vm) {gpuLog("S10 no vm"); return false;}
     const IOReturn attached = gSubmit.attach(vm, &gRing);
@@ -776,9 +784,10 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
     }
     if (native_adreno_maint_stats && native_adreno_submit_time && native_adreno_submit_time[0]) {
         const uint64_t n = native_adreno_submit_time[0];
-        w = appendf(out, cap, w, "publish per submit: imported %llu KiB in %llu, owned %llu KiB in %llu (x100 objects)\n",
+        w = appendf(out, cap, w, "publish per submit: imported %llu KiB in %llu, owned %llu KiB in %llu (x100 objects), uncached skipped %llu KiB\n",
                     (unsigned long long)(native_adreno_maint_stats[0] / n >> 10), (unsigned long long)(native_adreno_maint_stats[2] * 100 / n),
-                    (unsigned long long)(native_adreno_maint_stats[1] / n >> 10), (unsigned long long)(native_adreno_maint_stats[3] * 100 / n));
+                    (unsigned long long)(native_adreno_maint_stats[1] / n >> 10), (unsigned long long)(native_adreno_maint_stats[3] * 100 / n),
+                    (unsigned long long)((&native_adreno_uncached_skipped ? native_adreno_uncached_skipped : 0) / n >> 10));
     }
     if (&native_legacy_copy_n && native_legacy_copy_n) {
         mach_timebase_info_data_t tb; clock_timebase_info(&tb);
