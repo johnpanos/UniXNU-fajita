@@ -160,7 +160,10 @@ void charge() {
     IOLog("fajita-pmic: %s\n", fajita_pmic_rows[4]);
 }
 
+unsigned gExtraBits;   // bit 3: the alert slider's ringer state (FajitaAlertSlider.cpp, native-hid-ringer=1)
+
 void publishKeys(unsigned mask) {
+    mask = (mask & 7) | gExtraBits;
     if (mask == native_button_state) return;
     native_button_state = mask;
     fajita_pmic_keys[2] = fajita_pmic_keys[2] + 1;
@@ -474,4 +477,11 @@ extern "C" void fajita_pmic_poll(void) {
     if (stage && kernel_thread_start(worker, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
     thread = nullptr;
     if (gKeys && kernel_thread_start_priority(keysThread, nullptr, 80, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+}
+
+// The alert slider (FajitaAlertSlider.cpp): bit 3 of native_button_state, which NativeHidInput reports as Telephony 0x2E (the ringer
+// switch usage of AppleM68Buttons) when native-hid-ringer=1.
+extern "C" void fajita_button_extra(unsigned bits) {
+    gExtraBits = bits & 8;
+    publishKeys(native_button_state & 7);
 }

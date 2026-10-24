@@ -19,7 +19,7 @@ KIT = ROOT / 'kits/fajita'
 WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-designator', '-Wno-reorder-init-list',
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
-INCLUDES = ['-I', str(KIT), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
+INCLUDES = ['-I', str(KIT), '-I', str(ROOT / 'drivers/NativeSpmi'), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 
 def record(relative):
@@ -74,7 +74,8 @@ def check_object(path):
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     rec = record('iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
-    sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp', KIT / 'FajitaDpu.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
+    sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp', KIT / 'FajitaDpu.cpp', KIT / 'FajitaPanel.cpp', KIT / 'FajitaHaptics.cpp',
+               KIT / 'FajitaAlertSlider.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
     objects, commands = [], {}
     for source in sources:
         obj = OUT / (source.stem + '.o')

@@ -263,10 +263,16 @@ void worker(void *, wait_result_t) {
 // Called by the boot progress monitor once a second (BootProgress.c); the first call after IOKit is up starts the worker.
 extern "C" void fajita_bus_poll(void);   // FajitaBusVote.cpp: the DDR/LLCC votes (fajita-ddr, default on), same archive
 extern "C" void fajita_dpu_poll(void);   // FajitaDpu.cpp: the read-only DPU inspection kcmd, same archive
+extern "C" void fajita_alert_poll(void);    // FajitaAlertSlider.cpp: the alert slider (fajita-alert, default off), same archive
+extern "C" void fajita_haptics_poll(void);  // FajitaHaptics.cpp: PMI8998 haptics (fajita-haptics, default off), same archive
+extern "C" void fajita_panel_poll(void);  // FajitaPanel.cpp: panel brightness (fajita-brightness, default off), same archive
 extern "C" void sheng_cpufreq_poll(void) {
     static bool absent;
     fajita_bus_poll();
     fajita_dpu_poll();
+    fajita_panel_poll();
+    fajita_haptics_poll();
+    fajita_alert_poll();
     if (absent || gStarted) {if (gStarted && gDom[0].va) summary(); return;}
     if (!IOService::getPlatform()) return;
     unsigned mode = 0, cap = 0;

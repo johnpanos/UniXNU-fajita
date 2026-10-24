@@ -53,6 +53,42 @@ def node(name, properties=(), children=()):
     return result + b''.join(children)
 
 
+def _adt_parse(d, o=0):
+    n, c = struct.unpack_from('<II', d, o); o += 8; props = []
+    for _ in range(n):
+        name = d[o:o + 32].split(b'\0')[0].decode(); length, = struct.unpack_from('<I', d, o + 32); o += 36
+        length &= 0x7fffffff; props.append((name, d[o:o + length])); o += (length + 3) & ~3
+    kids = []
+    for _ in range(c):
+        k, o = _adt_parse(d, o); kids.append(k)
+    return (props, kids), o
+
+
+def backlight_node(source):
+    """/backlight of the iPhone X tree: AppleARMBacklight matches IONameMatch "backlight" and calls the service with phandle 0x80
+    for function-backlight_update ('bklU') and function-backlight_enable ('bklE'). Scalars below are the 20H392 D221 values."""
+    u32 = lambda v: struct.pack('<I', v)
+    props = [('compatible', b'backlight\0'), ('device_type', b'backlight\0'), ('backlight-id', u32(0xffffffff)),
+             ('AAPL,phandle', u32(0xd3)),
+             ('function-backlight_update', u32(0x80) + b'Uklb'), ('function-backlight_enable', u32(0x80) + b'Elkb'),
+             ('DBVMin', u32(139)), ('DBVMax', u32(0x7ff)), ('override-boot-brightness', u32(740)), ('max-nit-value', u32(750)),
+             ('backlight-update-policy', u32(4)), ('use-AAB-architecture', u32(1)), ('use-Nits2DACTable', u32(1)), ('use-AAP', u32(1)),
+             ('use-new-AAP-ramp', u32(1)), ('pre-strobe-nit', u32(674)), ('panel-gamma', u32(0x898)),
+             ('LminProduct', u32(0x20000)), ('LmidProduct', u32(0x9b0000)), ('LmaxProduct', u32(0x2a20741))]
+    if source and not Path(source).is_file():
+        print(f'warning: {source} missing: /backlight carries only its scalar properties (ipsw img4 im4p extract DeviceTree.d221ap.im4p)')
+        source = None
+    if source:
+        # the /backlight node is a direct child of the root
+        data = Path(source).read_bytes()
+        (rprops, kids), _ = _adt_parse(data)
+        have = {k for k, _ in props} | {'name'}
+        for kprops, _ in kids:
+            if dict(kprops).get('name', b'').startswith(b'backlight\0'):
+                props += [(k, v) for k, v in kprops if k not in have and not k.startswith('function-') and k != 'AAPL,phandle']
+    return node('backlight', props)
+
+
 def empty_nvram_proxy():
     """A fresh volatile CHRP bank for upstream IODTNVRAM, with no controller."""
     def header(name, size):
@@ -116,6 +152,13 @@ def main():
     parser.add_argument('--rtc', action='store_true',
                         help='/arm-io/rtc: the PM8998 RTC (pm8998.dtsi rtc@6000, SID 0) for FajitaRtc; device_type rtc makes ArmDTPlatform wait '
                              'for the IORTC resource before the calendar starts')
+    parser.add_argument('--backlight', action='store_true',
+                        help='/backlight (IONameMatch backlight: the AppleARMBacklight of AppleARMPlatform), as the iPhone X tree has it: scalar properties '
+                             'and function-backlight_update/enable = phandle 0x80 + \'Uklb\'/\'Elkb\'. Phandle 0x80 is the panel service of '
+                             'package/FajitaPanel.cpp (fajita-brightness=1). --backlight-from PATH copies the rest of the node from an iPhone X ADT payload')
+    parser.add_argument('--backlight-from', type=Path, default=None,
+                        help='ADT payload of the 20H392 DeviceTree.d221ap (ipsw img4 im4p extract): the /backlight properties not listed here (the '
+                             'marketing table, restriction tables) are copied from it at build time; nothing of it is stored in the repository')
     parser.add_argument('--trust-cache', action='store_true', help='Zeroed TrustCache sidecar handoff placeholder')
     parser.add_argument('--gpu-addon', action='store_true', help='Zeroed GpuAddon sidecar handoff placeholder (the loader fills in kernel.macho.gpuaddon)')
     parser.add_argument('--board-args', default='',
@@ -124,6 +167,10 @@ def main():
     parser.add_argument('--text-fixup', action='append', default=[],
                         help='/chosen/text-fixups entry <file name>,<file offset>,<original>,<replacement> for the kernel\'s signed-text fixups')
     args = parser.parse_args()
+    # FAJITA_BACKLIGHT=1 is --backlight for builds that pass no argument (the board's args list stays unchanged until the slider is proven)
+    args.backlight = args.backlight or os.environ.get('FAJITA_BACKLIGHT') == '1'
+    if args.backlight and args.backlight_from is None:
+        args.backlight_from = Path(os.environ.get('FAJITA_BACKLIGHT_FROM', Path(__file__).resolve().parents[1] / '.cache/ipsw/20H392/DeviceTree.d221ap.payload'))
     if args.ipad_identity:
         args.identity = args.identity or 'ipad7,1'
     identity = IDENTITIES.get(args.identity)
@@ -209,11 +256,12 @@ def main():
         node('defaults', [('sleep-disabled', struct.pack('<I', 1)), ('kern.maxvnodes', struct.pack('<I', 66560)),
                           *([('vmm-present', struct.pack('<I', 1))] if args.vmm_present else [])]),
         node('options', []),
+        *([backlight_node(args.backlight_from)] if args.backlight else []),
         # The original AppleImage4 panics without a product node. Name and model are the
         # board DT's own strings.
         *( [node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                              # No 'menu' entry: fajita has no Home button. 2 = the non-mechanical answer BSPlatform passes through.
-                             ('button-names', b'hold\0voldown\0volup\0'),
+                             ('button-names', b'hold\0voldown\0volup\0' + (b'ringerab\0' if os.environ.get('FAJITA_RINGER') == '1' else b'')),
                              ('home-button-type', struct.pack('<I', 2))])] if identity else [] ),
         node('product', [('product-name', identity['product-name'] if identity else b'OnePlus 6T\0'),
                          ('model', b'oneplus,fajita\0'),

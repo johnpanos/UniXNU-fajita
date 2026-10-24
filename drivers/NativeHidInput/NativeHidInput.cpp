@@ -58,6 +58,20 @@ static const unsigned char buttonDescriptor[]={
     0x75,0x01,0x95,0x04,0x81,0x02,
     0x75,0x04,0x95,0x01,0x81,0x03,0xc0
 };
+// native-hid-ringer=1 (fajita, with native-hid-buttons=1): report 2 gains bit 4 = Telephony 0x2E, the HID usage the iPhone's
+// AppleM68Buttons maps to the ringer switch ("ringerab", 20H392 kernelcache: usage page 0x0b, usage 0x2e). native_button_state bit 3 feeds it.
+static const unsigned char ringerDescriptor[]={
+    0x05,0x01,0x09,0x06,0xa1,0x01,0x85,0x01,
+    0x05,0x07,0x19,0xe0,0x29,0xe7,0x15,0x00,0x25,0x01,
+    0x75,0x01,0x95,0x08,0x81,0x02,
+    0x75,0x08,0x95,0x01,0x81,0x03,
+    0x19,0x00,0x29,0x65,0x15,0x00,0x25,0x65,
+    0x75,0x08,0x95,0x06,0x81,0x00,
+    0x85,0x02,0x05,0x0c,0x09,0x40,0x09,0x30,0x09,0xe9,0x09,0xea,0x15,0x00,0x25,0x01,
+    0x75,0x01,0x95,0x04,0x81,0x02,
+    0x05,0x0b,0x09,0x2e,0x75,0x01,0x95,0x01,0x81,0x02,
+    0x75,0x03,0x95,0x01,0x81,0x03,0xc0
+};
 // Report 3: ten-finger Touch Screen collection (Tip Switch, Untouch (set when the tip is up), Contact Identifier, X, Y per finger, then Contact Count).
 // Coordinates are normalised to 0..32767 on both axes by the producer.
 #define FINGER_DESC \
@@ -172,6 +186,7 @@ class NativeHidInput : public IOHIDDevice {
     bool touchOnly=false;
     bool eventDriverFound=false;
     bool buttons=false;            // native-hid-buttons=1: report 2 also carries the PMIC keys
+    bool ringer=false;             // native-hid-ringer=1: bit 3 of native_button_state is the ringer switch (report 2 bit 4)
     uint8_t buttonBits=0;          // keys last sent (bit 0 power, 1 volume up, 2 volume down)
     uint32_t lastSeq=0;
     // Fingers sent as down in the previous report; a vanished identifier gets one explicit tip-up report.
@@ -250,7 +265,7 @@ class NativeHidInput : public IOHIDDevice {
         native_hid_input_observed(6,result);
         native_touch_hid_reports=native_touch_hid_reports+1;
     }
-    uint8_t report2() const {return (uint8_t)((down?1:0) | (buttons?(buttonBits&7)<<1:0));}
+    uint8_t report2() const {return (uint8_t)((down?1:0) | (buttons?(buttonBits&(ringer?0xf:7))<<1:0));}
     static void buttonNotify(void *context) {
         NativeHidInput *self=static_cast<NativeHidInput *>(context);
         if(self && self->inputLoop)self->inputLoop->runAction(&NativeHidInput::buttonAction,self);
@@ -262,7 +277,7 @@ class NativeHidInput : public IOHIDDevice {
     }
     void buttonSend() {
         if(!buttons || !&native_button_state)return;
-        uint8_t bits=(uint8_t)(native_button_state&7);
+        uint8_t bits=(uint8_t)(native_button_state&(ringer?0xf:7));
         if(bits==buttonBits)return;
         if(!hasEventDriverCached())return;   // nobody to tell yet; the next change retries
         buttonBits=bits;
@@ -307,7 +322,7 @@ class NativeHidInput : public IOHIDDevice {
         }
         native_hid_input_observed(3,1);
         if(!self->down && !native_hid_input_requested()) {source->setTimeoutMS(1000);return;}
-        unsigned char report[]={2,static_cast<unsigned char>((self->down?0:1) | (self->buttons?(self->buttonBits&7)<<1:0))};
+        unsigned char report[]={2,static_cast<unsigned char>((self->down?0:1) | (self->buttons?(self->buttonBits&(self->ringer?0xf:7))<<1:0))};
         IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,sizeof(report),kIODirectionNone);
         IOReturn result=buffer?self->handleReport(buffer,0,0):kIOReturnNoMemory;
         OSSafeReleaseNULL(buffer);
@@ -324,11 +339,12 @@ public:
     OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":"Offline HID input probe");}
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
         if(!out)return kIOReturnBadArgument;
-        unsigned char combined[sizeof(buttonDescriptor)+sizeof(touchDescriptor)];
+        unsigned char combined[sizeof(ringerDescriptor)+sizeof(touchDescriptor)];
         size_t size;
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
         else{
-            if(buttons){size=sizeof(buttonDescriptor);memcpy(combined,buttonDescriptor,size);}
+            if(buttons && ringer){size=sizeof(ringerDescriptor);memcpy(combined,ringerDescriptor,size);}
+            else if(buttons){size=sizeof(buttonDescriptor);memcpy(combined,buttonDescriptor,size);}
             else{size=sizeof(descriptor);memcpy(combined,descriptor,size);}
             // Default: one device, keyboard collection first, digitizer second (the arrangement whose event driver
             // and user client attach on hardware); the separate digitizer device is the opt-in sheng-touch-split.
@@ -347,6 +363,8 @@ public:
         if(touchOnly||touchEnabled){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);}
         unsigned keys=0;
         buttons=!touchOnly && PE_parse_boot_argn("native-hid-buttons",&keys,sizeof(keys)) && keys==1;
+        unsigned ring=0;
+        ringer=buttons && PE_parse_boot_argn("native-hid-ringer",&ring,sizeof(ring)) && ring==1;
         if(!IOHIDDevice::start(provider))return false;
         timer=IOTimerEventSource::timerEventSource(this,tick);
         if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess) {
