@@ -225,6 +225,7 @@ static void dwc3GadgetThread(void *, wait_result_t)
       native_dwc3_polls = native_dwc3_polls + 1;
       gGadget->poll();
       gGadget->pumpLog();
+      gGadget->pumpShot();
       gGadget->kickTx();
       if (!gDevCreated && &rootvnode && rootvnode) {
         gDevCreated = true;
@@ -233,7 +234,8 @@ static void dwc3GadgetThread(void *, wait_result_t)
     }
     // Control transfers have tight host timeouts: keep the poll period at 1 ms, and do not sleep at all while the
     // controller still has events queued.
-    if (!gGadget || !gGadget->eventsPending()) IOSleep(1);
+    // ...nor while a screenshot is streaming (the ring drains in well under a millisecond per 16 KiB transfer).
+    if (!gGadget || (!gGadget->eventsPending() && !gGadget->shotActive)) IOSleep(1);
   }
 }
 
