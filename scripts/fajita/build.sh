@@ -68,6 +68,8 @@ say "board $(git -C "$BOARD" rev-parse --short HEAD) ($(git -C "$BOARD" rev-pars
 
 export UNIXNU_OUT=$OUT/unixnu UNIXNU_UEFI=${UNIXNU_UEFI:-$HOME/src/Mu-Silicium}
 export UNIXNU_XNU_CLANG=${UNIXNU_XNU_CLANG:-$HOME/unixnu-toolchain/clang/bin/clang} UNIXNU_LD64=${UNIXNU_LD64:-$HOME/unixnu-toolchain/ld64/bin/arm64-apple-darwin-ld}
+# The cctools/ld64 build carries a RUNPATH into the scratch directory it was built in; its libdispatch/libBlocksRuntime sit in ../lib64.
+export LD_LIBRARY_PATH=$(dirname "$UNIXNU_LD64")/../lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export UNIXNU_IIG_OUTPUTS=$BOARD/.cache/iig-outputs-20H392 FAJITA_USBDBG_AGENT=$IN/fjdbg-agent
 export PYTHONPATH=$STACK/scripts FAJITA_STORAGE_CANDIDATE=$IN/storage-candidate/kernel.macho FAJITA_VERIFIED_ROOT_CACHE=$BOARD/.cache/verified-root
 D16=$BOARD/ios16
