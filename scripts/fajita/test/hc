@@ -1,0 +1,2 @@
+#!/bin/bash
+exec python3 -I "$(dirname "$0")/../../fajita-usbdbg-hub.py" call --timeout ${T:-8} "$@"

@@ -8,6 +8,17 @@ Device repository for the OnePlus 6T (fajita, SDM845). It holds the board file, 
 
 Build with the `unixnu` driver of [UniXNU](https://github.com/UniXNU/UniXNU).
 
+## Run the best build
+
+On the `ios16-port` branch, with the phone in fastboot:
+
+```
+scripts/fajita/build.sh && scripts/fajita/boot.sh
+```
+
+This boots iOS 16.7.16 with GPU compositing, touch, charging, keys and the USB debug channel. See [AGENTS.md](AGENTS.md) for the
+inputs it needs, the test tools and how to work on the tree.
+
 ## State
 
 | Stage | State |
