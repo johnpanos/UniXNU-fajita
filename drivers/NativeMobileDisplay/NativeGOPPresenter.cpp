@@ -16,6 +16,10 @@ volatile uint64_t native_gop_gpu_offers,native_gop_gpu_completions,native_gop_gp
 /* waitSwap: [0] calls, [1] timeouts, [2] the requested timeout of the last call (ms), [3] time the last timed-out call really waited (ns), [4] the shortest
  * and [5] the longest such wait (ns), [6] total ns waited in timed-out calls. A timed wait that returns long before its deadline shows here. */
 volatile uint64_t native_gop_wait_stats[7];
+/* Frame mappings kept across swaps (fajita-gop-mapcache, default 4 entries; 0 maps every frame): [0] hits, [1] misses (new mapping), [2] evictions,
+ * [3] flushes (client task changed or gone). Timing per delivered swap: [4] swaps, [5] total ns mapping, [6] total ns from delivery to completion
+ * (the client's import, GPU copy and wait), [7] the longest such ns. */
+volatile uint64_t native_gop_map_stats[8];
 IOService *native_gop_presenter_create(void);
 bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
 void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
@@ -39,6 +43,14 @@ class NativeGOPPresenter : public IOService {
     struct {bool offered,delivered;uint64_t sequence;void *display;IOMemoryDescriptor *memory;IOMemoryMap *map;
             uint64_t stride;uint32_t width,height;} swap={};
     uint64_t swapSequence=0;
+    // The frame mappings kept for the client task (descriptor retained, so its pointer is its identity); id goes to NGPSwap.reserved.
+    struct MapEntry {IOMemoryDescriptor *memory;IOMemoryMap *map;uint32_t id;uint64_t used;};
+    MapEntry maps[8]={};
+    unsigned mapLimit=4;
+    uint32_t mapIds=0;
+    uint64_t mapClock=0,deliveredAt=0;
+    task_t mapTask=TASK_NULL;
+    void flushMaps();
     IOReturn waitSwap(task_t,uint64_t timeoutMs,NGPSwap *);
     IOReturn completeSwap(uint64_t sequence,int status);
     void abandonSwap();
@@ -92,6 +104,7 @@ bool NativeGOPPresenter::start(IOService *provider) {
        mapping->getLength()!=video.v_rowBytes*video.v_height)return false;
     gate=IOLockAlloc();if(!gate)return false;
     {unsigned v=0;PE_parse_boot_argn("sheng-fb-gpu",&v,sizeof v);gpuMode=(v==1);}
+    {unsigned v=4;PE_parse_boot_argn("fajita-gop-mapcache",&v,sizeof v);mapLimit=v>8?8:v;}
     mode={NGP_VERSION,NGP_BGRX8888,video.v_width,video.v_height,video.v_rowBytes,mapping->getLength()};
     native_gop_physical=mapping->getPhysicalAddress();native_gop_virtual=mapping->getVirtualAddress();
     online=true;native_gop_ready=1;if(gpuMode)gHandoff=this;registerService();return true;
@@ -165,22 +178,58 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     const uint64_t sequence=swap.sequence,stride=swap.stride;const uint32_t width=swap.width,height=swap.height;
     IOLockUnlock(gate);
     // The frame's pages go into the client's task here, writable like any import (the GPU maps them for reading; the kernel pins and maintains them).
-    IOMemoryMap *map=memory->createMappingInTask(task,0,kIOMapAnywhere);
+    // Only the waiting client thread reaches the cache (waitSwap, and abandonSwap once it is gone), and only one swap is outstanding, so the entry
+    // in use is always the newest and never the one evicted.
+    const uint64_t mapBegan=mach_absolute_time();
+    IOMemoryMap *map=nullptr;uint32_t id=0;
+    if(mapLimit) {
+        if(mapTask!=task)flushMaps();
+        for(unsigned i=0;i<mapLimit;++i)if(maps[i].memory==memory && maps[i].map) {map=maps[i].map;id=maps[i].id;maps[i].used=++mapClock;break;}
+        if(map)native_gop_map_stats[0]=native_gop_map_stats[0]+1;
+    }
+    bool cached=map!=nullptr;
+    if(!map) {
+        map=memory->createMappingInTask(task,0,kIOMapAnywhere);
+        if(mapLimit && map && map->getVirtualAddress()) {
+            native_gop_map_stats[1]=native_gop_map_stats[1]+1;
+            unsigned victim=0;
+            for(unsigned i=0;i<mapLimit;++i) {
+                if(!maps[i].map){victim=i;break;}
+                if(maps[i].used<maps[victim].used)victim=i;
+            }
+            if(maps[victim].map) {
+                OSSafeReleaseNULL(maps[victim].map);OSSafeReleaseNULL(maps[victim].memory);
+                native_gop_map_stats[2]=native_gop_map_stats[2]+1;
+            }
+            if(mapTask==TASK_NULL){mapTask=task;task_reference(task);}
+            memory->retain();
+            if(!++mapIds)mapIds=1;
+            maps[victim]={memory,map,mapIds,++mapClock};id=mapIds;cached=true;
+        }
+    }
     memory->release();
+    {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-mapBegan,&ns);native_gop_map_stats[5]=native_gop_map_stats[5]+ns;}
     IOLockLock(gate);
     if(!map || !map->getVirtualAddress() || !swap.offered || swap.sequence!=sequence) {
-        IOLockUnlock(gate);OSSafeReleaseNULL(map);__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);return kIOReturnNoMemory;
+        IOLockUnlock(gate);if(!cached)OSSafeReleaseNULL(map);__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);return kIOReturnNoMemory;
     }
-    swap.map=map;
+    swap.map=cached?nullptr:map;   // a cached mapping stays with its entry; an uncached one is released when the swap completes
+    deliveredAt=mach_absolute_time();
     out->sequence=sequence;out->address=map->getVirtualAddress();out->bytes=map->getLength();out->stride=stride;
-    out->width=width;out->height=height;out->format=NGP_BGRX8888;out->reserved=0;
+    out->width=width;out->height=height;out->format=NGP_BGRX8888;out->reserved=id;
     IOLockUnlock(gate);return kIOReturnSuccess;
 }
 IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
     IOLockLock(gate);
     if(!swap.offered || !swap.delivered || swap.sequence!=sequence) {IOLockUnlock(gate);return kIOReturnBadArgument;}
     auto done=swap;swap={};
+    const uint64_t delivered=deliveredAt;
     IOLockUnlock(gate);
+    if(delivered) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-delivered,&ns);
+        native_gop_map_stats[4]=native_gop_map_stats[4]+1;native_gop_map_stats[6]=native_gop_map_stats[6]+ns;
+        if(ns>native_gop_map_stats[7])native_gop_map_stats[7]=ns;
+    }
     OSSafeReleaseNULL(done.map);done.memory->release();
     if(status)__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);
     else native_gop_gpu_completions=native_gop_gpu_completions+1;
@@ -193,10 +242,17 @@ void NativeGOPPresenter::abandonSwap() {
     gpuClient=false;
     auto done=swap;swap={};
     IOLockUnlock(gate);
+    flushMaps();
     if(!done.offered)return;
     OSSafeReleaseNULL(done.map);if(done.memory)done.memory->release();
     __atomic_fetch_add(&native_gop_gpu_abandoned,1,__ATOMIC_RELAXED);
     native_legacy_gpu_complete(done.display,kIOReturnAborted);
+}
+void NativeGOPPresenter::flushMaps() {
+    bool any=false;
+    for(auto &e:maps) {if(e.map||e.memory)any=true;OSSafeReleaseNULL(e.map);OSSafeReleaseNULL(e.memory);e={};}
+    if(mapTask!=TASK_NULL){task_deallocate(mapTask);mapTask=TASK_NULL;}
+    if(any)native_gop_map_stats[3]=native_gop_map_stats[3]+1;
 }
 extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub) {
     if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
