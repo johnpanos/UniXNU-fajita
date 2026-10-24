@@ -12,7 +12,9 @@
 //   0 (default) publish IORTC but answer "not ready", so the platform expert does not wait and the time stays as before;
 //   1 read the counter and the record, serve the time; a set changes the offset in memory only;
 //   2 as 1, and a set that moves the offset by 2 s or more writes the record (forced unit access).
-// fajita-rtc-offset=<seconds> (tests): an offset to use when the record has none.
+// fajita-rtc-offset=<seconds>: an explicit anchor, wall time minus counter (constant while the RTC runs, so a build-time value
+// does not go stale): it replaces the recorded offset, and in mode 2 is written as the record. A minute after start the driver
+// logs the calendar against counter + offset.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -160,15 +162,15 @@ void FajitaRtc::bringUp (void *arg, wait_result_t)
   fajita_rtc_stats[2] = raw;
   if (rc == 0) {
     self->loadRecord ();
-    uint64_t seed = 0;
-    if (!self->fHave && PE_parse_boot_argn ("fajita-rtc-offset", &seed, sizeof (seed)) && seed) {
-      self->fRecord = rtc_record {0, static_cast<int64_t> (seed), seed + raw, raw};
-      self->fHave = 1;
-      IOLog ("FajitaRtc: offset %llu from fajita-rtc-offset\n", seed);
-    }
     IOLockLock (self->fLock);
     self->fReady = true;
     IOLockUnlock (self->fLock);
+    // An explicit anchor (the host's offset, given by the payload build): wins over the record, and in mode 2 becomes it.
+    uint64_t seed = 0;
+    if (PE_parse_boot_argn ("fajita-rtc-offset", &seed, sizeof (seed)) && seed) {
+      IOLog ("FajitaRtc: offset %llu from fajita-rtc-offset (record %lld)\n", seed, self->fHave ? static_cast<long long> (self->fRecord.offset) : 0LL);
+      self->setTime (static_cast<clock_sec_t> (seed + raw));
+    }
   } else {
     fajita_rtc_stats[9]++;
     IOLog ("FajitaRtc: RTC read failed (%d)\n", rc);
@@ -181,6 +183,17 @@ void FajitaRtc::bringUp (void *arg, wait_result_t)
   IOLog ("FajitaRtc: %s, wall %llu\n", fajita_rtc_row, t);
   self->registerService ();
   self->publishResource ("IORTC", self);
+  // One check a minute later: the calendar against counter + offset (they differ only when something set the time since).
+  IOSleep (60000);
+  clock_sec_t now = 0;
+  clock_usec_t us = 0;
+  clock_get_calendar_microtime (&now, &us);
+  clock_nsec_t ns = 0;
+  clock_sec_t rtc = 0;
+  IOReturn st = self->getTime (&rtc, &ns);
+  self->summarise ("check");
+  IOLog ("FajitaRtc: calendar %lu.%06u, RTC wall %lu (0x%x), %s\n", static_cast<unsigned long> (now), us, static_cast<unsigned long> (rtc), st,
+         fajita_rtc_row);
   self->release ();
 }
 
