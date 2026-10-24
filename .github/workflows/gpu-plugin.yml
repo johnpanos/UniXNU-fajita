@@ -91,9 +91,11 @@ jobs:
           done
           fi
           M2V=$(python3 -c "import json;print(json.load(open('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']['commit'])")
-          if [ ! -d .cache/gpu-reference/metal2vulkan/.git ]; then
+          if [ "$(git -C .cache/gpu-reference/metal2vulkan rev-parse HEAD 2>/dev/null)" != "$M2V" ]; then
+          rm -rf .cache/gpu-reference/metal2vulkan
           git init -q .cache/gpu-reference/metal2vulkan
-          git -C .cache/gpu-reference/metal2vulkan fetch -q --depth 1 https://github.com/steelbrain/metal2vulkan "$M2V"
+          M2V_REPO=$(python3 -c "import json;print(json.load(open('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']['repository'])")
+          git -C .cache/gpu-reference/metal2vulkan fetch -q --depth 1 "$M2V_REPO" "$M2V"
           git -C .cache/gpu-reference/metal2vulkan checkout -q FETCH_HEAD
           fi
       - name: Turnip (darwin KMD, iOS 16)
