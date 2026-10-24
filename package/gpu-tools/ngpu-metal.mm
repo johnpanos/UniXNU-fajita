@@ -68,6 +68,37 @@ int main(int argc, char **argv) {
             }
             return 0;
         }
+        if (argc > 2 && !strcmp(argv[1], "ls")) {
+            NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(argv[2]) error:nil];
+            for (NSString *n in names) printf("%s\n", n.UTF8String);
+            return names ? 0 : 1;
+        }
+        if (argc > 2 && !strcmp(argv[1], "lib")) {
+            // lib PATH [FUNCTION]: the native device's view of a metallib (as QuartzCore loads it), and one function from it.
+            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+            if (!device) {printf("no device\n"); return 2;}
+            NSError *error = nil;
+            id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&error];
+            printf("library %s error %s\n", library ? class_getName(object_getClass(library)) : "nil",
+                   error ? error.localizedDescription.UTF8String : "-");
+            if (!library) return 3;
+            NSArray<NSString *> *names = library.functionNames;
+            printf("%lu functions:", (unsigned long)names.count);
+            for (NSUInteger i = 0; i < names.count && i < 400; ++i) printf(" %s", names[i].UTF8String);
+            printf("\n");
+            if (argc > 3) {
+                MTLFunctionDescriptor *d = [MTLFunctionDescriptor functionDescriptor];
+                d.name = @(argv[3]);
+                MTLFunctionConstantValues *v = [MTLFunctionConstantValues new];
+                bool yes = true;
+                for (int i = 4; i < argc; ++i) [v setConstantValue:&yes type:MTLDataTypeBool withName:@(argv[i])];
+                d.constantValues = v;
+                error = nil;
+                id<MTLFunction> f = [library newFunctionWithDescriptor:d error:&error];
+                printf("function %s: %s error %s\n", argv[3], f ? "made" : "nil", error ? error.localizedDescription.UTF8String : "-");
+            }
+            return 0;
+        }
         if (argc > 1 && !strcmp(argv[1], "ps")) {
             static int pids[4096];
             const int n = proc_listallpids(pids, sizeof pids);
