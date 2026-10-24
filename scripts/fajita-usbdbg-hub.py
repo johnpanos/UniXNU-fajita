@@ -123,6 +123,10 @@ class Hub:
         if op == 'state':
             st, data = self.request('state')
             return {'ok': st == 0, 'out': data.decode(errors='replace')}
+        if op == 'panic':
+            # a deliberate kernel panic, to test the panic path (device needs usb-debug=2)
+            st, _ = self.request('panic', ' '.join(a).encode() or b'test')
+            return {'ok': st == 0, 'out': 'panic requested (status %d)\n' % st}
         if op == 'reset':
             # the phone resets at once (device needs usb-debug=2), so no reply is expected
             try:
