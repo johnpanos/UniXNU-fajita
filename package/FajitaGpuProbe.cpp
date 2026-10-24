@@ -377,6 +377,9 @@ extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8]
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
 extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
 extern "C" volatile uint64_t native_legacy_copy_n __attribute__((weak)), native_legacy_copy_sum __attribute__((weak)), native_legacy_copy_max __attribute__((weak));
+extern "C" volatile uint64_t native_gop_gpu_offers __attribute__((weak)), native_gop_gpu_completions __attribute__((weak)),
+    native_gop_gpu_failures __attribute__((weak)), native_gop_gpu_abandoned __attribute__((weak));
+extern "C" volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak)), native_legacy_gpu_last_status __attribute__((weak));
 bool stage7()
 {
     // The user BO pool (sheng's sheng-gpu-pool): user BOs from one write-combined contiguous block skip the per-submission
@@ -776,6 +779,13 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
                     (unsigned long long)(native_legacy_copy_sum / native_legacy_copy_n * tb.numer / tb.denom / 1000),
                     (unsigned long long)(native_legacy_copy_max * tb.numer / tb.denom / 1000));
     }
+    // The GPU hand-off (sheng-fb-gpu=1): frames offered to the render server's presenter, completed, failed, abandoned, CPU fallbacks.
+    if (&native_gop_gpu_offers && native_gop_gpu_offers)
+        w = appendf(out, cap, w, "handoff offers %llu done %llu failed %llu abandoned %llu fallback %u last %x\n",
+                    (unsigned long long)native_gop_gpu_offers, (unsigned long long)(&native_gop_gpu_completions ? native_gop_gpu_completions : 0),
+                    (unsigned long long)(&native_gop_gpu_failures ? native_gop_gpu_failures : 0),
+                    (unsigned long long)(&native_gop_gpu_abandoned ? native_gop_gpu_abandoned : 0),
+                    &native_legacy_gpu_fallbacks ? native_legacy_gpu_fallbacks : 0u, &native_legacy_gpu_last_status ? native_legacy_gpu_last_status : 0u);
     w = appendf(out, cap, w, "usage: gpu [N | log | regs | retry]  (stages 1..%u)\n", kLastStage);
     return w;
 }
