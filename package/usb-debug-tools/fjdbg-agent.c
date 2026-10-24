@@ -15,12 +15,15 @@
 // this kernel). Plain C, libSystem only.
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -31,6 +34,7 @@ extern char **environ;
 #endif
 
 static int gDev = -1;
+static int gTimeout = 60;   // seconds per command; `@t N CMD...` sets it for one command
 
 static void writeAll(const char *buf, size_t len)
 {
@@ -106,15 +110,38 @@ static void runCommand(char **argv)
     close(fds[0]);
     return;
   }
+  // Stream output until the command closes its end, but never longer than gTimeout seconds: a hung test is killed
+  // instead of wedging the channel (the agent runs one command at a time).
   char buf[2048];
   ssize_t n;
-  while ((n = read(fds[0], buf, sizeof buf)) > 0)
+  int timedOut = 0;
+  time_t deadline = time(NULL) + gTimeout;
+  for (;;) {
+    int left = (int)(deadline - time(NULL));
+    if (left <= 0) {
+      kill(pid, SIGKILL);
+      timedOut = 1;
+      break;
+    }
+    struct pollfd pfd = {fds[0], POLLIN, 0};
+    int r = poll(&pfd, 1, left * 1000);
+    if (r < 0 && errno == EINTR)
+      continue;
+    if (r == 0)
+      continue;
+    n = read(fds[0], buf, sizeof buf);
+    if (n <= 0)
+      break;
     writeAll(buf, (size_t)n);
+  }
   close(fds[0]);
   int status = 0;
   waitpid(pid, &status, 0);
-  char tail[64];
-  snprintf(tail, sizeof tail, "fjdbg: exit %d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  char tail[96];
+  if (timedOut)
+    snprintf(tail, sizeof tail, "fjdbg: timeout after %d s, killed\nfjdbg: exit 124\n", gTimeout);
+  else
+    snprintf(tail, sizeof tail, "fjdbg: exit %d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
   say(tail);
 }
 
@@ -304,12 +331,22 @@ int main(void)
     }
     line[len] = '\0';
     if (len > 0) {
-      if (line[0] == '@')
+      if (strncmp(line, "@t ", 3) == 0) {   // @t SECONDS CMD...: one command with its own time limit
+        char *rest = NULL;
+        long t = strtol(line + 3, &rest, 10);
+        char *argv[64];
+        gTimeout = t > 0 ? (int)t : 60;
+        if (rest && split(rest, argv, 64) > 0) {
+          runCommand(argv);
+          gTimeout = 60;
+        }   // `@t N` alone: the limit applies to the next command (older agents just ignore this line)
+      } else if (line[0] == '@')
         builtin(line);
       else {
         char *argv[64];
         if (split(line, argv, 64) > 0)
           runCommand(argv);
+        gTimeout = 60;
       }
     }
     len = 0;

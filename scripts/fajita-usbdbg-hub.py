@@ -172,7 +172,8 @@ class Hub:
             return {'ok': True, 'out': '%s: %dx%d, %.1f s\n' % (path, w, h, time.time() - t0)}
         timeout = float(req.get('timeout') or 60)
         if op == 'run':
-            body = self.shell_exchange([' '.join(a).encode()], timeout)
+            # the agent kills the command a little before our own deadline, so the channel is free again
+            body = self.shell_exchange([b'@t %d' % max(1, int(timeout) - 5), ' '.join(a).encode()], timeout)
             if body is None:
                 return {'ok': False, 'out': 'run: timeout\n'}
             return {'ok': True, 'out': body.decode(errors='replace')}
