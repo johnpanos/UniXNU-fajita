@@ -11,7 +11,7 @@ declare -A POS=( [mobilecal]="164 840:MobileCal" [mobilemail]="664 840:MobileMai
 printf '%-18s %-10s %-8s %s\n' app registered bundle launches
 for k in mobilecal mobilemail mobilenotes reminders mobiletimer tv hello weather MobileAddressBook; do
   xy=${POS[$k]%%:*}; name=${POS[$k]##*:}
-  reg=$(grep -c -i "\.$k\$\|\.$k\.\|^org.unixnu.$k\$" $R/list.txt); b=$(grep -c "/$name.app/\$" $R/bundles.txt)
+  reg=$(grep -c -i "\.$k\$\|\.$k\.\|^org.unixnu.$k\$" $R/list.txt); b=$(grep -c "/$name.app/ " $R/bundles.txt)
   page=0; case $k in weather|MobileAddressBook) page=1;; esac
   $SS call kcmd touch swipe right > /dev/null; sleep 1; [ $page = 1 ] && { $SS call kcmd touch swipe left > /dev/null; sleep 2; }
   $SS call kcmd touch tap $xy > /dev/null; sleep 7
