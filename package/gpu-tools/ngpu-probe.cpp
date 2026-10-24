@@ -7,6 +7,8 @@
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
 #include <stdio.h>
+#include <signal.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -49,6 +51,9 @@ static kern_return_t makeBo(Bo &bo, uint64_t bytes, uint64_t iova) {
 }
 
 int main(int argc, char **argv) {
+    // A hung GPU or Metal call must not wedge the usb-debug agent (it runs one command at a time): exit after NGPU_LIMIT s (20).
+    signal(SIGALRM, [](int) {static const char m[] = "FAIL timeout (alarm)\n"; write(1, m, sizeof m - 1); _exit(124);});
+    alarm(getenv("NGPU_LIMIT") ? (unsigned)atoi(getenv("NGPU_LIMIT")) : 20);
     const char *names[] = {"NativeAdrenoGpuPublished", nullptr};
     io_service_t service = 0;
     for (unsigned i = 0; i < 40 && !service; ++i) {

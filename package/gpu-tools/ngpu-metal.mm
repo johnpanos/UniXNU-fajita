@@ -8,6 +8,9 @@
 #import <Metal/Metal.h>
 #include <mach/mach_time.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
 #include <string.h>
 
 static double nowMs() {
@@ -17,6 +20,9 @@ static double nowMs() {
 }
 
 int main(int argc, char **argv) {
+    // A hung GPU or Metal call must not wedge the usb-debug agent (it runs one command at a time): exit after NGPU_LIMIT s (20).
+    signal(SIGALRM, [](int) {static const char m[] = "FAIL timeout (alarm)\n"; write(1, m, sizeof m - 1); _exit(124);});
+    alarm(getenv("NGPU_LIMIT") ? (unsigned)atoi(getenv("NGPU_LIMIT")) : 20);
     @autoreleasepool {
         setvbuf(stdout, nullptr, _IOLBF, 0);
         const double t0 = nowMs();
