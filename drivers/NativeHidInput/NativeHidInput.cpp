@@ -11,6 +11,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSIterator.h>
 extern "C" void native_hid_input_observed(unsigned,int);
+extern "C" uint64_t mach_absolute_time(void);
 extern "C" void native_hid_live_checkpoint(IOService *);
 extern "C" bool native_hid_input_requested(void);
 extern "C" void native_touch_set_sink(void (*)(void *), void *) __attribute__((weak_import));
@@ -24,6 +25,11 @@ extern "C" {volatile uint32_t native_hid_button_stats[4];}
 // Optional touch digitizer fed by the board touch probe (kits/sheng/TouchProbe.cpp): finger set published with a seqlock.
 extern "C" {
 extern volatile uint32_t native_touch_seq, native_touch_count, native_touch_hid_reports;
+// fajita-touch-ts=1 (FajitaTouchProbe.cpp): the sample's mach_absolute_time, published inside the seqlock, handed to the original
+// IOHIDDevice::handleReportWithTime (vtable index 197 of 20H392: handleReport at 181 reads the clock and calls it) instead of
+// letting handleReport stamp the report with the time the work loop got to it. native_touch_ts_mode is 0 unless the arg is set.
+extern volatile uint64_t native_touch_ts __attribute__((weak_import));
+extern volatile uint32_t native_touch_ts_mode __attribute__((weak_import));
 extern volatile int native_touch_xs[12], native_touch_ys[12], native_touch_ids[12];
 }
 // Keyboard Application collection ensures the original generic keyboard
@@ -84,7 +90,7 @@ enum {kSlots=256,kDispatch=NATIVE_HID_DISPATCH_EVENT_SLOT,kGetType=NATIVE_HID_EV
       kGetFixed=NATIVE_HID_EVENT_GET_FIXED_SLOT,kChildren=NATIVE_HID_EVENT_CHILDREN,kContacts=256};
 static_assert(NATIVE_HID_EVENT_DRIVER_SLOTS<=kSlots,"the vtable copy covers the original IOHIDEventDriver table");
 static_assert(kDispatch<NATIVE_HID_EVENT_DRIVER_SLOTS,"dispatchEvent is a slot of the original IOHIDEventDriver table");
-enum : uint32_t {kDigitizer=11,kX=0xB0000,kY=0xB0001,kIndex=0xB0005,kMask=0xB0007,kTouch=0xB0009,kMaskTouch=2,kFromEdgeTip=0x800};
+enum : uint32_t {kHandleReportWithTime=197,kDigitizer=11,kX=0xB0000,kY=0xB0001,kIndex=0xB0005,kMask=0xB0007,kTouch=0xB0009,kMaskTouch=2,kFromEdgeTip=0x800};
 // 48 panel pixels of 3048 x 2032 (the sweet reference uses 48 px), in the driver's normalised IOFixed coordinates. A board can
 // set its own zone in thousandths of the screen: native-touch-edge-side, -top, -bottom (the fajita iOS 16 board: HackiOS's
 // iPhone X zone, 16/375, 16/812 and 34/812, the strip of the home bar, as 43, 20 and 42).
@@ -98,6 +104,9 @@ static void configure() {
 static uintptr_t originalDispatch;
 static bool fromEdge[kContacts];
 extern "C" {volatile uint32_t native_touch_edge_stats[4];}   // [0] installed, [1] contacts begun, [2] of them at an edge, [3] skipped events
+// Timer ticks: [0] reports, [1] sum and [2] max of (handleReport start - sample time) in ticks (timestamp mode only), [3] sum and [4] max
+// of the handleReport duration, [5] reports sent with the sample time.
+extern "C" {volatile uint32_t native_hid_lat[6];}
 template <typename R,typename... A> static R call(void *object,unsigned slot,A... args) {
     return reinterpret_cast<R (*)(void *,A...)>((*reinterpret_cast<uintptr_t **>(object))[slot])(object,args...);
 }
@@ -192,35 +201,51 @@ class NativeHidInput : public IOHIDDevice {
         unsigned count=native_touch_count;if(count>TOUCH_FINGERS)count=TOUCH_FINGERS;
         int ids[TOUCH_FINGERS],xs[TOUCH_FINGERS],ys[TOUCH_FINGERS];
         for(unsigned i=0;i<count;++i){ids[i]=native_touch_ids[i];xs[i]=native_touch_xs[i];ys[i]=native_touch_ys[i];}
+        const bool stamped=&native_touch_ts_mode && native_touch_ts_mode && &native_touch_ts;
+        const uint64_t sampleTime=stamped?native_touch_ts:0;
         __asm__ volatile("dmb ish":::"memory");
         if(native_touch_seq!=before)return;      // torn read: retry on the next tick
         self->lastSeq=before;
         // Sizes follow the axis maxima of the touch core: 30480 long, 20320 short, mapped to the same 0..32767 range.
+        // A contact sits in the report slot of its controller id, so the event driver's finger index (the position of the finger
+        // collection) stays the same for the whole contact; packing them into slots 0..n-1 moved a surviving finger to index 0 when
+        // an earlier one lifted, and lifted the wrong index.
         unsigned char report[1+TOUCH_FINGERS*6+1]={3};
-        unsigned slot=0;
-        for(unsigned i=0;i<count && slot<TOUCH_FINGERS;++i,++slot) {
+        bool present[TOUCH_FINGERS]={};
+        unsigned records=0;
+        for(unsigned i=0;i<count;++i) {
+            if(ids[i]<0 || ids[i]>=(int)TOUCH_FINGERS || present[ids[i]])continue;
+            const unsigned slot=(unsigned)ids[i];
             unsigned x=transformCoordinate(xs[i],30480),y=transformCoordinate(ys[i],20320);
             unsigned char *f=report+1+slot*6;
-            f[0]=1;f[1]=(unsigned char)(ids[i]&0xff);f[2]=(unsigned char)x;f[3]=(unsigned char)(x>>8);f[4]=(unsigned char)y;f[5]=(unsigned char)(y>>8);
-            self->prevIds[slot]=ids[i];self->prevX[slot]=(int)x;self->prevY[slot]=(int)y;
+            f[0]=1;f[1]=(unsigned char)slot;f[2]=(unsigned char)x;f[3]=(unsigned char)(x>>8);f[4]=(unsigned char)y;f[5]=(unsigned char)(y>>8);
+            present[slot]=true;self->prevIds[slot]=(int)slot;self->prevX[slot]=(int)x;self->prevY[slot]=(int)y;++records;
         }
-        unsigned downCount=slot;
-        // Identifiers that were down and are gone: tip up at the last known position.
-        for(unsigned j=downCount;j<TOUCH_FINGERS;++j) {
-            if(self->prevIds[j]<0)continue;
-            if(slot<TOUCH_FINGERS) {
-                unsigned char *f=report+1+slot*6;
-                f[0]=2;f[1]=(unsigned char)(self->prevIds[j]&0xff);
-                f[2]=(unsigned char)self->prevX[j];f[3]=(unsigned char)(self->prevX[j]>>8);
-                f[4]=(unsigned char)self->prevY[j];f[5]=(unsigned char)(self->prevY[j]>>8);
-                ++slot;
-            }
+        // Slots that were down and are gone: tip up at the last known position.
+        for(unsigned j=0;j<TOUCH_FINGERS;++j) {
+            if(present[j] || self->prevIds[j]<0)continue;
+            unsigned char *f=report+1+j*6;
+            f[0]=2;f[1]=(unsigned char)j;
+            f[2]=(unsigned char)self->prevX[j];f[3]=(unsigned char)(self->prevX[j]>>8);
+            f[4]=(unsigned char)self->prevY[j];f[5]=(unsigned char)(self->prevY[j]>>8);
+            ++records;
             self->prevIds[j]=-1;
         }
-        if(!slot)return;
-        report[1+TOUCH_FINGERS*6]=(unsigned char)slot;
+        if(!records)return;
+        report[1+TOUCH_FINGERS*6]=(unsigned char)records;
         IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,sizeof(report),kIODirectionNone);
-        IOReturn result=buffer?self->handleReport(buffer,0,0):kIOReturnNoMemory;
+        IOReturn result=kIOReturnNoMemory;
+        if(buffer) {
+            const uint64_t t0=mach_absolute_time();
+            if(sampleTime && (*reinterpret_cast<uintptr_t **>(this))[edge::kHandleReportWithTime]) {
+                result=edge::call<IOReturn,uint64_t,IOMemoryDescriptor *,unsigned,IOOptionBits>(this,edge::kHandleReportWithTime,sampleTime,buffer,0,0);
+                native_hid_lat[5]=native_hid_lat[5]+1;
+                const uint32_t late=(uint32_t)(t0>sampleTime?t0-sampleTime:0);
+                native_hid_lat[1]=native_hid_lat[1]+late;if(late>native_hid_lat[2])native_hid_lat[2]=late;
+            } else result=self->handleReport(buffer,0,0);
+            const uint32_t took=(uint32_t)(mach_absolute_time()-t0);
+            native_hid_lat[0]=native_hid_lat[0]+1;native_hid_lat[3]=native_hid_lat[3]+took;if(took>native_hid_lat[4])native_hid_lat[4]=took;
+        }
         OSSafeReleaseNULL(buffer);
         native_hid_input_observed(6,result);
         native_touch_hid_reports=native_touch_hid_reports+1;
