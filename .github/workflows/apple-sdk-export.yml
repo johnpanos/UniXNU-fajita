@@ -30,8 +30,8 @@ jobs:
             xcrun clang --version; xcrun ld -v 2>&1; xcrun -sdk iphoneos metal --version 2>&1 || true ) > stage/versions.txt
           cat stage/versions.txt
           ditto "$SDK" "stage/$(basename "$SDK")"
-          RT=$(ls -d "$TC"/lib/clang/*/lib/darwin)
-          mkdir -p stage/toolchain/clang-rt && cp "$RT"/libclang_rt.ios.a "$RT"/libclang_rt.profile_ios.a stage/toolchain/clang-rt/ 2>/dev/null || cp "$RT"/libclang_rt.ios.a stage/toolchain/clang-rt/
+          RT=$(dirname "$(ls "$TC"/lib/clang/*/lib/darwin/libclang_rt.ios.a | head -1)")
+          mkdir -p stage/toolchain/clang-rt && cp "$RT"/libclang_rt.ios.a stage/toolchain/clang-rt/
           du -sh stage/*
           tar -C stage -czf sdk.tgz .
           openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:SDK_TAR_KEY -in sdk.tgz -out sdk.tgz.enc
