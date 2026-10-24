@@ -85,12 +85,28 @@ class Hub:
                         link = fj.Link(fj.TtyTransport(tty), on_text=self.on_text, on_log=self.on_log, on_shell=self.on_shell,
                                        on_file=self.shots.on_file)
                         self.link = link
+                        self.link_node = (tty, os.stat(tty).st_ino, os.stat(tty).st_ctime_ns)
                         self.up_since = time.time()
                         self.note('connected ' + tty)
                     except OSError as e:
                         self.note('open %s failed: %s' % (tty, e))
             else:
-                if not find_tty():
+                # the gadget re-enumerated (a new tty node, or a different one): the old fd only gives EIO, so reconnect
+                tty = find_tty()
+                try:
+                    node = (tty, os.stat(tty).st_ino, os.stat(tty).st_ctime_ns) if tty else None
+                except OSError:
+                    node = None
+                if tty and node != getattr(self, 'link_node', node):
+                    self.note('tty changed (%s): reconnecting' % tty)
+                    try:
+                        self.link.close()
+                    except Exception:
+                        pass
+                    self.link = None
+                    self.up_since = None
+                    continue
+                if not tty:
                     self.note('gadget gone')
                     try:
                         self.link.close()
