@@ -46,6 +46,29 @@ def find_tty():
     return None
 
 
+def tty_busy(tty):
+    """True when another process already has the tty open (scanned through /proc/*/fd)."""
+    try:
+        target = os.stat(tty).st_rdev
+    except OSError:
+        return False
+    me = os.getpid()
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            for fd in os.listdir('/proc/%s/fd' % pid):
+                try:
+                    st = os.stat('/proc/%s/fd/%s' % (pid, fd))
+                except OSError:
+                    continue
+                if st.st_rdev == target and (st.st_mode & 0o170000) == 0o020000:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 class Hub:
     def __init__(self, log_path):
         self.log = open(log_path, 'ab', buffering=0)
@@ -80,6 +103,12 @@ class Hub:
         while True:
             if self.link is None:
                 tty = find_tty()
+                if tty and os.path.exists(tty) and tty_busy(tty):
+                    if getattr(self, 'busy_noted', None) != tty:
+                        self.note('%s is open in another process: not attaching (one reader per tty)' % tty)
+                        self.busy_noted = tty
+                    time.sleep(0.5)
+                    continue
                 if tty and os.path.exists(tty):
                     try:
                         link = fj.Link(fj.TtyTransport(tty), on_text=self.on_text, on_log=self.on_log, on_shell=self.on_shell,
@@ -271,6 +300,18 @@ class Hub:
 
 def serve(args):
     hub = Hub(args.log)
+    if getattr(args, 'owner_pid', None):
+        def owner_watch(pid=args.owner_pid):
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    hub.note('owner %d gone: exiting' % pid)
+                    os._exit(0)
+                except PermissionError:
+                    pass
+                time.sleep(2)
+        threading.Thread(target=owner_watch, daemon=True).start()
     threading.Thread(target=hub.connect_loop, args=(args.exec_cmd,), daemon=True).start()
     try:
         os.unlink(args.sock)
@@ -324,6 +365,7 @@ def main():
     ap.add_argument('--sock', default=DEFAULT_SOCK)
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('serve'); p.add_argument('--log', required=True)
+    p.add_argument('--owner-pid', type=int, help='exit when this process (the run that started the hub) is gone')
     p.add_argument('--exec', dest='exec_cmd', help='tests: talk to a program (the simulator) instead of the tty')
     p = sub.add_parser('call'); p.add_argument('--timeout', type=float); p.add_argument('op'); p.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
