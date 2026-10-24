@@ -84,6 +84,9 @@ static const unsigned char touchDescriptor[]={
 // stores the child, int-163 skipped every finger by comparing it), so each child is an IOHIDEvent by its class instead.
 // fajita: those numbers come from OriginalHidEventLayout.h, qualified against the candidate of the board's kernelcache. 20H392 has
 // the same ones (its IOHIDEventDriver has 219 slots, one fewer than 21H461's 220, past slot 216).
+// Timer ticks: [0] reports, [1] sum and [2] max of (handleReport start - sample time) in ticks (timestamp mode only), [3] sum and [4] max
+// of the handleReport duration, [5] reports sent with the sample time.
+extern "C" {volatile uint32_t native_hid_lat[6];}
 namespace edge {
 enum {kSlots=256,kDispatch=NATIVE_HID_DISPATCH_EVENT_SLOT,kGetType=NATIVE_HID_EVENT_GET_TYPE_SLOT,
       kGetInteger=NATIVE_HID_EVENT_GET_INTEGER_SLOT,kSetInteger=NATIVE_HID_EVENT_SET_INTEGER_SLOT,
@@ -104,9 +107,6 @@ static void configure() {
 static uintptr_t originalDispatch;
 static bool fromEdge[kContacts];
 extern "C" {volatile uint32_t native_touch_edge_stats[4];}   // [0] installed, [1] contacts begun, [2] of them at an edge, [3] skipped events
-// Timer ticks: [0] reports, [1] sum and [2] max of (handleReport start - sample time) in ticks (timestamp mode only), [3] sum and [4] max
-// of the handleReport duration, [5] reports sent with the sample time.
-extern "C" {volatile uint32_t native_hid_lat[6];}
 template <typename R,typename... A> static R call(void *object,unsigned slot,A... args) {
     return reinterpret_cast<R (*)(void *,A...)>((*reinterpret_cast<uintptr_t **>(object))[slot])(object,args...);
 }
