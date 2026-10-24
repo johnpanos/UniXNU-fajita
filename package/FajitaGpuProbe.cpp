@@ -375,6 +375,7 @@ bool cpRun(const uint32_t *words, size_t count, const char *what, uint32_t timeo
 
 extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[8], native_adreno_pool_status;
 extern "C" volatile uint64_t native_adreno_submit_time[8] __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_skip_written_imports __attribute__((weak));
 bool stage7()
 {
     // The user BO pool (sheng's sheng-gpu-pool): user BOs from one write-combined contiguous block skip the per-submission
@@ -600,6 +601,8 @@ static const NativeAdrenoAbiDeviceInfo gDeviceInfo = {
 bool stage10()
 {
     if (!native_adreno_publish) {gpuLog("S10 nolink"); return false;}
+    // fajita-gpu-import-skip (default 1): no per-submission cache maintenance of the imports the GPU writes (see NativeAdrenoVm.cpp).
+    if (&native_adreno_skip_written_imports) native_adreno_skip_written_imports = bootArg("fajita-gpu-import-skip", 1);
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
     if (!vm) {gpuLog("S10 no vm"); return false;}
     const IOReturn attached = gSubmit.attach(vm, &gRing);
