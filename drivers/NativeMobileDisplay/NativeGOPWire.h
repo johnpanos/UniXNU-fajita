@@ -11,6 +11,8 @@ struct NGPTransfer {uint64_t sequence,bytes;};
 // memory type 1, writable) and then completes it (selector 3), which retires the swap. Nothing here copies pixels.
 enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_MEMORY_SCANOUT_RW=1 };
 struct NGPWait {uint64_t timeout_ms;};
+// NGPSwap.reserved: nonzero when the frame's mapping is kept across swaps (fajita-gop-mapcache): the same value means the same mapping at the same
+// address over the same pages, so the client may keep its import of it; a value it no longer sees was released. 0: mapped for this swap only.
 struct NGPSwap {uint64_t sequence,address,bytes,stride;uint32_t width,height,format,reserved;};
 struct NGPComplete {uint64_t sequence;uint32_t status,reserved;};
 static_assert(sizeof(NGPWait)==8 && sizeof(NGPSwap)==48 && sizeof(NGPComplete)==16,"GOP hand-off ABI");

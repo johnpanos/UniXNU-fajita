@@ -41,6 +41,7 @@ extern "C" {
 #include "NativeAdrenoSubmit.h"
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoABI.h"
+extern "C" {extern uint64_t (*native_adreno_vm_now_us)(void) __attribute__((weak));extern uint64_t (*native_adreno_ring_now)(void) __attribute__((weak));extern volatile uint32_t native_adreno_ring_ts __attribute__((weak));}
 extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
     const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t input_bits, uint32_t output_bits) __attribute__((weak));
 extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed) __attribute__((weak));
@@ -344,7 +345,25 @@ int ringBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 int ringAcquire(void *, volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 uint64_t ringNow(void *) {return nowUs();}
-int ringIdle(void *) {IODelay(20); return 0;}
+// Between fence reads: sleep until the GPU's next interrupt (CACHE_FLUSH_TS ends every submission; gpuIrq wakes &gIrqCount) with a 500 us
+// backstop for a wakeup that raced the fence check, instead of spinning a core the compositor needs. fajita-gpu-irqwait=0 spins as before;
+// so does a caller that cannot block (interrupts off or preemption disabled) and any wait before the interrupt is attached.
+extern "C" int get_preemption_level(void);
+extern volatile uint32_t gIrqCount;
+volatile uint32_t gIrqWait = 0, gIrqWaitStats[3];   // [0] sleeps, [1] woken by the interrupt, [2] spins
+int ringIdle(void *)
+{
+    if (gIrqWait && gIrqCount && ml_get_interrupts_enabled() && !get_preemption_level()) {
+        assert_wait_timeout(event_t(&gIrqCount), THREAD_UNINT, 500, NSEC_PER_USEC);
+        const wait_result_t r = thread_block(THREAD_CONTINUE_NULL);
+        gIrqWaitStats[0] = gIrqWaitStats[0] + 1;
+        if (r == THREAD_AWAKENED) gIrqWaitStats[1] = gIrqWaitStats[1] + 1;
+        return 0;
+    }
+    gIrqWaitStats[2] = gIrqWaitStats[2] + 1;
+    IODelay(20);
+    return 0;
+}
 const NativeAdrenoRingIo kRingIo = {nullptr, ringWrite, ringRead, ringBarrier};
 const NativeAdrenoRingCache kRingCache = {nullptr, ringPublish, ringAcquire};
 const NativeAdrenoRingClock kClock = {nullptr, ringNow, ringIdle};
@@ -629,6 +648,9 @@ bool stage10()
     if (&native_adreno_skip_written_publish) native_adreno_skip_written_publish = bootArg("fajita-gpu-wpub-skip", 1);
     // fajita-gpu-uncached-skip (default 1): publishing an import skips its pages that no CPU mapping caches (NativeAdrenoMemory.cpp).
     if (&native_adreno_page_uncached) native_adreno_page_uncached = bootArg("fajita-gpu-uncached-skip", 1) ? pageUncached : nullptr;
+    gIrqWait = bootArg("fajita-gpu-irqwait", 0);   // opt-in: kcmd gpu stopped answering with it on (p15, p16)
+    if (&native_adreno_ring_now) native_adreno_ring_now = mach_absolute_time;
+    if (&native_adreno_vm_now_us && !native_adreno_vm_now_us) native_adreno_vm_now_us = [] {return nowUs();};   // per-submission CPU times next to the GPU timestamps
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
     if (!vm) {gpuLog("S10 no vm"); return false;}
     const IOReturn attached = gSubmit.attach(vm, &gRing);
@@ -941,6 +963,8 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
         else if (nl == 9 && !strncmp(name, "uacq-skip", nl) && &native_adreno_uncached_acquire_skip) native_adreno_uncached_acquire_skip = on;
         else if (nl == 9 && !strncmp(name, "wpub-skip", nl) && &native_adreno_skip_written_publish) native_adreno_skip_written_publish = on;
         else if (nl == 5 && !strncmp(name, "trace", nl) && &native_adreno_trace) native_adreno_trace = int(*v - '0');
+        else if (nl == 2 && !strncmp(name, "ts", nl) && &native_adreno_ring_ts) native_adreno_ring_ts = on;
+        else if (nl == 8 && !strncmp(name, "irq-wait", nl)) gIrqWait = on;
         else if (nl) return appendf(out, cap, 0, "usage: gpu set import-skip|ro-skip|wpub-skip|uacq-skip|uncached-skip|trace 0|1\n");
         return appendf(out, cap, 0, "uche-inv %u trace %d uacq-skip %u wpub-skip %u import-skip %u ro-skip %u uncached-skip %u\n", &native_adreno_uche_invalidate ? (unsigned)native_adreno_uche_invalidate : 9u,
                        &native_adreno_trace ? (int)native_adreno_trace : 9,
@@ -1012,7 +1036,7 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
     }
     w = appendf(out, cap, w, "stage %u running %u failed %d status %x iofaults %u\n", (unsigned)fajita_gpu_stage,
                 (unsigned)fajita_gpu_running, (int)fajita_gpu_failed, (unsigned)fajita_gpu_status, (unsigned)gIoFaults);
-    w = appendf(out, cap, w, "irq count %u seen %x first-error %x hwfault %x rptr %x\n", gIrqCount, gIrqSeen, gIrqError, gIrqHwFault, gIrqRptr);
+    w = appendf(out, cap, w, "irq count %u seen %x first-error %x hwfault %x rptr %x | waits irq %u sleeps %u woken %u spins %u\n", gIrqCount, gIrqSeen, gIrqError, gIrqHwFault, gIrqRptr, gIrqWait, gIrqWaitStats[0], gIrqWaitStats[1], gIrqWaitStats[2]);
     if (native_adreno_submit_time && native_adreno_submit_time[0]) {
         mach_timebase_info_data_t tb; clock_timebase_info(&tb);
         const uint64_t n = native_adreno_submit_time[0];
