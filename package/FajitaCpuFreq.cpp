@@ -261,8 +261,10 @@ void worker(void *, wait_result_t) {
 }
 
 // Called by the boot progress monitor once a second (BootProgress.c); the first call after IOKit is up starts the worker.
+extern "C" void fajita_bus_poll(void);   // FajitaBusVote.cpp: the DDR/LLCC votes (fajita-ddr, default on), same archive
 extern "C" void sheng_cpufreq_poll(void) {
     static bool absent;
+    fajita_bus_poll();
     if (absent || gStarted) {if (gStarted && gDom[0].va) summary(); return;}
     if (!IOService::getPlatform()) return;
     unsigned mode = 0, cap = 0;
