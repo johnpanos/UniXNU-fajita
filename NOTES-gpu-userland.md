@@ -88,8 +88,21 @@ stand-ins come from `scripts/gpu-local/tool.py`:
 - Signing: rcodesign 0.29.0 (ad-hoc, 4 KiB pages, entitlements). CodeResources is written in codesign's format (byte-identical for
   the same files). `--verify` and `--display` use a built-in CodeDirectory check, because rcodesign's verify rejects every ad-hoc
   signature.
-- metallib: Apple's Metal compiler is macOS-only, so scanout_scale.metallib is served from `.cache/gpu-local/metallib`, keyed by
-  the sha256 of the .metal source and flags. After a shader change, run the CI once, then `--seed-metallib RUN_ID`.
+- metallib: scanout_scale.metallib comes from `.cache/gpu-local/metallib`, keyed by the sha256 of the .metal source and flags
+  (a CI metallib, seeded with `--seed-metallib RUN_ID`). On a cache miss, for example after a shader change, the `metal` stand-in
+  compiles the shader with Apple's Metal Developer Tools for Windows under Wine. It uses the CI flags (`-std=metal3.0
+  -mios-version-min=16.0 -O2`, then `metallib`) and keeps the result in `.cache/gpu-local/metallib/wine/<key>.metallib`. A CI
+  metallib always wins. Without Wine or the tools, a miss fails as before.
+  - Setup: download the installer from developer.apple.com (Apple ID). Put it in the gitignored `.cache/metal-win/` and run
+    `--setup-metal-win`. That installs the newest `Metal_Developer_Tools*Windows.exe` silently (NSIS `/S`) into the Wine prefix
+    `.cache/metal-win/prefix-<version>`. Wine 11.0 runs it with no extra components. Never commit `.cache/metal-win`.
+  - The 3.1 tools are metalfe-31001.660 (3.0 is 31001.643); CI's Xcode 16.4 is metalfe-32023.620. The output is deterministic
+    and does not depend on the source path. It is not byte-identical to the CI metallib (3923 against 4483 bytes for the
+    NativeMetal shader at key 54e45f63). Same: the metallib header (v2.7, iOS 16.0), the one function `scanout_scale` (kernel,
+    AIR 2.5 / MSL 3.0), the argument metadata, the triple `air64-apple-ios16.0.0`, and every IR instruction (llvm-dis).
+    Different, all from the compiler version: the producer string, the per-function hash, how argument no-alias is written
+    (`noalias` against `"air-buffer-no-alias"`), function attributes, and 32023's TBAA, alias-scope and SDK Version metadata.
+    Not yet run on the phone: seed a CI metallib for a build that ships.
 - SDK: `--fetch-sdk [RUN_ID]` downloads the `Apple SDK export (encrypted)` artifact (.github/workflows/apple-sdk-export.yml:
   AES-256 with the repo secret SDK_TAR_KEY, kept for 1 day). It decrypts the artifact with ~/.config/unixnu/sdk_tar_key into the
   gitignored `.cache/apple-sdk`, then deletes the artifact. The repos are public: never commit or publish the SDK.
