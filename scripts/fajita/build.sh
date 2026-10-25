@@ -95,7 +95,9 @@ fi
 # 3. GPU plugin (Turnip, metal2vulkan, NativeMetal), packed into the boot add-on with the plugin's settings.
 if [ $SKIP_P = 0 ] || [ ! -e "$OUT/metal.ngpu" ]; then
   say "GPU plugin ..."
-  NMB_TARGET_CPU=${NMB_TARGET_CPU-cortex-a75} "$BOARD/scripts/build-gpu-plugin-local.sh" --unixnu "$STACK" --pack "$OUT/metal.ngpu" --base "$IN/metal-base.ngpu" > "$OUT/plugin.log" 2>&1 \
+  # NMB_TARGET_CPU=cortex-a75 (the bridge tuned for Kryo 385) is not the default: with it the render server's surface imports failed with
+  # OutOfMemory(Device) (App Library backdrop black, 2026-10-24); fat LTO alone is correct and App Library scroll 32 -> 41 fps.
+  NMB_TARGET_CPU=${NMB_TARGET_CPU-} "$BOARD/scripts/build-gpu-plugin-local.sh" --unixnu "$STACK" --pack "$OUT/metal.ngpu" --base "$IN/metal-base.ngpu" > "$OUT/plugin.log" 2>&1 \
     || { say "PLUGIN BUILD FAILED"; tail -8 "$OUT/plugin.log"; exit 1; }
   say "$(grep -a 'built\|packed' "$OUT/plugin.log" | tail -2 | tr '\n' ' ')"
 fi

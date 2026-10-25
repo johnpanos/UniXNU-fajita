@@ -21,11 +21,12 @@ home() { $TD/home-page1.sh >/dev/null 2>&1 || echo 'fps.sh: !! not on home page 
   (cd /tmp && SETTLE=1.0 timeout 200 python3 -I $TD/swipe-rate.py left right left right left:60 right:60 left:60 right:60 2>&1 | grep -v Deprec) > $G/fps-last.txt; }
 home; valid $G/fps-last.txt || { echo 'fps.sh: home phase invalid, running it again'; home; }
 valid $G/fps-last.txt || HOMEBAD=1
-# The App Library: swipe left from page 1 until the screen matches applib-base.png above the list.
+# The App Library: swipe left from page 1 until the screen's search field ("App Library" over the blurred wallpaper) matches
+# applib-base.png's. Only the field is compared: the folders below it reorder as the App Library's categories change with use.
 applib() { $TD/home-page1.sh >/dev/null 2>&1; inlib=0
 for i in 1 2 3 4 5; do
   $H kcmd touch swipe left >/dev/null; sleep 2; T=30 $H screenshot $G/.applib-check.png >/dev/null 2>&1
-  n=$(python3 -I $TD/scrdiff.py $G/applib-base.png $G/.applib-check.png 0 90 540 260 | awk '{print $4}'); [ "${n:-99999}" -lt 4000 ] && { inlib=1; break; }
+  n=$(python3 -I $TD/scrdiff.py $G/applib-base.png $G/.applib-check.png 30 88 510 155 | awk '{print $4}'); [ "${n:-99999}" -lt 3000 ] && { inlib=1; break; }
 done
 if [ $inlib = 1 ]; then
   (cd /tmp && SETTLE=1.0 timeout 200 python3 -I $TD/swipe-rate.py xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 2>&1 | grep -v Deprec) > $G/fps-applib.txt
