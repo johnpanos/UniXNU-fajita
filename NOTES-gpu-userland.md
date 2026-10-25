@@ -436,3 +436,19 @@ allocations a draw under callgrind); gpu-env A/B switches `TU_CS_RECYCLE=0`, `NG
 variant); `corr-tour.sh NAME` / `--diff A B` (Settings, App Library, lock, Notes, Calendar); perf.py per-SP ratios.
 
 Known: Notes shows a black screen 4 s after launch (before and after these changes); not investigated.
+
+### Copy-ins, continued (2026-10-25)
+
+- Fixed (translator 8dae7705): a shadow's own copy back forgot its held contents (`StatedShadows::written` forgot every stated shadow
+  over bytes a command writes, the copy back's own among them). CoreAnimation's 1125x2436 frame surfaces were copied in again at every
+  frame whatever their IOSurface seed: 2,811 copy-ins and 32 GB in 86 s before, 11 and 0.12 GB after. fps did not move (34.4 / 32.0 /
+  17.9, gpu busy 95%); the passtrace (pt-r3b) shows BGRA8 copy-ins 3.0/frame and 3.8 ms (from 4.7 and 5.0).
+- Still copied in each use: two host textures of 1271x1823 and 1326x1326 (19 GB in 86 s, "unstated", import path not yet known; the
+  log is shared by every Metal process, so the next log carries pid=), and CPU-written linear textures over Shared buffers
+  (`newLinearTextureWithDescriptor`: 180x180 RGBA8 rows of 720 bytes, A8 labels, 256x1), whose bytes the CPU writes through
+  `contents()` unseen, so their copy in is required.
+- Turnip's a6xx linear layout needs a 64-byte row pitch even with an explicit layout (`fd6_layout.c`: pitchalign 6 for cpp <= 4;
+  without an explicit layout cpp_shift + 6, 256 bytes for 4-byte texels). Rows of 720, 352, 288, 224 or 192 bytes cannot be an image
+  over the buffer's bytes; only 64-byte-multiple pitches (128-byte rows, the 4608-byte frame surfaces) could be sampled in place.
+- `M2V_SHADOW_UPPER_BOUND=1` (unsafe measurement): home 40.3 / 39.6, App Library 19.8, gpu busy 85%: the copy-ins are worth about +6
+  on home and nothing on the App Library.
