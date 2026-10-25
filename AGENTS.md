@@ -82,9 +82,13 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Touch, charging, keys and battery are on in every build (`board_args`). Don't turn them off.
 
 **No long blind waits.**
-- Stream logs. Poll with short checks such as `gpu-status.sh`, or a tail of `usb-console.txt`.
-- Never block for minutes on one command without output. Run long jobs in the background and check them.
-- A run that stops producing log output is broken. Stop it instead of waiting.
+- Every tool call finishes in under about 2 minutes. Builds, fps.sh, leakwatch, session start and large pulls run in the background
+  with output to a file, and you poll them with short checks (tail, gpu-status.sh). An agent's messages from the lead only arrive
+  between its tool calls, so a long blocking call also makes it deaf.
+- Never sleep long, or wait for a timeout to run out. Give hub calls a short T= (10-30 s for run/kcmd; pushes and pulls are chunked).
+- A call that times out means the phone may be stuck: check gpu-status.sh, lsusb and fastboot, then act (end the session, reboot,
+  rebuild). Don't retry blindly. If the same thing stalls twice, report it.
+- Stream logs, don't wait for them. A run that stops producing log output is broken. Stop it instead of waiting.
 
 **Measure the same way every time.**
 - Speed is `fps.sh`: home swipes and App Library scroll. Report both numbers.
