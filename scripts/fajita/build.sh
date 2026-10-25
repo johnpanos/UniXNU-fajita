@@ -5,7 +5,7 @@
 # all from this tree (ios16-port) and the UniXNU stack commit it pins (ios16/gpu-plugin.ref). Then boot it with
 # scripts/fajita/boot.sh. Output: $FAJITA_OUT (default .cache/fajita-out): payload.img, boot.img, metal.ngpu, build.txt.
 #
-#   --test         unattended test settings: the phone resets itself (sheng-autoreset=600, hardware stop 90 s later). Without it the
+#   --test         unattended test settings: the phone resets itself (sheng-autoreset=600 or $FAJITA_AUTORESET, hardware stop 90 s later). Without it the
 #                  build is for using the phone: no automatic reset (the APSS watchdog still recovers a hard hang).
 #   --skip-kernel  reuse the last kernel; --skip-plugin reuse the last plugin (both are rebuilt incrementally anyway).
 #   KERNEL_ARG     extra boot arguments, e.g. fajita-brightness=1.
@@ -102,7 +102,9 @@ fi
 
 # 4. Payload: the current best boot arguments (GPU compositing, USB debug channel; touch, charging, keys, battery come from board_args).
 ARGS=(usb-debug=3 fajita-gpu=11 fajita-gpu-delay=8 sheng-fb-gpu=1)
-[ $TEST = 1 ] && ARGS+=(sheng-autoreset=600 wdstop=690)
+# FAJITA_AUTORESET (default 600 s): the test build's reset; the hardware stop follows 90 s later.
+AR=${FAJITA_AUTORESET:-600}
+[ $TEST = 1 ] && ARGS+=(sheng-autoreset=$AR wdstop=$((AR + 90)))
 ARGS+=("${EXTRA[@]}")
 KA=(); for a in "${ARGS[@]}"; do KA+=("--kernel-arg=$a"); done
 say "payload: ${ARGS[*]}"
