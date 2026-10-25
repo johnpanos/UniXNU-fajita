@@ -9,6 +9,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOInterruptEventSource.h>
 #include <kern/clock.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/IOPMpowerState.h>
@@ -50,6 +51,13 @@ extern "C" void native_legacy_vsync_notify(void *display,uint64_t timestamp,uint
 // The unchanged original setDisplayRefreshProperties: publishes IOMFBDisplayRefresh from slot 301 (getRefreshAttributes below).
 extern "C" bool native_legacy_set_refresh_properties(void *display);
 extern "C" void native_legacy_vsync_observed(unsigned event,unsigned hz);
+// Hardware vsync (boot-arg fajita-hw-vsync=1, fajita only; replaces the sheng-vsync timer): the board's DPU interrupt (package/FajitaDpu.cpp,
+// PINGPONG_0 rd_ptr: once per frame the DPU sends the panel) triggers an interrupt event source on this work loop, whose action sends the
+// compositor's vsync with the interrupt's mach time and the measured interval. Weak: absent on other boards (the timer stays).
+extern "C" int fajita_dpu_vsync_attach(void (*vsync)(void *,uint64_t),void *context) __attribute__((weak));
+// [0] events delivered, [1] sent to a client, [2] no client, [3] coalesced (more than one interrupt per action), [4] attach result + 100,
+// [5] the last interval in us.
+extern "C" {volatile uint32_t native_legacy_hw_vsync[8];}
 extern "C" uint64_t mach_continuous_time(void);
 // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
 // either way (no compression is implemented), so the bytes are the same.
@@ -167,6 +175,42 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     uint64_t vsyncInterval=0,vsyncNext=0;
     unsigned vsyncHz=0;
     bool vsyncArmed=false;
+    IOInterruptEventSource *hwVsync=nullptr;
+    volatile uint64_t hwStamp=0;
+    uint64_t hwLast=0;
+    static void hwVsyncInterrupt(void *context,uint64_t stamp) {
+        NativeLegacyDisplay *d=static_cast<NativeLegacyDisplay *>(context);
+        d->hwStamp=stamp;
+        if(IOInterruptEventSource *source=d->hwVsync)source->interruptOccurred(nullptr,nullptr,0);
+    }
+    static void hwVsyncFired(OSObject *owner,IOInterruptEventSource *,int count) {static_cast<NativeLegacyDisplay *>(owner)->hwVsyncTick(count);}
+    void hwVsyncTick(int count) {
+        native_legacy_hw_vsync[0]=native_legacy_hw_vsync[0]+1;
+        if(count>1)native_legacy_hw_vsync[3]=native_legacy_hw_vsync[3]+1;
+        const uint64_t stamp=hwStamp;
+        const uint64_t interval=hwLast && stamp>hwLast?(stamp-hwLast)/(count>0?(uint64_t)count:1):vsyncInterval;
+        hwLast=stamp;
+        {uint64_t ns=0;absolutetime_to_nanoseconds(interval,&ns);native_legacy_hw_vsync[5]=(uint32_t)(ns/1000);}
+        if(!vsyncWanted()){native_legacy_hw_vsync[2]=native_legacy_hw_vsync[2]+1;return;}
+        native_legacy_vsync_notify(this,stamp,mach_continuous_time(),interval);
+        native_legacy_hw_vsync[1]=native_legacy_hw_vsync[1]+1;
+    }
+    bool startHwVsync() {
+        unsigned on=0;PE_parse_boot_argn("fajita-hw-vsync",&on,sizeof(on));
+        if(!on || !fajita_dpu_vsync_attach || !primary || hwVsync)return false;
+        IOWorkLoop *loop=getWorkLoop();
+        if(!loop)return false;
+        IOInterruptEventSource *source=IOInterruptEventSource::interruptEventSource(this,&NativeLegacyDisplay::hwVsyncFired,nullptr,0);
+        if(!source)return false;
+        if(loop->addEventSource(source)!=kIOReturnSuccess){source->release();return false;}
+        nanoseconds_to_absolutetime(1000000000ull/60,&vsyncInterval);vsyncHz=60;
+        hwVsync=source;
+        const int a=fajita_dpu_vsync_attach(&NativeLegacyDisplay::hwVsyncInterrupt,this);
+        native_legacy_hw_vsync[4]=(uint32_t)(a+100);
+        if(a){loop->removeEventSource(source);hwVsync=nullptr;source->release();return false;}
+        native_legacy_vsync_observed(4,60);
+        return true;
+    }
     bool vsyncWanted() const {
         const void *head=nullptr;memcpy(&head,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_VSYNC_CLIENTS,sizeof(head));return head;
     }
@@ -190,6 +234,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         vsyncArmed=true;vsyncTimer->wakeAtTime(vsyncNext);
     }
     void startVsync() {
+        if(startHwVsync())return;   // the DPU's frame interrupt paces the compositor; no timer
         unsigned hz=0;PE_parse_boot_argn("sheng-vsync",&hz,sizeof(hz));
         if(!hz || hz>240 || !primary || !bootMapping || vsyncTimer)return;
         IOWorkLoop *loop=getWorkLoop();
@@ -205,6 +250,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         },this);
     }
     void stopVsync() {
+        if(IOInterruptEventSource *source=hwVsync) {   // the board's handler finds no source from here on
+            hwVsync=nullptr;
+            if(IOWorkLoop *loop=getWorkLoop())loop->removeEventSource(source);
+            source->release();
+        }
         if(!vsyncTimer)return;
         vsyncTimer->cancelTimeout();
         if(IOWorkLoop *loop=getWorkLoop())loop->removeEventSource(vsyncTimer);

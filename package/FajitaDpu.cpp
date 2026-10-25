@@ -16,12 +16,20 @@
 #include <libkern/c++/OSSharedPtr.h>
 #include <libkern/libkern.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
 #include <string.h>
 #include <stdarg.h>
 
 extern "C" {
 typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out, size_t cap);
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help) __attribute__((weak));
+IOReturn armcpu_spi_attach(uint32_t intid, bool edge, void (*handler)(void *), void *context, uint32_t *readback, uint64_t *router)
+    __attribute__((weak));
+// The DPU interrupt (fajita_dpu_vsync_attach): [0] interrupts, [1] PP0 rd_ptr, [2] PP0 done, [3] every status bit seen (OR), [4] the last
+// status, [5] the attach result, [6] status-0 interrupts, [7] GIC readback.
+volatile uint32_t fajita_dpu_irq[8];
+volatile uint64_t fajita_dpu_irq_stamp;   // mach time of the last PP0 rd_ptr
+extern volatile uint32_t native_legacy_hw_vsync[8] __attribute__((weak));   // NativeLegacyDisplay's hardware vsync counters
 }
 
 namespace {
@@ -72,6 +80,32 @@ const uint32_t kSaved[] = {kVig + 0x00, kVig + 0x08, kVig + 0x0c, kVig + 0x10, k
                            kQ + 0x04, kQ + 0x0c, kQ + 0x10, kQ + 0x14, kQ + 0x18, kQ + 0x1c, kQ + 0x20, kQ + 0x40, kQ + 0x44, kQ + 0x48,
                            kQ + 0x90, kQ + 0x94, kQ + 0x98, kQ + 0x9c};
 constexpr unsigned kSavedCount = sizeof kSaved / sizeof kSaved[0], kQOpIndex = 15;
+
+// ---- hardware vsync: the MDSS interrupt (sdm845.dtsi mdss: GIC SPI 83, level high = INTID 115). The MDP top's INTR_EN/STATUS/CLEAR
+// (MDP + 0x010/0x014/0x018, dpu_hwio.h) fan it out; PINGPONG_0's rd_ptr is bit 12 and its done bit 8 (catalog/dpu_4_0_sdm845.h). Under
+// command mode with autorefresh the rd_ptr interrupt fires once per frame the DPU sends to the panel, at PP_RD_PTR_IRQ's line: the
+// display's frame clock, in hardware. The handler clears what it read and hands each rd_ptr to the display (an interrupt event source).
+constexpr uint32_t kIntrEn = 0x1010, kIntrStatus = 0x1014, kIntrClear = 0x1018, kPpRdPtr = 1u << 12, kPpDone = 1u << 8;
+volatile uint32_t *gIrqRegs;
+void (*gVsync)(void *, uint64_t);
+void *gVsyncContext;
+void dpuIrq(void *) {
+    volatile uint32_t *r = gIrqRegs;
+    if (!r) return;
+    const uint32_t status = rd(r, kIntrStatus);
+    wr(r, kIntrClear, status);
+    fajita_dpu_irq[0] = fajita_dpu_irq[0] + 1;
+    fajita_dpu_irq[3] = fajita_dpu_irq[3] | status;
+    fajita_dpu_irq[4] = status;
+    if (!status) fajita_dpu_irq[6] = fajita_dpu_irq[6] + 1;
+    if (status & kPpDone) fajita_dpu_irq[2] = fajita_dpu_irq[2] + 1;
+    if (status & kPpRdPtr) {
+        const uint64_t now = mach_absolute_time();
+        fajita_dpu_irq_stamp = now;
+        fajita_dpu_irq[1] = fajita_dpu_irq[1] + 1;
+        if (gVsync) gVsync(gVsyncContext, now);
+    }
+}
 
 struct TestArgs {uint32_t w, h, seconds;};
 TestArgs gArgs;
@@ -186,10 +220,34 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
     o.add("VIG0 src %08x %ux%u ystride %u out %ux%u fmt %08x op %08x\n", rd(r, kVig + 0x14), size & 0xffff, size >> 16,
           rd(r, kVig + 0x24) & 0xffff, outsz & 0xffff, outsz >> 16, rd(r, kVig + 0x30), rd(r, kVig + 0x38));
     o.add("CTL0 flush %08x | PP0 autorefresh %08x | INTF1 frames %u\n", rd(r, kCtl + 0x18), rd(r, kPp + 0x30), frames(r));
+    o.add("irq: n %u rd_ptr %u done %u seen %08x last %08x zero %u attach %x gic %x | INTR_EN %08x | PP0 rd_ptr frames %u line %u\n",
+          fajita_dpu_irq[0], fajita_dpu_irq[1], fajita_dpu_irq[2], fajita_dpu_irq[3], fajita_dpu_irq[4], fajita_dpu_irq[6], fajita_dpu_irq[5],
+          fajita_dpu_irq[7], rd(r, kIntrEn), rd(r, kPp + 0x14) >> 16, rd(r, kPp + 0x14) & 0xffff);
+    if (&native_legacy_hw_vsync[0])
+        o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
+              native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,
+              native_legacy_hw_vsync[5]);
     o.add("%s\n", gResult);
     return o.n;
 }
 }  // namespace
+
+// The display's hardware vsync (NativeLegacyDisplay, fajita-hw-vsync=1): `vsync` is called from the interrupt handler, in interrupt
+// context, with the mach time of each PP0 rd_ptr. 0 on success.
+extern "C" int fajita_dpu_vsync_attach(void (*vsync)(void *, uint64_t), void *context) {
+    volatile uint32_t *r = regs();
+    if (!r || !vsync || !armcpu_spi_attach) return -1;
+    if (gIrqRegs) return -2;
+    gVsyncContext = context; gVsync = vsync; gIrqRegs = r;
+    wr(r, kIntrEn, rd(r, kIntrEn) & ~kPpRdPtr);
+    wr(r, kIntrClear, 0xffffffffu);
+    uint32_t readback = 0; uint64_t router = 0;
+    const IOReturn a = armcpu_spi_attach(115, false, dpuIrq, nullptr, &readback, &router);
+    fajita_dpu_irq[5] = (uint32_t)a; fajita_dpu_irq[7] = readback;
+    if (a != kIOReturnSuccess) {gIrqRegs = nullptr; gVsync = nullptr; return -3;}
+    wr(r, kIntrEn, rd(r, kIntrEn) | kPpRdPtr);
+    return 0;
+}
 
 // Called by FajitaCpuFreq.cpp's sheng_cpufreq_poll once IOKit is up (same hook as fajita_bus_poll).
 extern "C" void fajita_dpu_poll(void) {
