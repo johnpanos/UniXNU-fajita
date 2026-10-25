@@ -483,3 +483,24 @@ hangs the hub call (corr-tour bounds it).
 
 Next: the CA main composite (about 7.8 ms, all sysmem: GMEM autotune A/B on it), the presenter scale (3.6 ms; DPU scan-out
 postponed by the user), and CPU per draw again now that gpu busy is below 90%.
+
+### Async encode and the CPU side (2026-10-25)
+
+**fps.sh x3, fresh boot, page 1 verified (pagematch.py): home 41.6 / 41.7 / 41.2 plain, 40.7 / 40.7 / 40.5 60-frame; App Library
+29.8 / 30.9 / 30.2.** (Before async encode, same Data: 39.8 / 39.0 / 24.0.)
+
+- Frame trace (busy frames, before async): 24.3 ms = cpu_gap 7.7 (the render server's own work) + encode 14.3 (about 121 draws,
+  ~118 us a draw on the A75) + commit 0.85, serial on one thread; GPU 15.7 ms of CA's command buffers + 3.6 ms presenter, overlapped.
+- NativeMetal `NGPU_ASYNC_ENCODE` (default on; `=0` off): every runtime call of an encoder and the runtime side of commit run on one
+  serial USER_INTERACTIVE queue in call order; status/error/GPU times/waits/resource checks drain it; commit blocks at three pending.
+  With it gpu busy is 93-95%: the GPU (about 19-20 ms a frame with the presenter scale) is the limit again.
+- GMEM autotune A/B on top: `prefer_gmem` 31.4 / 33.4 / 28.3 (worse), `profiled`+`tune_small` 40.7 / 40.6 / 28.0 (same): sysmem stays.
+- Translator per-draw CPU (host, `scripts/encode-bench-callgrind` in metal2vulkan): KeyMap for the bind memo's views and the use maps
+  (36,085 -> 35,410 instructions a draw), inline push field bytes (39.4 -> 37.4 allocations a draw), stated shadows indexed by key.
+  On the phone the render thread's self time: QuartzCore 19%, libsystem_malloc 9.7%, memmove 3.8%, the translator spread thin.
+- `NMB_TCACHE=1` (bridge thread cache): +0.6..1.3 fps but a garbage dock icon in one run with CPU-held on: a use-after-free that the
+  LIFO reuse exposes is suspected; stays off.
+- One kernel panic seen once ("IOGMD: not wired for the IODMACommand", during a backboardd kill with tcache on and held off); an
+  8-restart stress run on the default build was clean.
+
+Next: the presenter scale (3.6 ms, DPU scan-out: the user's decision), copy-backs of CA's frame surfaces (1.3 ms), the composite.
