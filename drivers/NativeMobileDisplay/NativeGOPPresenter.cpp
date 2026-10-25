@@ -377,6 +377,8 @@ IOReturn NativeGOPPresenter::handoffCall(uint32_t op,task_t task,const void *in,
     switch(op) {
     case NGP_METHOD_MODE:
         if(inSize || !out || outSize!=sizeof(NGPMode))return kIOReturnBadArgument;
+        // The client's open reads the mode first and maps the buffers next: the back buffer must exist by then.
+        if(p->flipWanted && !p->flipTried)p->setupFlip();
         memcpy(out,&p->mode,sizeof(NGPMode));return kIOReturnSuccess;
     case NGP_METHOD_WAIT_SWAP: {
         if(!in || inSize!=sizeof(NGPWait) || !out || outSize!=sizeof(NGPSwap))return kIOReturnBadArgument;
