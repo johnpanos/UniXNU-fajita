@@ -9,9 +9,9 @@ struct NGPTransfer {uint64_t sequence,bytes;};
 // GPU hand-off (boot-arg sheng-fb-gpu=1): the display driver offers a finished frame instead of copying it. A privileged client waits for it
 // (selector 2: the frame's pages are mapped read/write into the caller, at address), lets the GPU copy it into the scanout mapping (client
 // memory type 1, writable) and then completes it (selector 3), which retires the swap. Nothing here copies pixels.
-enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_MEMORY_SCANOUT_RW=1,NGP_MEMORY_SCANOUT_BACK_RW=2 };
-// Double-buffered scan-out (fajita-fb-flip=1, version 2): NGPSwap.target says which buffer the GPU writes (0: the scanout, memory type 1; 1: the
-// back buffer, memory type 2), never the one on screen; flags bit 0 says the frame is flipped, so the copy must be complete before the swap is
+enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_MEMORY_SCANOUT_RW=1,NGP_MEMORY_SCANOUT_BACK_RW=2,NGP_MEMORY_SCANOUT_THIRD_RW=3 };
+// Double- or triple-buffered scan-out (fajita-fb-flip=1, version 2): NGPSwap.target says which buffer the GPU writes (0: the scanout, memory
+// type 1; 1: the back buffer, memory type 2; 2: the third buffer, where it fits), never the one on screen nor the one being flipped to; flags bit 0 says the frame is flipped, so the copy must be complete before the swap is
 // completed (the display hardware takes the buffer at its next frame boundary). NGPComplete.reserved echoes the target written.
 struct NGPWait {uint64_t timeout_ms;};
 // NGPSwap.reserved: nonzero when the frame's mapping is kept across swaps (fajita-gop-mapcache): the same value means the same mapping at the same

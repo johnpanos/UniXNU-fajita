@@ -421,6 +421,18 @@ extern "C" uint64_t fajita_dpu_flip_back(uint64_t front, uint64_t bytes) {
     if (!gIrqRegs || front != kCarve || kTestOffset + bytes > kCarveSize || bytes > kTestOffset) return 0;
     return kCarve + kTestOffset;
 }
+static uint64_t gFlipBytes;   // the buffers' size (fajita_dpu_flip_third), so the third buffer's address can be checked
+// The third buffer (triple buffering): after the back buffer, MiB-aligned, when it fits in the carve-out; 0 otherwise.
+extern "C" uint64_t fajita_dpu_flip_third(uint64_t front, uint64_t bytes) {
+    const uint64_t at = (kTestOffset + bytes + 0xfffff) & ~0xfffffull;
+    if (!gIrqRegs || front != kCarve || bytes > kTestOffset || at + bytes > kCarveSize) return 0;
+    gFlipBytes = bytes;
+    return kCarve + at;
+}
+static bool flipTarget(uint64_t phys, uint64_t bytes) {
+    return phys == kCarve || phys == kCarve + kTestOffset || (bytes && phys == kCarve + ((kTestOffset + bytes + 0xfffff) & ~0xfffffull));
+}
+
 // The buffer VIG0 is reading now (its source address), for the tear counter.
 extern "C" uint64_t fajita_dpu_scanned(void) {
     volatile uint32_t *r = gIrqRegs;
@@ -430,7 +442,7 @@ extern "C" void fajita_dpu_count_scanned_write(void) {fajita_dpu_flips[3] = faji
 // Show `phys` from the next frame on; `latched` (interrupt context) once the old buffer is no longer read. 0 on success.
 extern "C" int fajita_dpu_flip(uint64_t phys, void (*latched)(void *), void *context) {
     volatile uint32_t *r = gIrqRegs;
-    if (!r || gFlip.pending || gTearTest || (phys != kCarve && phys != kCarve + kTestOffset)) {fajita_dpu_flips[2] = fajita_dpu_flips[2] + 1; return -1;}
+    if (!r || gFlip.pending || gTearTest || !flipTarget(phys, gFlipBytes)) {fajita_dpu_flips[2] = fajita_dpu_flips[2] + 1; return -1;}
     gFlip.phys = phys; gFlip.latched = latched; gFlip.context = context;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     gFlip.pending = true;
