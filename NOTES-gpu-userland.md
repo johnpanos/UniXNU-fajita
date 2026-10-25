@@ -691,3 +691,31 @@ Next, host only (no phone until the lead schedules a slot):
    NativeLegacyDisplay so fajita-fb-flip=1 costs nothing.
 Tools added this round: ngpu-metal cpu / spin (push to /private/var/ngpu/sbin/ngpu-metal, built through scripts/gpu-local's xcrun
 stand-in), kcmd dpu te|tear-test, motion fps, gpu-ab ROUNDS=N, CPU profile of the encode worker.
+
+### Draw memo: host starting point (2026-10-25, translator a0c465aa, encode_bench under callgrind on lavapipe)
+
+scripts/encode-bench-callgrind reports draw_primitives at 35,422 instructions and 46.5 allocations a draw, but that inclusive figure
+also carries the first draws' pipeline-variant creation. Steady state, from the difference of a 40-frame and a 20-frame run (1200
+draws): draw_resident **33.5k a draw**. The biggest pieces:
+
+| function | instructions a draw |
+|---|---|
+| settle_draw (bind shape, variant settle) | 4,361 |
+| Recording::record (the Vulkan commands) | 3,463 |
+| draw_settings (topology, depth/stencil, amplification, tiles, viewports) | 2,590 |
+| BindingPlan::instantiate_draw | 2,550 |
+| VariantObjects::set_zero | 2,005 |
+| ArgumentTable::refresh_reading | 1,981 |
+| DescriptorArena::allocate (a descriptor set every draw) | 1,975 |
+| Bound::dynamic | 1,418 |
+| malloc + free | ~4,800 |
+| ArgumentTable::retain, binding::bind, zeroed_colors, Bound::pipeline, without_dynamic | ~1,000 each |
+
+Memo candidates, cheapest first:
+1. draw_settings and settle_draw per pipeline, keyed by a generation of the encoder state they read (depth/stencil, amplification,
+   tile, viewport, and the bound formats and sampler maps for the shape). Reuse the last result when the pipeline and the generations
+   match. CA alternates pipelines, so this needs one slot per pipeline, not "the previous draw".
+2. Descriptor sets: reuse the set when the bound resources are the same (encode_bench cycles 8 textures; CA repeats its layers).
+3. Allocations: ~46 a draw.
+The bench under-represents CA (4.3 us a draw on the host against ~96 us on the phone): take a frame capture for command-replay
+`M2V_REPLAY_TIMES` when the phone is free again.
