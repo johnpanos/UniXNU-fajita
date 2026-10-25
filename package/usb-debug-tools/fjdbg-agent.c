@@ -338,8 +338,8 @@ static void builtin(char *line)
 // launchd runs this agent as the com.apple.wifid job, so all of that job's Mach services (CoreWiFi's XPC endpoints) point here. Left
 // unclaimed, a client's synchronous call never returns: iOS's first-boot data migration hung in WiFiDataMigrator's CoreWiFi call
 // (datamigrator blocked on com.apple.private.corewifi-xpc, 2026-10-24), and Settings' Wi-Fi pane would hang the same way. Check them
-// all in on a queue of their own (the debug channel never waits on it) and cancel every peer at once, so each client gets
-// XPC_ERROR_CONNECTION_INVALID immediately, as on a device without a Wi-Fi daemon. The first refusal per service is logged, with the
+// all in on a queue of their own (the debug channel never waits on it) and answer every request at once with an empty reply,
+// so synchronous callers return (with no data) instead of blocking. The first refusal per service is logged, with the
 // caller's pid, to /private/var/ngpu/fjdbg-wifi-refused.log (not to the channel, where it could cut into a transfer).
 // The SDK marks these calls unavailable on iOS; launchd jobs use it all the same.
 extern xpc_connection_t fjdbg_create_mach_service(const char *name, dispatch_queue_t q, uint64_t flags)
@@ -375,9 +375,23 @@ static void refuseWifiServices(void)
           close(fd);
         }
       }
-      xpc_connection_set_event_handler(c, ^(xpc_object_t event) { (void)event; });
+      // Answer every message that wants a reply with an empty one and keep the connection: a cancelled peer reads as
+      // XPC_ERROR_CONNECTION_INTERRUPTED, and CoreWiFi clients reconnect and resend at once (SpringBoard spun at 100% CPU).
+      xpc_connection_set_event_handler(c, ^(xpc_object_t event) {
+        if (event == XPC_ERROR_CONNECTION_INVALID) {
+          xpc_release(c);
+          return;
+        }
+        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY)
+          return;
+        xpc_object_t reply = xpc_dictionary_create_reply(event);
+        if (reply) {
+          xpc_connection_send_message(c, reply);
+          xpc_release(reply);
+        }
+      });
+      xpc_retain(c);   // kept for the client's lifetime; released when the client goes away
       xpc_connection_activate(c);
-      xpc_connection_cancel(c);
     });
     xpc_connection_activate(listener);
   }

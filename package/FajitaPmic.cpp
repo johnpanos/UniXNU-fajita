@@ -181,10 +181,33 @@ void keysRow(const char *why) {
     IOLog("fajita-pmic: %s\n", fajita_pmic_rows[5]);
 }
 
+// `key power|up|down [MS]` over the USB debug channel (kcmd): one synthetic press (default 200 ms) through the same publication as the
+// real keys, for unattended runs (waking the lock screen, the volume HUD). The key poll applies it.
+volatile unsigned gManualBits;
+volatile uint64_t gManualUntil;
+extern "C" int fajita_usbdbg_register_kcmd(const char *name, size_t (*fn)(const char *, size_t, char *, size_t), const char *help)
+    __attribute__((weak));
+size_t kcmdKey(const char *arg, size_t len, char *out, size_t cap) {
+    char a[48] = {};
+    memcpy(a, arg, len < sizeof a - 1 ? len : sizeof a - 1);
+    unsigned key = !strncmp(a, "power", 5) ? FPM_KEY_POWER : !strncmp(a, "up", 2) ? FPM_KEY_VOL_UP
+                 : !strncmp(a, "down", 4) ? FPM_KEY_VOL_DOWN : 0;
+    if (!key) return (size_t)snprintf(out, cap, "usage: key power|up|down [MS]\n");
+    const char *sp = strchr(a, ' ');
+    unsigned ms = 200;
+    if (sp) { ms = 0; for (++sp; *sp >= '0' && *sp <= '9'; ++sp) ms = ms * 10 + (unsigned)(*sp - '0'); }
+    if (ms < 40) ms = 40;
+    if (ms > 5000) ms = 5000;
+    gManualUntil = uptimeMs() + ms;
+    gManualBits = key;
+    return (size_t)snprintf(out, cap, "key %s pressed for %u ms\n", a, ms);
+}
+
 // The key poll: 20 ms, two-sample debounce, plus the scripted synthetic presses (unattended test).
 void keysThread(void *, wait_result_t) {
     thread_set_thread_name(current_thread(), "fajita-pmic-keys");
     if (native_spmi_init()) {keysRow("no spmi"); return;}
+    if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("key", kcmdKey, "synthetic key press: key power|up|down [MS]");
     fpm_debounce d = {};
     unsigned synthBits = 0, round = 0, lastRow = 0;
     uint64_t synthNext = gSynth ? (uint64_t)gSynth * 1000 : 0, step = 0;
@@ -208,8 +231,10 @@ void keysThread(void *, wait_result_t) {
                 if (t >= 6000 + 200 + 1000) {++round; synthNext = now + 20000; keysRow("synth round done");}
             }
         }
+        unsigned manual = 0;
+        if (gManualBits) { if (uptimeMs() < gManualUntil) manual = gManualBits; else gManualBits = 0; }
         unsigned before = native_button_state;
-        publishKeys(real | synthBits);
+        publishKeys(real | synthBits | manual);
         if (before != native_button_state) keysRow(synthBits ? "synth" : "state");
         if (uptime() - lastRow >= 30) {lastRow = uptime(); keysRow("periodic");}
         IOSleep(20);
