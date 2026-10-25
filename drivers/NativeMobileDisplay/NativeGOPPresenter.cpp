@@ -335,6 +335,8 @@ void NativeGOPPresenter::retireFlip(uint64_t serial,bool latched) {
     IOLockLock(gate);
     if(!flipPending || (!latched && serial!=flipSerial)) {IOLockUnlock(gate);return;}
     Swap done=flipDone;flipDone={};flipPending=false;front=done.target;
+    // The scanout's readers (screenshots, the diagnostic export) read the buffer on the panel.
+    if(IOMemoryMap *shown=front?backMapping:mapping){native_gop_physical=shown->getPhysicalAddress();native_gop_virtual=shown->getVirtualAddress();}
     IOLockWakeup(gate,&swap,false);
     IOLockUnlock(gate);
     if(latched){thread_call_cancel(watchdogCall);native_gop_flip_stats[1]=native_gop_flip_stats[1]+1;}
