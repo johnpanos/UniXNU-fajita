@@ -9,7 +9,10 @@ TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/
 shot() { T=30 $H screenshot "$1" >/dev/null 2>&1; }
 # pixels over 8 that differ below the status bar and above the dock (the dock is on every page)
 differ() { python3 -I $TD/scrdiff.py "$1" "$2" 0 60 540 1000 | awk '{print $4}'; }
-onpage1() { shot $S/.page1-check.png || return 1; n=$(differ $S/home-base.png $S/.page1-check.png); [ "${n:-999999}" -lt 15000 ]; }
+# page 1 = the reference by tiles (pagematch.py): widgets, the Clock icon and the status bar redraw on their own, so a pixel count
+# called page 1 "different" whenever a widget changed, and could not tell page 2 (same wallpaper) from page 1 with a redrawn widget
+ispage1() { python3 -I $TD/pagematch.py $S/home-base.png "$1" >/dev/null; }
+onpage1() { shot $S/.page1-check.png || return 1; ispage1 $S/.page1-check.png; }
 # swipe DIR until two shots in a row match (at most 8 swipes); the last shot is in $S/.edge.png
 toEdge() {
   shot $S/.edge.png
@@ -23,6 +26,8 @@ toEdge() {
 toPage1() {
   $H kcmd touch swipe up >/dev/null; sleep 1.5; $H kcmd touch swipe up >/dev/null; sleep 1.5
   toEdge right || return 1
+  # the right edge is the Today view on most Data, but page 1 itself when there is no Today view: then stay
+  [ -f $S/home-base.png ] && ispage1 $S/.edge.png && return 0
   $H kcmd touch swipe left >/dev/null; sleep 2
 }
 if [ "$1" = --rebase ]; then
