@@ -1,0 +1,135 @@
+Hold physical ranges off the free lists: phys-reserve=<pa>.<size>[,...] (fajita Wi-Fi, default off).
+
+The SDM845 modem DMA-writes its carve-outs (rmtfs 0xf5b01000, mpss, mba, wlan msa), and on this board they can lie
+inside the window DarwinBoot hands XNU. vm_page_release_startup leaves every page of a listed range off the free
+lists (counted as wired), so nothing ever gets them. Pages below first_avail at pmap_startup are already in use and
+cannot be held; phys_reserve_held[] / phys_reserve_window[] and one printf per range tell the board code
+(package/FajitaWifiProbe.cpp) whether each range is fully held, partly in use, or outside the managed window, and
+the modem stage refuses to start unless every range is safe. Without the boot argument nothing changes.
+Touches only osfmk/vm/vm_resident.c.
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -1394,6 +1394,92 @@
+ #endif
+ 
+ void vm_page_release_startup(vm_page_t mem);
++
++/*
++ * fajita: phys-reserve=<pa>.<size>[,<pa>.<size>...] (at most 8 ranges, hex or decimal) keeps the pages of those physical
++ * ranges off the free lists from the first page release on, so nothing in the kernel or userland ever gets them: the
++ * SDM845 modem DMA-writes its carve-outs (rmtfs, mpss, mba, wlan msa). Pages below first_avail at pmap_startup (the kernel,
++ * the loader's images, early steals) are already in use and cannot be held; the per-range counts tell the board code
++ * whether a range is fully held, partly in use, or outside the managed window. No boot argument: nothing changes.
++ * (UniXNU-fajita ios16/patches/xnu-8796/fajita-phys-reserve.patch; read by package/FajitaWifiProbe.cpp)
++ */
++#define PHYS_RESERVE_MAX 8
++unsigned int phys_reserve_count;
++uint64_t phys_reserve_base[PHYS_RESERVE_MAX], phys_reserve_size[PHYS_RESERVE_MAX];
++unsigned int phys_reserve_held[PHYS_RESERVE_MAX];      /* pages kept off the free lists */
++uint64_t phys_reserve_window[3];                        /* first managed PA, first_avail at release, last managed PA + 1 */
++static ppnum_t phys_reserve_first[PHYS_RESERVE_MAX], phys_reserve_last[PHYS_RESERVE_MAX];
++
++static uint64_t
++phys_reserve_number(const char **cursor)
++{
++	const char *s = *cursor;
++	uint64_t v = 0;
++	unsigned base = 10;
++	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
++		base = 16;
++		s += 2;
++	}
++	for (;; s++) {
++		unsigned d = (*s >= '0' && *s <= '9') ? (unsigned)(*s - '0') :
++		    (*s >= 'a' && *s <= 'f') ? (unsigned)(*s - 'a' + 10) : (*s >= 'A' && *s <= 'F') ? (unsigned)(*s - 'A' + 10) : 99;
++		if (d >= base) {
++			break;
++		}
++		v = v * base + d;
++	}
++	*cursor = s;
++	return v;
++}
++
++static void
++phys_reserve_parse(void)
++{
++	char text[256];
++	if (!PE_parse_boot_arg_str("phys-reserve", text, sizeof(text))) {
++		return;
++	}
++	const char *s = text;
++	while (*s && phys_reserve_count < PHYS_RESERVE_MAX) {
++		uint64_t base = phys_reserve_number(&s);
++		if (*s != '.') {
++			break;
++		}
++		s++;
++		uint64_t size = phys_reserve_number(&s);
++		if (size) {
++			unsigned i = phys_reserve_count++;
++			phys_reserve_base[i] = base;
++			phys_reserve_size[i] = size;
++			phys_reserve_first[i] = (ppnum_t)atop_64(trunc_page_64(base));
++			phys_reserve_last[i] = (ppnum_t)atop_64(round_page_64(base + size) - 1);
++		}
++		if (*s != ',') {
++			break;
++		}
++		s++;
++	}
++	extern vm_offset_t first_avail;
++	extern unsigned long gPhysBase, gPhysSize;
++	phys_reserve_window[0] = gPhysBase;
++	phys_reserve_window[1] = first_avail;
++	phys_reserve_window[2] = gPhysBase + gPhysSize;
++}
++
++static bool
++phys_reserve_take(vm_page_t mem)
++{
++	ppnum_t pnum = VM_PAGE_GET_PHYS_PAGE(mem);
++	for (unsigned i = 0; i < phys_reserve_count; i++) {
++		if (pnum >= phys_reserve_first[i] && pnum <= phys_reserve_last[i]) {
++			mem->vmp_q_state = VM_PAGE_NOT_ON_Q;
++			phys_reserve_held[i]++;
++			vm_page_wire_count++;
++			return true;
++		}
++	}
++	return false;
++}
+ void
+ pmap_startup(
+ 	vm_offset_t     *startp,
+@@ -1532,6 +1618,7 @@
+ #endif
+ 
+ 	vm_delayed_count = 0;
++	phys_reserve_parse();
+ 
+ 	absolutetime_to_nanoseconds(mach_absolute_time(), &start_ns);
+ 	vm_pages_count = 0;
+@@ -1587,6 +1674,12 @@
+ 	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+ 	printf("pmap_startup() init/release time: %lld microsec\n", (now_ns - start_ns) / NSEC_PER_USEC);
+ 	printf("pmap_startup() delayed init/release of %d pages\n", vm_delayed_count);
++	for (unsigned r = 0; r < phys_reserve_count; r++) {
++		printf("phys-reserve: %llx+%llx held %u of %llu pages (managed %llx..%llx, first_avail %llx)\n",
++		    phys_reserve_base[r], phys_reserve_size[r], phys_reserve_held[r],
++		    (uint64_t)(phys_reserve_last[r] - phys_reserve_first[r] + 1),
++		    phys_reserve_window[0], phys_reserve_window[2], phys_reserve_window[1]);
++	}
+ 
+ #if defined(__LP64__)
+ 	if ((vm_page_t)(VM_PAGE_UNPACK_PTR(VM_PAGE_PACK_PTR(&vm_pages[0]))) != &vm_pages[0]) {
+@@ -3849,6 +3942,9 @@
+ {
+ 	vm_page_queue_t queue_free;
+ 
++	if (phys_reserve_count && phys_reserve_take(mem)) {
++		return;
++	}
+ 	if (vm_lopage_free_count < vm_lopage_free_limit &&
+ 	    VM_PAGE_GET_PHYS_PAGE(mem) < max_valid_low_ppnum) {
+ 		mem->vmp_lopage = TRUE;

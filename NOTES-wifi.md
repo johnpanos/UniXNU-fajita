@@ -142,6 +142,16 @@ pages so XNU/NativeRamBlock cannot reuse them. Options, behind `fajita-wifi` so 
   stage 1 will log it did. **Open: confirm XNU honours an ADT carveout at a fixed PA; test on the phone.** Until then,
   stage 2 refuses to boot the modem if the ranges are not reserved (logged `FW2 reserve?`), so we never corrupt XNU RAM.
 
+**Done 2026-10-25 (measured):** `ios16/patches/xnu-8796/fajita-phys-reserve.patch` adds `phys-reserve=<pa>.<size>,...`
+(the payload's argument check allows only `[A-Za-z0-9_.,-]`, hence `.` as the separator). `vm_page_release_startup` keeps
+every page of a listed range off the free lists (counted as wired); without the argument nothing changes. The probe's
+`FW1 res` row checks each modem DMA range: fully held, or entirely outside the managed window; stage 2 refuses otherwise
+(`FW2 reserve?`). wifi-test.sh passes `phys-reserve=$PHYS_RESERVE` (rmtfs with guard pages, msa, mpss, mba). On the phone:
+`FW1 res win a01c8000..1d01c8000 avail ae185000 rmtfs held(516/516) msa outside mpss outside mba outside`. XNU runs on
+4 KiB pages here, and DarwinBoot's window starts at 0xa01c8000, above all of the modem carve-outs (0x8df00000..0x96700000);
+only rmtfs (0xf5b01000) lies inside it, and it is held. Changing the patch: the build applies patches idempotently, so
+reset `osfmk/vm/vm_resident.c` in `.cache/<out>/unixnu/fajita-ios16/tree/.cache/xnu-work` first.
+
 ### EFS / rmtfs (lead point 2)
 
 The modem reads and writes its EFS (NV) from the AP over rmtfs (QMI svc 14): `modemst1`, `modemst2`, `fsg`, `fsc` on UFS

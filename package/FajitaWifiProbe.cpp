@@ -14,6 +14,7 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
+#include <mach/vm_param.h>
 
 #include "FajitaWifiBoard.h"
 extern "C" {
@@ -27,6 +28,11 @@ extern "C" {
 char fajita_wifi_rows[8][160];
 volatile uint32_t fajita_wifi_state[8];   // [0] stage reached, [1] mapped ok, [2] pbl status, [3] last error
 extern volatile uint32_t armcpu_wdog[6] __attribute__((weak_import));
+// ios16/patches/xnu-8796/fajita-phys-reserve.patch: phys-reserve=<pa>.<size>,... keeps those pages off the free lists.
+extern unsigned int phys_reserve_count __attribute__((weak_import));
+extern uint64_t phys_reserve_base[8] __attribute__((weak_import)), phys_reserve_size[8] __attribute__((weak_import));
+extern unsigned int phys_reserve_held[8] __attribute__((weak_import));
+extern uint64_t phys_reserve_window[3] __attribute__((weak_import));
 vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 }
@@ -83,6 +89,37 @@ bool stage1() {
     return true;
 }
 
+// Every modem DMA range must be either fully held off XNU's free lists (phys-reserve) or entirely outside the managed
+// window. Logged as FW1 res; stage 2 refuses to touch the modem unless this holds ("FW2 reserve?").
+struct Need {uint64_t base, size; const char *name;};
+const Need kNeeds[] = {{FW_RMTFS_PHYS, FW_RMTFS_SIZE, "rmtfs"}, {FW_WLAN_MSA_PHYS, FW_WLAN_MSA_SIZE, "msa"},
+                       {FW_MPSS_REGION_PHYS, FW_MPSS_REGION_SIZE, "mpss"}, {FW_MBA_REGION_PHYS, FW_MBA_REGION_SIZE, "mba"}};
+bool reserveCheck() {
+    Out o(fajita_wifi_rows[3], sizeof fajita_wifi_rows[3]);
+    if (!&phys_reserve_count || !&phys_reserve_window) {o.add("FW1 res: kernel lacks phys-reserve"); IOLog("fajita-wifi: %s\n", fajita_wifi_rows[3]); return false;}
+    const uint64_t lo = phys_reserve_window[0], hi = phys_reserve_window[2], avail = phys_reserve_window[1];
+    o.add("FW1 res win %llx..%llx avail %llx", lo, hi, avail);
+    bool all = true;
+    for (const Need &n : kNeeds) {
+        const char *st = "outside";
+        unsigned held = 0, want = 0;
+        if (n.base + n.size > lo && n.base < hi) {
+            st = "UNHELD";
+            for (unsigned i = 0; i < phys_reserve_count && i < 8; ++i) {
+                if (n.base < phys_reserve_base[i] || n.base + n.size > phys_reserve_base[i] + phys_reserve_size[i]) continue;
+                const uint64_t page = PAGE_SIZE, first = phys_reserve_base[i] & ~(page - 1);
+                const uint64_t pages = ((phys_reserve_base[i] + phys_reserve_size[i] + page - 1) & ~(page - 1)) / page - first / page;
+                st = phys_reserve_held[i] == pages ? "held" : "PARTIAL";
+                held = phys_reserve_held[i]; want = (unsigned)pages;
+            }
+        }
+        if (st[0] != 'h' && st[0] != 'o') all = false;
+        if (want) o.add(" %s %s(%u/%u)", n.name, st, held, want); else o.add(" %s %s", n.name, st);
+    }
+    IOLog("fajita-wifi: %s\n", fajita_wifi_rows[3]);
+    return all;
+}
+
 void stagePending(unsigned stage, const char *what) {
     Out o(fajita_wifi_rows[2], sizeof fajita_wifi_rows[2]);
     o.add("FW%u %s: host phase, not yet implemented on hardware (see NOTES-wifi.md)", stage, what);
@@ -99,6 +136,13 @@ void worker(void *, wait_result_t) {
     IOLog("fajita-wifi: %s\n", fajita_wifi_rows[0]);
     fajita_wifi_state[0] = gStage;
     if (gStage >= 1 && !stage1()) return;
+    const bool reserved = reserveCheck();
+    if (gStage >= 2 && !reserved) {
+        Out r(fajita_wifi_rows[2], sizeof fajita_wifi_rows[2]);
+        r.add("FW2 reserve? a modem DMA range is not held off XNU (see FW1 res); not starting the modem");
+        IOLog("fajita-wifi: %s\n", fajita_wifi_rows[2]);
+        return;
+    }
     // The protocol code is linked in and host-tested; the hardware steps follow once the phone is available.
     static const char *names[] = {"", "", "modem remoteproc", "SMEM/GLINK/QRTR", "AP QMI servers (pdr/tftp/rmtfs)",
                                   "wlfw handshake", "CE/HTC/WMI", "connect + data"};

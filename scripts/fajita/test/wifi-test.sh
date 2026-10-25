@@ -32,6 +32,8 @@ OUT=${FAJITA_OUT:-$ROOT/.cache/fajita-out-wifi}
 CREDS=${WIFI_CREDS:-$HOME/.config/unixnu/wifi-kittycorner}
 HUB="python3 -I $TD/../fajita-usbdbg-hub.py"
 HUBT=${WIFI_HUB_TIMEOUT:-20}            # short hub timeouts, per AGENTS
+# rmtfs (fajita DT 0xf5b01000+0x200000 with guard pages), wlan msa, mpss, mba (sdm845.dtsi reserved-memory)
+PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000}
 ALL=(power modem link servers wlfw scan assoc dhcp ping tput stability)
 declare -A DEPTH=( [power]=1 [modem]=2 [link]=3 [servers]=4 [wlfw]=5 [scan]=6 [assoc]=7 [dhcp]=7 [ping]=7 [tput]=7 [stability]=7 )
 
@@ -57,7 +59,8 @@ fails=0; declare -A VERDICT
 # --- build one --test image at fajita-wifi=$maxN (never committed; PSK is not a boot arg) ---
 build() {
   [ -n "${WIFI_NO_BUILD:-}" ] && { [ -f "$OUT/payload.img" ] && return 0; echo "WIFI_NO_BUILD set but no image at $OUT"; exit 1; }
-  local args=(fajita-wifi=$maxN fajita-wifi-dump=1 native-ufs-partread=1)   # partread: rmtfs reads the EFS partitions (read-only)
+  local args=(fajita-wifi=$maxN fajita-wifi-dump=1 native-ufs-partread=1   # partread: rmtfs reads the EFS partitions (read-only)
+              "phys-reserve=$PHYS_RESERVE")                                 # the modem carve-outs, off XNU's free lists
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
@@ -104,7 +107,8 @@ check_from_log() {   # $1 stage  $2 pass-regex  $3 description
 
 evaluate() {
   for s in "${want[@]}"; do case $s in
-    power) check_from_log power 'FW1 .*rmb pbl' 'stage 1 power/regs did not report' ;;
+    power) check_from_log power 'FW1 .*rmb pbl' 'stage 1 power/regs did not report'
+           local r; r=$(con_has 'FW1 res'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     modem) check_from_log modem 'FW2 .*auth[1-9].*ready' 'MSS did not reach AUTH_COMPLETE + ready' ;;
     link)  check_from_log link  'FW3 .*glink v1.*servers.*wlfw' 'no GLINK/QRTR link with wlfw announced' ;;
     servers) check_from_log servers 'FW4 .*(pdr|tftp|rmtfs)' 'AP QMI servers did not serve the modem' ;;
