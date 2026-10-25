@@ -255,3 +255,9 @@ Fixes:
   `FAJITA_AUTORESET=1500 build.sh --test` gives sessions long enough for several fps runs.
 - "N no-copy ... dealloc 0/0" is not a leak: in copy mode (NGPU_HOST_COPY) no-copy requests become owned copies, which are freed with
   their MTLBuffer; dealloc counts only real imports.
+- u_trace caveat: MESA_GPU_TRACEFILE in gpu-env reaches every Metal process that starts while it is set, and the file keeps growing after
+  the env is reverted (pulls then fail with size/crc mismatch or time out). Use a new file name per capture and pull it after the
+  processes that opened it are gone; the frame trace (per-process file) has no such problem.
+- Zero-copy DPU scan-out study: CA's offered frames are 1900-2600 physical runs over 11 MiB (kcmd gpu "frame layout"), and VIG0 scans
+  the splash carve-out by physical address (MDP streams in bypass). Scanning CA's surfaces directly needs an apps_smmu context for the
+  MDP streams (sdm845 mdss iommus 0x880/0xc80) with the frames mapped contiguously in IOVA, then VIG0 + QSEED3 per swap.
