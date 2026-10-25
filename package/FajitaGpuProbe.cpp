@@ -415,6 +415,60 @@ extern "C" volatile uint64_t native_gop_frame_runs[6] __attribute__((weak));
 extern "C" volatile uint64_t native_gop_gpu_offers __attribute__((weak)), native_gop_gpu_completions __attribute__((weak)),
     native_gop_gpu_failures __attribute__((weak)), native_gop_gpu_abandoned __attribute__((weak));
 extern "C" volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak)), native_legacy_gpu_last_status __attribute__((weak));
+// ---- GPU system cache (LLCC) ------------------------------------------------------------------------------------------
+// fajita-gpu-llc=BITS (default 0): bit 0 activates the GPU data slice (SCID 12, 2304 KiB), bit 1 the GPU page-table-walk slice
+// (SCID 11, 512 KiB), and points the GPU's traffic at them, as Linux's llcc-qcom (sdm845_data, v1 registers) and a6xx_llc_activate
+// do for an SDM845 GPU behind its SMMU v2 (not MMU-500): slice attributes ATTR0/ATTR1 through the LLCC broadcast window, ACT_CTRL
+// activate and STATUS poll, then CX_MISC SYSTEM_CACHE_CNTL_1 (the SCIDs) and CNTL_0 (no allocation on a write miss). The walks only
+// allocate once the context's TCR walk attributes are outer write-back (not changed here). Logged as "llc ...".
+Window gLlcBank0 = {0x01100000, 0x31000, nullptr, nullptr};     // llcc0_base: COMMON_STATUS0 at 0x3000c
+Window gLlcBcast = {0x01300000, 0x50000, nullptr, nullptr};     // llcc_broadcast_base
+Window gCxMisc = {0x0509e000, 0x1000, nullptr, nullptr};        // the GPU's cx_mem
+uint32_t winRd(Window &w, uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(w.va + off);}
+void winWr(Window &w, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t *>(w.va + off) = v; __asm__ volatile("dsb sy" ::: "memory");}
+struct LlcSlice {const char *name; unsigned id, max_kib, priority, fixed, bonus, res;};
+// Activates one slice; returns its SCID, or ~0u.
+unsigned llcSlice(const LlcSlice &c, unsigned banks)
+{
+    const uint32_t a0 = 0x21000 + 8 * c.id, a1 = 0x21004 + 8 * c.id, act = c.id * 0x1000, status = 4 + c.id * 0x1000;
+    const uint32_t before0 = winRd(gLlcBcast, a0), before1 = winRd(gLlcBcast, a1), was = winRd(gLlcBcast, status);
+    const uint32_t v1 = (c.fixed << 3) | (c.priority << 4) | ((c.max_kib * 1024u / banks) >> 6) << 16;
+    const uint32_t v0 = (c.res & 0xffff) | (c.bonus << 16);
+    winWr(gLlcBcast, a1, v1);
+    winWr(gLlcBcast, a0, v0);
+    const uint32_t op = 1u << 1;      // ACT_CTRL_OPCODE_ACTIVATE << ACT_CTRL_OPCODE_SHIFT
+    winWr(gLlcBcast, act, op | 1);    // ACT_CTRL_ACT_TRIG
+    winWr(gLlcBcast, act, op);
+    uint32_t st = 0;
+    unsigned us = 0;
+    for (; us < 1000; ++us) {st = winRd(gLlcBcast, status); if (!(st & 2)) break; IODelay(1);}   // until DEACTIVATE clears
+    gpuLog("llc %s scid %u attr0 %08x->%08x attr1 %08x->%08x status %08x->%08x in %u us%s", c.name, c.id, before0, v0, before1, v1,
+           was, st, us, us == 1000 ? " TIMEOUT" : "");
+    return us == 1000 ? ~0u : c.id;
+}
+void llcActivate()
+{
+    const unsigned want = bootArg("fajita-gpu-llc", 0);
+    if (!want) return;
+    if (!mapWindow(gLlcBank0) || !mapWindow(gLlcBcast) || !mapWindow(gCxMisc)) {gpuLog("llc map failed"); return;}
+    unsigned banks = (winRd(gLlcBank0, 0x3000c) >> 28) & 0xf;
+    gpuLog("llc banks %u (COMMON_STATUS0 %08x) cx_misc cntl0 %08x cntl1 %08x", banks, winRd(gLlcBank0, 0x3000c), winRd(gCxMisc, 4),
+           winRd(gCxMisc, 8));
+    if (!banks) banks = 4;
+    uint32_t cntl1 = 0;
+    if (want & 1) {
+        const unsigned scid = llcSlice({"gpu", 12, 2304, 1, 0, 0xff0, 0x2}, banks);
+        if (scid != ~0u) for (unsigned f = 0; f < 5; ++f) cntl1 |= (scid & 0x1f) << (5 * f);
+    }
+    if (want & 2) {
+        const unsigned scid = llcSlice({"gpuhtw", 11, 512, 1, 1, 0xc, 0}, banks);
+        if (scid != ~0u) cntl1 |= (scid & 0x1f) << 25;
+    }
+    if (!cntl1) return;
+    winWr(gCxMisc, 8, cntl1);
+    winWr(gCxMisc, 4, (winRd(gCxMisc, 4) & ~0xfu) | 0x3);
+    gpuLog("llc cx_misc cntl0 %08x cntl1 %08x (wrote %08x)", winRd(gCxMisc, 4), winRd(gCxMisc, 8), cntl1);
+}
 bool stage7()
 {
     // The user BO pool (sheng's sheng-gpu-pool): user BOs from one write-combined contiguous block skip the per-submission
@@ -453,6 +507,7 @@ bool stage7()
                       const_cast<uint8_t *>(gCpu[kMemptrs]), gBuffers[kMemptrs].bytes, gBuffers[kMemptrs].iova);
     if (st) {gpuLog("S7 ring attach %x", st); return false;}
     A630HwInit(&gIo, &hc, &hr);
+    llcActivate();
     gpuLog("S7 hwinit step %u clock %08x rbbm %08x int %08x hwfault %08x sqe_cntl %x rb_cntl %08x", hr.step, hr.clock_cntl_before,
            hr.rbbm_status, hr.int_status, hr.cp_hw_fault, hr.sqe_cntl, gpuRd(A630_CP_RB_CNTL));
     uint32_t init[16];
