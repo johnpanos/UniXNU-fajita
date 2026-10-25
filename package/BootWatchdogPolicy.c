@@ -53,6 +53,20 @@ static int sheng_boot_setup_reset(proc_t p,uint64_t scratch) {
  return 0;
 }
 
+// installd runs as _installd (uid and gid 33) and keeps its staging, caches and MobileInstallation state under its home /private/var/installd.
+// A restored Data volume has that home owned by _installd; the packed seed (ios16/data-seed.json) made it root:wheel 0755, so installd could
+// not create Library/Caches/com.apple.mobile.installd.staging and SystemAppMigrator's 32 staged system apps all failed to stage (and were
+// removed) during the first-boot migration. Give the home its owner on every boot (idempotent).
+static int sheng_boot_installd_home(proc_t p,uint64_t scratch) {
+ static const char home[]="/private/var/installd";
+ int32_t result=0;
+ int error=copyout(home,scratch,sizeof(home));
+ if(error)return error;
+ struct chown_args ch={.path=scratch,.uid=33,.gid=33};
+ error=chown(p,&ch,&result);
+ return error==ENOENT?0:error;
+}
+
 // First-boot data migration (iOS's own DataMigrator and its migrator plugins; SystemAppMigrator installs the staged system apps).
 // The Data seed (ios16/data-seed.json, packed on macOS) carries a com.apple.migration.plist with LastSystemVersion 20H392, which tells
 // DataMigrator that migration already ran. By default that seeded file is removed once, on the first boot of a fresh Data (no marker
@@ -110,6 +124,8 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
   return error;
  }
  if(setup==1)printf("sheng setup flags reset: Hello page on this boot\n");
+ if((error=sheng_boot_installd_home(p,scratch)))printf("sheng installd home owner failed: %d\n",error);
+ error=0;
  int seeded=0;PE_parse_boot_argn("sheng-seed-migration",&seeded,sizeof(seeded));
  if(seeded!=1 && (error=sheng_boot_migration_unseed(p,scratch)))printf("sheng migration unseed failed: %d\n",error);
  error=0;
