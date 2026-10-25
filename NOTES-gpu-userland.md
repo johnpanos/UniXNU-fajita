@@ -452,3 +452,34 @@ Known: Notes shows a black screen 4 s after launch (before and after these chang
   over the buffer's bytes; only 64-byte-multiple pitches (128-byte rows, the 4608-byte frame surfaces) could be sampled in place.
 - `M2V_SHADOW_UPPER_BOUND=1` (unsafe measurement): home 40.3 / 39.6, App Library 19.8, gpu busy 85%: the copy-ins are worth about +6
   on home and nothing on the App Library.
+
+### Copy-ins fixed: CPU-held textures (2026-10-25)
+
+**fps.sh x3, fresh boot, stock Data (board ios16-port, NGPU_CPU_HELD on): home 41.2 / 40.3 / 41.0 plain, 41.0 / 40.8 / 40.0
+60-frame; App Library 25.6 / 25.1 / 26.3.** (Round-3 baseline on this Data: 34 / 31 / 18-19.) gpu busy 82-88%.
+
+What landed (each with a gpu-env switch, A/B'd in one boot with `gpu-ab.sh FPS=1` and checked with `corr-tour.sh` against the switch off):
+- Translator 8dae7705: a copy back no longer forgets its own shadow's held contents (CA's frame surfaces, 32 GB in 86 s).
+- Translator 6d36a137: `replace_region` forgets a shadowed texture's held contents (why=7).
+- NativeAdreno 32a2426 / 65368c0 / later: ABI method 17 `HostDirty`: per range of a live import, whether any of the import's
+  pinned physical pages has its modified bit set (cleared by the query). Pageable pages are never examined. The caller's pmap does
+  not map the imported pages at the imported addresses (every page read unmapped there), so it walks the import's spans.
+  Turnip exports `tu_darwin_host_dirty`.
+- NativeMetal `NGPU_CPU_HELD` (default on; `=0` off; `=2` also hashes copy-backed bytes per bind and journals "cpu held MISSED"):
+  textures over no-copy buffers state a generation, so the runtime copies them into their shadows only when they changed:
+  - over a GPU-owned copy (no-copy buffers up to 4 MiB, `NGPU_HOST_COPY`'s copy at creation): 1 + the buffer's write generation,
+    moved by `replaceRegion` on any texture over the bytes, `didModifyRange`, purgeable Volatile/Empty; none once `contents` was
+    asked for;
+  - over an imported range (above 4 MiB: the wallpaper's images): moved when HostDirty says the CPU wrote it (once per command buffer);
+  - only root textures, never views (a view's shadow copies from its parent's image); never a texture the GPU may write (render
+    target, blit operand, compute texture: `noteGpuWritten`).
+  Each rule was found by the tour: garbage dock icons (views), a Calendar strip (sibling textures over an atlas), the lock screen's
+  camera glyph (a GPU-written texture).
+- `M2V_SHADOW_LOG` (translator: copy-ins with reason, why=, pid, and why each texture became a shadow), `NGPU_TEXTURE_LOG`
+  (creations by path), `NGPU_MESSAGE_LOG` (runtime messages), `M2V_SHADOW_UPPER_BOUND` (unsafe measurement).
+
+Known, not from these changes: AegirPoster aborts (sig6) on lock-screen interaction; Notes opens black after 4 s; `kcmd key power`
+hangs the hub call (corr-tour bounds it).
+
+Next: the CA main composite (about 7.8 ms, all sysmem: GMEM autotune A/B on it), the presenter scale (3.6 ms; DPU scan-out
+postponed by the user), and CPU per draw again now that gpu busy is below 90%.
