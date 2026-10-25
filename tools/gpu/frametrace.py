@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """frametrace.py TRACE.csv [--t0 US --t1 US] [--worst PCT] [--rows N] [--json OUT]: the NativeMetal frame trace (NGPU_FRAME_TRACE=1,
 FrameTrace.h in NativeMetal) -> per-frame timing, the worst frames and where their time went.
+frametrace.py --passes PASSES.csv: the per-pass GPU split of the pass trace (NGPU_PASS_TRACE=backboardd, PassTrace.h in NativeMetal;
+scripts/fajita/test/passtrace.sh pulls it): per pass key the count per presented frame, ms per frame, median/p95/max ms, draws.
 
 A frame is the interval between two scanout swap offers (S lines; gaps over --idle ms, default 250, are idle, not frames). Each frame
 owns the render server's command buffers (C lines, every queue but the presenter's "ngpu.present") committed in it, the presenter's
@@ -22,7 +24,8 @@ Times in the trace are us of CLOCK_UPTIME_RAW (the kernel log's mach clock)."""
 import argparse, collections, json, statistics as st, sys
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-ap.add_argument('trace')
+ap.add_argument('trace', nargs='?')
+ap.add_argument('--passes')
 ap.add_argument('--t0', type=int, default=0)
 ap.add_argument('--t1', type=int, default=1 << 62)
 ap.add_argument('--worst', type=float, default=7.0)
@@ -30,6 +33,40 @@ ap.add_argument('--idle', type=float, default=250.0)
 ap.add_argument('--rows', type=int, default=25)
 ap.add_argument('--json')
 a = ap.parse_args()
+
+
+def passes(path):
+    head, rows = '', []
+    for line in open(path, errors='replace'):
+        if line.startswith('#'):
+            head = line
+        elif line.startswith('key,') or not line.strip():
+            continue
+        else:
+            f = line.rstrip('\n').rsplit(',', 7)
+            if len(f) == 8:
+                rows.append((f[0], int(f[1]), *map(float, f[2:6]), int(f[6]), int(f[7])))
+    h = dict(zip(head.split()[2::2], head.split()[3::2])) if head else {}
+    swaps = int(h.get('swaps', 0)) or 1
+    window = (int(h.get('t1', 0)) - int(h.get('t0', 0))) / 1e6
+    print(head.strip())
+    print('%d swaps over %.1f s (%.1f swaps/s); events %s, unpaired %s' % (swaps, window, swaps / window if window > 0 else 0,
+                                                                           h.get('events', '?'), h.get('dropped', '?')))
+    nested = ('sysmem_clear', 'gmem_clear', 'gmem_load', 'gmem_store', 'sysmem_resolve', 'generic_clear', 'gmem_resolve')
+    top = sum(r[2] for r in rows if not r[0].startswith(nested))
+    print('%-46s %8s %9s %8s %8s %8s %7s %9s' % ('pass', 'n/frame', 'ms/frame', 'median', 'p95', 'max', 'share', 'draws'))
+    for k, n, tot, med, p95, mx, dmed, dmax in rows:
+        inner = k.startswith(nested)
+        print('%-46s %8.2f %9.2f %8.3f %8.3f %8.2f %6s %9s' % (('  ' if inner else '') + k[:44], n / swaps, tot / swaps, med, p95, mx,
+              '' if inner else '%5.1f%%' % (100 * tot / top if top else 0), '%d/%d' % (dmed, dmax) if k.startswith('rp ') else ''))
+    print('total (top-level passes) %.2f ms per presented frame; nested steps (indented) are inside their render pass' % (top / swaps))
+
+
+if a.passes:
+    passes(a.passes)
+    sys.exit(0)
+if not a.trace:
+    ap.error('a TRACE.csv or --passes FILE')
 
 C = collections.namedtuple('C', 'seq queue created commit committed kstart kend gstart gend done handled passes draws dispatches blits pixels '
                                 'pipe_us pipe_n wait_us flush_us flush_kib label')
