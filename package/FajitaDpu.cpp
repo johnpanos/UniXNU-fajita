@@ -17,6 +17,7 @@
 #include <libkern/libkern.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
+#include <pexpert/pexpert.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -29,6 +30,9 @@ IOReturn armcpu_spi_attach(uint32_t intid, bool edge, void (*handler)(void *), v
 // status, [5] the attach result, [6] status-0 interrupts, [7] GIC readback.
 volatile uint32_t fajita_dpu_irq[8];
 volatile uint64_t fajita_dpu_irq_stamp;   // mach time of the last PP0 rd_ptr
+// Flips: [0] requested, [1] latched, [2] refused (one pending, no interrupt, or an address outside the buffers), [3] writes the GPU was
+// told to make into the buffer on screen (the tear counter: 0 with flips; see fajita_dpu_scanned).
+volatile uint32_t fajita_dpu_flips[4];
 extern volatile uint32_t native_legacy_hw_vsync[8] __attribute__((weak));   // NativeLegacyDisplay's hardware vsync counters
 }
 
@@ -89,6 +93,12 @@ constexpr uint32_t kIntrEn = 0x1010, kIntrStatus = 0x1014, kIntrClear = 0x1018, 
 volatile uint32_t *gIrqRegs;
 void (*gVsync)(void *, uint64_t);
 void *gVsyncContext;
+// A flip (fajita_dpu_flip): VIG0's source moved to `phys` and CTL0 flushed (VIG0 | CTL). The DPU takes flushed registers at its next frame
+// start; at each rd_ptr (the end of a frame's read) a pending flip whose VIG0 flush bit has cleared has latched: that frame was read from
+// the new buffer, so the old one is free, and `latched` is called (interrupt context).
+struct Flip {uint64_t phys; void (*latched)(void *); void *context; volatile bool pending;};
+Flip gFlip;
+uint64_t gScanned = 0;   // the buffer VIG0 reads (0 until the first flip: the firmware's)
 void dpuIrq(void *) {
     volatile uint32_t *r = gIrqRegs;
     if (!r) return;
@@ -103,6 +113,12 @@ void dpuIrq(void *) {
         const uint64_t now = mach_absolute_time();
         fajita_dpu_irq_stamp = now;
         fajita_dpu_irq[1] = fajita_dpu_irq[1] + 1;
+        if (gFlip.pending && !(rd(r, kCtl + 0x18) & 1u)) {
+            gFlip.pending = false;
+            gScanned = gFlip.phys;
+            fajita_dpu_flips[1] = fajita_dpu_flips[1] + 1;
+            if (gFlip.latched) gFlip.latched(gFlip.context);
+        }
         if (gVsync) gVsync(gVsyncContext, now);
     }
 }
@@ -278,6 +294,8 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
     o.add("irq: n %u rd_ptr %u done %u seen %08x last %08x zero %u attach %x gic %x | INTR_EN %08x | PP0 rd_ptr frames %u line %u\n",
           fajita_dpu_irq[0], fajita_dpu_irq[1], fajita_dpu_irq[2], fajita_dpu_irq[3], fajita_dpu_irq[4], fajita_dpu_irq[6], fajita_dpu_irq[5],
           fajita_dpu_irq[7], rd(r, kIntrEn), rd(r, kPp + 0x14) >> 16, rd(r, kPp + 0x14) & 0xffff);
+    o.add("flips: requested %u latched %u refused %u scanned-buffer writes %u | VIG0 %08x pending %d\n", fajita_dpu_flips[0], fajita_dpu_flips[1],
+          fajita_dpu_flips[2], fajita_dpu_flips[3], rd(r, kVig + 0x14), (int)gFlip.pending);
     if (&native_legacy_hw_vsync[0])
         o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
               native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,
@@ -301,6 +319,38 @@ extern "C" int fajita_dpu_vsync_attach(void (*vsync)(void *, uint64_t), void *co
     fajita_dpu_irq[5] = (uint32_t)a; fajita_dpu_irq[7] = readback;
     if (a != kIOReturnSuccess) {gIrqRegs = nullptr; gVsync = nullptr; return -3;}
     wr(r, kIntrEn, rd(r, kIntrEn) | kPpRdPtr);
+    // fajita-hw-vsync=2: the panel's TE paces the pingpong from boot (kcmd dpu te on, with its 200 ms self-revert).
+    unsigned mode = 0; PE_parse_boot_argn("fajita-hw-vsync", &mode, sizeof mode);
+    if (mode >= 2 && !gBusy) {
+        gBusy = true;
+        thread_t t = nullptr;
+        if (kernel_thread_start(teRun, (void *)1, &t) == KERN_SUCCESS) thread_deallocate(t); else gBusy = false;
+    }
+    return 0;
+}
+
+// Double-buffered scan-out (NativeGOPPresenter, fajita-fb-flip=1): the back buffer for a front buffer at `front` of `bytes`, in the
+// splash carve-out (at +16 MiB, where the scale test showed VIG0 scans), or 0 when it does not fit or the interrupt is not attached.
+extern "C" uint64_t fajita_dpu_flip_back(uint64_t front, uint64_t bytes) {
+    if (!gIrqRegs || front != kCarve || kTestOffset + bytes > kCarveSize || bytes > kTestOffset) return 0;
+    return kCarve + kTestOffset;
+}
+// The buffer VIG0 is reading now (its source address), for the tear counter.
+extern "C" uint64_t fajita_dpu_scanned(void) {
+    volatile uint32_t *r = gIrqRegs;
+    return r ? rd(r, kVig + 0x14) : 0;
+}
+extern "C" void fajita_dpu_count_scanned_write(void) {fajita_dpu_flips[3] = fajita_dpu_flips[3] + 1;}
+// Show `phys` from the next frame on; `latched` (interrupt context) once the old buffer is no longer read. 0 on success.
+extern "C" int fajita_dpu_flip(uint64_t phys, void (*latched)(void *), void *context) {
+    volatile uint32_t *r = gIrqRegs;
+    if (!r || gFlip.pending || (phys != kCarve && phys != kCarve + kTestOffset)) {fajita_dpu_flips[2] = fajita_dpu_flips[2] + 1; return -1;}
+    gFlip.phys = phys; gFlip.latched = latched; gFlip.context = context;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    gFlip.pending = true;
+    wr(r, kVig + 0x14, (uint32_t)phys);
+    flush(r);
+    fajita_dpu_flips[0] = fajita_dpu_flips[0] + 1;
     return 0;
 }
 

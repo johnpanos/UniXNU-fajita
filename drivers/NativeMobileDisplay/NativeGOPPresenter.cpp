@@ -7,6 +7,7 @@
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
 #include <kern/clock.h>
+#include <kern/thread_call.h>
 #include <pexpert/pexpert.h>
 #include "NativeGOPWire.h"
 extern "C" {
@@ -28,6 +29,15 @@ bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_
 void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
 // Provided by the display driver: finishes (status 0) or fails the swap that was offered.
 void native_legacy_gpu_complete(void *display,int status);
+// Double-buffered scan-out (fajita-fb-flip=1; the board's DPU, package/FajitaDpu.cpp): the back buffer's physical address, the buffer on
+// screen, the tear counter, and the flip itself (latched: interrupt context, once the old buffer is no longer read). Weak: other boards.
+uint64_t fajita_dpu_flip_back(uint64_t front,uint64_t bytes) __attribute__((weak));
+uint64_t fajita_dpu_scanned(void) __attribute__((weak));
+void fajita_dpu_count_scanned_write(void) __attribute__((weak));
+int fajita_dpu_flip(uint64_t phys,void (*latched)(void *),void *context) __attribute__((weak));
+// [0] flips handed to the DPU, [1] retired by the latch, [2] retired by the 100 ms watchdog (no latch), [3] refused by the DPU (retired at
+// once), [4] deliveries held while a flip was pending.
+volatile uint32_t native_gop_flip_stats[8];
 }
 class NativeGOPClient;
 class NativeGOPPresenter;
@@ -43,8 +53,23 @@ class NativeGOPPresenter : public IOService {
     IOService *memorySource=nullptr;
     // GPU hand-off (sheng-fb-gpu=1): one offered frame at a time, from the display driver to the privileged client.
     bool gpuMode=false,gpuClient=false;
-    struct {bool offered,delivered;uint64_t sequence;void *display;IOMemoryDescriptor *memory;IOMemoryMap *map;
-            uint64_t stride;uint32_t width,height;} swap={};
+    struct Swap {bool offered,delivered;uint64_t sequence;void *display;IOMemoryDescriptor *memory;IOMemoryMap *map;
+            uint64_t stride;uint32_t width,height;unsigned target;};
+    Swap swap={};
+    // Double-buffered scan-out (fajita-fb-flip=1, set up at the client's first wait, once the display attached the DPU interrupt): buffer 0
+    // is the firmware's (mapping), 1 the back buffer; the GPU writes the one not on screen; a completed frame is flipped to and its swap
+    // retires when the DPU latched it. No frame is delivered while a flip is pending.
+    bool flipWanted=false,flipMode=false,flipTried=false,flipPending=false;
+    IOMemoryMap *backMapping=nullptr;
+    uint64_t phys[2]={};
+    unsigned front=0;
+    Swap flipDone={};
+    uint64_t flipSerial=0;
+    thread_call_t latchCall=nullptr,watchdogCall=nullptr;
+    void setupFlip();
+    static void flipLatched(void *context);
+    static void latchWork(thread_call_param_t p0,thread_call_param_t p1);
+    void retireFlip(uint64_t serial,bool latched);
     uint64_t swapSequence=0;
     // The frame mappings kept for the client task (descriptor retained, so its pointer is its identity); id goes to NGPSwap.reserved.
     struct MapEntry {IOMemoryDescriptor *memory;IOMemoryMap *map;uint32_t id;uint64_t used;};
@@ -61,6 +86,7 @@ public:
     void setMemorySource(IOService *source) {memorySource=source;}
     static IOReturn handoffCall(uint32_t op,task_t task,const void *in,size_t inSize,void *out,size_t outSize);
     static IOMemoryDescriptor *handoffMemory();
+    static IOMemoryDescriptor *handoffBackMemory();
     bool offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
 private:
     IOReturn transfer(task_t,const NGPPresent &,NGPTransfer *);
@@ -107,6 +133,7 @@ bool NativeGOPPresenter::start(IOService *provider) {
        mapping->getLength()!=video.v_rowBytes*video.v_height)return false;
     gate=IOLockAlloc();if(!gate)return false;
     {unsigned v=0;PE_parse_boot_argn("sheng-fb-gpu",&v,sizeof v);gpuMode=(v==1);}
+    {unsigned v=0;PE_parse_boot_argn("fajita-fb-flip",&v,sizeof v);flipWanted=gpuMode && v==1;}
     {unsigned v=4;PE_parse_boot_argn("fajita-gop-mapcache",&v,sizeof v);mapLimit=v>8?8:v;}
     mode={NGP_VERSION,NGP_BGRX8888,video.v_width,video.v_height,video.v_rowBytes,mapping->getLength()};
     native_gop_physical=mapping->getPhysicalAddress();native_gop_virtual=mapping->getVirtualAddress();
@@ -119,6 +146,9 @@ void NativeGOPPresenter::stop(IOService *provider) {
     IOService::stop(provider);
 }
 void NativeGOPPresenter::free() {
+    if(latchCall){thread_call_cancel_wait(latchCall);thread_call_free(latchCall);latchCall=nullptr;}
+    if(watchdogCall){thread_call_cancel_wait(watchdogCall);thread_call_free(watchdogCall);watchdogCall=nullptr;}
+    OSSafeReleaseNULL(backMapping);
     OSSafeReleaseNULL(mapping);if(gate){IOLockFree(gate);gate=nullptr;}IOService::free();
 }
 IOReturn NativeGOPPresenter::transfer(task_t task,const NGPPresent &q,NGPTransfer *result) {
@@ -162,9 +192,11 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     uint64_t deadline;clock_interval_to_deadline((uint32_t)timeoutMs,kMillisecondScale,&deadline);
     const uint64_t began=mach_absolute_time();
     native_gop_wait_stats[0]=native_gop_wait_stats[0]+1;native_gop_wait_stats[2]=timeoutMs;
+    if(flipWanted && !flipTried)setupFlip();
     IOLockLock(gate);
     gpuClient=true;
-    while(online && (!swap.offered || swap.delivered)) {
+    if(flipPending)native_gop_flip_stats[4]=native_gop_flip_stats[4]+1;
+    while(online && (!swap.offered || swap.delivered || flipPending)) {
         if(IOLockSleepDeadline(gate,&swap,deadline,THREAD_ABORTSAFE)!=THREAD_AWAKENED) {
             IOLockUnlock(gate);
             uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
@@ -233,7 +265,13 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     deliveredAt=mach_absolute_time();
     out->sequence=sequence;out->address=map->getVirtualAddress();out->bytes=map->getLength();out->stride=stride;
     out->width=width;out->height=height;out->format=NGP_BGRX8888;out->reserved=id;
-    IOLockUnlock(gate);return kIOReturnSuccess;
+    const unsigned target=flipMode?1-front:0;
+    swap.target=target;out->target=target;out->flags=flipMode?1:0;
+    const uint64_t targetPhys=phys[target];
+    IOLockUnlock(gate);
+    // The tear counter: a frame the GPU is told to write into the buffer the DPU reads (every frame without flips).
+    if(fajita_dpu_scanned && fajita_dpu_count_scanned_write && targetPhys && fajita_dpu_scanned()==targetPhys)fajita_dpu_count_scanned_write();
+    return kIOReturnSuccess;
 }
 IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
     IOLockLock(gate);
@@ -246,10 +284,63 @@ IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
         native_gop_map_stats[4]=native_gop_map_stats[4]+1;native_gop_map_stats[6]=native_gop_map_stats[6]+ns;
         if(ns>native_gop_map_stats[7])native_gop_map_stats[7]=ns;
     }
-    OSSafeReleaseNULL(done.map);done.memory->release();
     if(status)__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);
     else native_gop_gpu_completions=native_gop_gpu_completions+1;
+    // Flipped: the swap retires when the DPU shows the frame (retireFlip), the frame's pages stay held until then.
+    if(flipMode && !status) {
+        IOLockLock(gate);
+        flipDone=done;flipPending=true;const uint64_t serial=++flipSerial;
+        IOLockUnlock(gate);
+        if(fajita_dpu_flip(phys[done.target],&NativeGOPPresenter::flipLatched,this)==0) {
+            native_gop_flip_stats[0]=native_gop_flip_stats[0]+1;
+            uint64_t deadline;clock_interval_to_deadline(100,kMillisecondScale,&deadline);
+            thread_call_enter1_delayed(watchdogCall,(thread_call_param_t)(uintptr_t)serial,deadline);
+            return kIOReturnSuccess;
+        }
+        native_gop_flip_stats[3]=native_gop_flip_stats[3]+1;
+        IOLockLock(gate);flipPending=false;flipDone={};IOLockWakeup(gate,&swap,false);IOLockUnlock(gate);
+    }
+    OSSafeReleaseNULL(done.map);done.memory->release();
     native_legacy_gpu_complete(done.display,status);return kIOReturnSuccess;
+}
+void NativeGOPPresenter::setupFlip() {
+    flipTried=true;
+    if(!fajita_dpu_flip_back || !fajita_dpu_flip || !mapping)return;
+    const uint64_t front0=mapping->getPhysicalAddress(),bytes=mapping->getLength();
+    const uint64_t back=fajita_dpu_flip_back(front0,bytes);
+    if(!back)return;
+    IODeviceMemory *m=IODeviceMemory::withRange(back,bytes);
+    IOMemoryMap *map=m?m->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;
+    if(m)m->release();
+    if(!map)return;
+    latchCall=thread_call_allocate_with_options(&NativeGOPPresenter::latchWork,this,THREAD_CALL_PRIORITY_KERNEL_HIGH,0);
+    watchdogCall=thread_call_allocate_with_options(&NativeGOPPresenter::latchWork,this,THREAD_CALL_PRIORITY_KERNEL_HIGH,0);
+    if(!latchCall || !watchdogCall){map->release();return;}
+    IOLockLock(gate);
+    backMapping=map;phys[0]=front0;phys[1]=back;front=0;flipMode=true;
+    IOLockUnlock(gate);
+}
+// The DPU's rd_ptr interrupt found the flip latched: retire it from a thread (the display's completion takes its work loop).
+void NativeGOPPresenter::flipLatched(void *context) {
+    NativeGOPPresenter *p=static_cast<NativeGOPPresenter *>(context);
+    thread_call_enter1(p->latchCall,(thread_call_param_t)0);
+}
+// latchCall (param 0: the latch) and watchdogCall (param: the flip's serial, 100 ms after it was handed over).
+void NativeGOPPresenter::latchWork(thread_call_param_t p0,thread_call_param_t p1) {
+    NativeGOPPresenter *p=static_cast<NativeGOPPresenter *>(p0);
+    const uint64_t serial=(uint64_t)(uintptr_t)p1;
+    p->retireFlip(serial,serial==0);
+}
+void NativeGOPPresenter::retireFlip(uint64_t serial,bool latched) {
+    IOLockLock(gate);
+    if(!flipPending || (!latched && serial!=flipSerial)) {IOLockUnlock(gate);return;}
+    Swap done=flipDone;flipDone={};flipPending=false;front=done.target;
+    IOLockWakeup(gate,&swap,false);
+    IOLockUnlock(gate);
+    if(latched){thread_call_cancel(watchdogCall);native_gop_flip_stats[1]=native_gop_flip_stats[1]+1;}
+    else native_gop_flip_stats[2]=native_gop_flip_stats[2]+1;
+    OSSafeReleaseNULL(done.map);if(done.memory)done.memory->release();
+    native_legacy_gpu_complete(done.display,0);
 }
 // The client went away with a frame outstanding: the display driver is told it failed, so it can use its own path instead of waiting forever.
 void NativeGOPPresenter::abandonSwap() {
@@ -313,6 +404,15 @@ extern "C" IOReturn native_gop_handoff_call(uint32_t op,task_t task,const void *
     return NativeGOPPresenter::handoffCall(op,task,in,inSize,out,outSize);
 }
 extern "C" IOMemoryDescriptor *native_gop_handoff_memory(void) {return NativeGOPPresenter::handoffMemory();}
+// The back buffer (fajita-fb-flip=1, once set up), writable and retained for the caller; null otherwise.
+extern "C" IOMemoryDescriptor *native_gop_handoff_back_memory(void) {return NativeGOPPresenter::handoffBackMemory();}
+IOMemoryDescriptor *NativeGOPPresenter::handoffBackMemory() {
+    NativeGOPPresenter *p=gHandoff;
+    if(!p || !p->flipMode || !p->online || !p->backMapping)return nullptr;
+    IOMemoryDescriptor *memory=p->backMapping->getMemoryDescriptor();
+    if(memory)memory->retain();
+    return memory;
+}
 IOReturn NativeGOPPresenter::newUserClient(task_t task,void *security,UInt32 type,OSDictionary *properties,IOUserClient **out) {
     if(!out || type)return kIOReturnBadArgument;
     *out=nullptr;NativeGOPClient *client=new NativeGOPClient;if(!client)return kIOReturnNoMemory;
@@ -374,8 +474,13 @@ IOReturn NativeGOPClient::externalMethod(uint32_t selector,IOExternalMethodArgum
     return IOUserClient::externalMethod(selector,a,const_cast<IOExternalMethodDispatch *>(methods+selector),this,nullptr);
 }
 IOReturn NativeGOPClient::clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory) {
-    if(type>NGP_MEMORY_SCANOUT_RW || !options || !memory)return kIOReturnBadArgument;
+    if(type>NGP_MEMORY_SCANOUT_BACK_RW || !options || !memory)return kIOReturnBadArgument;
     *memory=nullptr;if(!opened || !controller || !controller->online)return kIOReturnNotReady;
+    if(type==NGP_MEMORY_SCANOUT_BACK_RW) {
+        if(!controller->flipMode || !controller->backMapping)return kIOReturnUnsupported;
+        *memory=controller->backMapping->getMemoryDescriptor();if(!*memory)return kIOReturnNoMemory;
+        (*memory)->retain();return kIOReturnSuccess;
+    }
     // Type 1: the scanout itself, writable, for the GPU to write; only in GPU mode, where no CPU copy exists.
     if(type==NGP_MEMORY_SCANOUT_RW && !controller->gpuMode)return kIOReturnUnsupported;
     *memory=controller->mapping->getMemoryDescriptor();if(!*memory)return kIOReturnNoMemory;
