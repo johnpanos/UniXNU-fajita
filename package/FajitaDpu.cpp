@@ -90,6 +90,10 @@ constexpr unsigned kSavedCount = sizeof kSaved / sizeof kSaved[0], kQOpIndex = 1
 // command mode with autorefresh the rd_ptr interrupt fires once per frame the DPU sends to the panel, at PP_RD_PTR_IRQ's line: the
 // display's frame clock, in hardware. The handler clears what it read and hands each rd_ptr to the display (an interrupt event source).
 constexpr uint32_t kIntrEn = 0x1010, kIntrStatus = 0x1014, kIntrClear = 0x1018, kPpRdPtr = 1u << 12, kPpDone = 1u << 8;
+// INTR2 (MDP + 0x008/0x00c/0x02c): CTL0's start (bit 9), the frame start where flushed registers latch: a pending flip retires there,
+// a frame earlier than at rd_ptr (the end of the frame's read).
+constexpr uint32_t kIntr2En = 0x1008, kIntr2Status = 0x100c, kIntr2Clear = 0x102c, kCtl0Start = 1u << 9;
+volatile uint32_t gCtlStarts;
 volatile uint32_t *gIrqRegs;
 void (*gVsync)(void *, uint64_t);
 void *gVsyncContext;
@@ -103,12 +107,22 @@ uint64_t gScanned = 0;   // the buffer VIG0 reads (0 until the first flip: the f
 void dpuIrq(void *) {
     volatile uint32_t *r = gIrqRegs;
     if (!r) return;
-    const uint32_t status = rd(r, kIntrStatus);
+    const uint32_t status = rd(r, kIntrStatus), status2 = rd(r, kIntr2Status);
     wr(r, kIntrClear, status);
+    if (status2) wr(r, kIntr2Clear, status2);
+    if (status2 & kCtl0Start) {
+        gCtlStarts = gCtlStarts + 1;
+        if (gFlip.pending && !(rd(r, kCtl + 0x18) & 1u)) {
+            gFlip.pending = false;
+            gScanned = gFlip.phys;
+            fajita_dpu_flips[1] = fajita_dpu_flips[1] + 1;
+            if (gFlip.latched) gFlip.latched(gFlip.context);
+        }
+    }
     fajita_dpu_irq[0] = fajita_dpu_irq[0] + 1;
     fajita_dpu_irq[3] = fajita_dpu_irq[3] | status;
     fajita_dpu_irq[4] = status;
-    if (!status) fajita_dpu_irq[6] = fajita_dpu_irq[6] + 1;
+    if (!status && !status2) fajita_dpu_irq[6] = fajita_dpu_irq[6] + 1;
     if (status & kPpDone) fajita_dpu_irq[2] = fajita_dpu_irq[2] + 1;
     if (status & kPpRdPtr) {
         const uint64_t now = mach_absolute_time();
@@ -363,8 +377,9 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
     o.add("irq: n %u rd_ptr %u done %u seen %08x last %08x zero %u attach %x gic %x | INTR_EN %08x | PP0 rd_ptr frames %u line %u\n",
           fajita_dpu_irq[0], fajita_dpu_irq[1], fajita_dpu_irq[2], fajita_dpu_irq[3], fajita_dpu_irq[4], fajita_dpu_irq[6], fajita_dpu_irq[5],
           fajita_dpu_irq[7], rd(r, kIntrEn), rd(r, kPp + 0x14) >> 16, rd(r, kPp + 0x14) & 0xffff);
-    o.add("flips: requested %u latched %u refused %u scanned-buffer writes %u | VIG0 %08x pending %d\n", fajita_dpu_flips[0], fajita_dpu_flips[1],
-          fajita_dpu_flips[2], fajita_dpu_flips[3], rd(r, kVig + 0x14), (int)gFlip.pending);
+    o.add("flips: requested %u latched %u refused %u scanned-buffer writes %u | VIG0 %08x pending %d | ctl0 starts %u INTR2_EN %08x\n",
+          fajita_dpu_flips[0], fajita_dpu_flips[1], fajita_dpu_flips[2], fajita_dpu_flips[3], rd(r, kVig + 0x14), (int)gFlip.pending, gCtlStarts,
+          rd(r, kIntr2En));
     if (&native_legacy_hw_vsync[0])
         o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
               native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,
@@ -388,6 +403,8 @@ extern "C" int fajita_dpu_vsync_attach(void (*vsync)(void *, uint64_t), void *co
     fajita_dpu_irq[5] = (uint32_t)a; fajita_dpu_irq[7] = readback;
     if (a != kIOReturnSuccess) {gIrqRegs = nullptr; gVsync = nullptr; return -3;}
     wr(r, kIntrEn, rd(r, kIntrEn) | kPpRdPtr);
+    wr(r, kIntr2Clear, kCtl0Start);
+    wr(r, kIntr2En, rd(r, kIntr2En) | kCtl0Start);
     // fajita-hw-vsync=2: the panel's TE paces the pingpong from boot (kcmd dpu te on, with its 200 ms self-revert).
     unsigned mode = 0; PE_parse_boot_argn("fajita-hw-vsync", &mode, sizeof mode);
     if (mode >= 2 && !gBusy) {
