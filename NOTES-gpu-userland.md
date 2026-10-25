@@ -607,3 +607,16 @@ motion 51.8 / 54.3 / 53.6.**
   malloc 16.5% inclusive. GCD blocks (one per encoder call: _Block_copy/_Block_release) ~5%.
 - The kernel config has no AMP (P/E cluster) support, and drivers/ArmCpu registers every core as one cluster: XNU cannot keep the
   render server's threads on the A75s.
+
+### Core placement (pcpu) and the tightened benchmark (2026-10-25)
+
+- fps.sh: APPLIB_N (default 8) App Library scrolls; motion printed as median [min-max]. gpu-ab.sh ROUNDS=N interleaves the variants
+  and ends with SUMMARY lines (median and spread of home and App Library motion over the rounds).
+- App Library scrolls that bring new rows into view run at 43-50 motion; scrolls back run at 54-55. That is the spread within a run.
+- `pcpu=0xf0` (patches/xnu-8796/fajita-pcpu.patch: prefer the Gold cores, 4-7). Four spinning threads all run at the Gold rate
+  (440 M it/s). ROUNDS=3:
+  - pcpu: home motion 54.2 [53.8-55.7], App Library 47.8 [47.1-51.7], encode worker 97 us a draw (create to submitted / draws,
+    median over full CA command buffers).
+  - Default boot: home 55.3 [54.3-56.2], App Library 49.6 [45.0-50.0], worker 96 us a draw.
+  - No gain: the busy render threads already run on the A75s. The kernel config has no AMP scheduler, so no P-cluster
+    registration was tried.
