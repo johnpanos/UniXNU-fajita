@@ -525,3 +525,14 @@ multiple of 64, so Turnip makes no linear image there.
 - `NGPU_TRUSTED_RENDER_SERVER=1`: no gain (39.7 / 40.5 / 27.6).
 - Seen once at a cold boot of this build: a black lock screen (no poster, no clock; swipe up did nothing); a restart of PosterBoard,
   SpringBoard and backboardd cured it with held on or off, and the next cold boot was fine. Not reproduced; watch for it.
+
+### YCbCr surfaces on the device's linear filter (2026-10-25, translator 1d2b1097, stack 64cb192)
+
+The 3.5 ms draw above (fs=0e6c...) is a linear sample of a YCBCR8_420_2P surface (1105x1160, row 1536). The translator emulated
+Metal's filter on the 1/2048 grid in the shader (1079 instructions). The new `YCbCrLinearFilterPolicy::Device` (the bridge's default;
+gpu-env `NGPU_YCBCR_FILTER=exact` keeps Metal's) samples the converted image with the device's filter instead.
+
+**fps.sh x3, fresh boot: home 43.5 / 42.9 / 44.2 plain, 42.4 / 43.7 / 45.0 60-frame; App Library 29.3 / 29.0 / 29.1.**
+Same-boot A/B, exact then device, twice each: home 40.9 / 40.7 vs 43.0 / 44.7; App Library 28.1 / 29.0 vs 28.3 / 27.9.
+GPU busy on home fell from 94-96% to 61-64%, so home is no longer GPU-bound. corr-tour ycbcr16 vs held15 is within normal tour
+variance; home and lock screenshots are clean.
