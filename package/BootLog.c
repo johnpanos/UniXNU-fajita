@@ -139,6 +139,7 @@ extern volatile uint32_t native_touch_edge_stats[4] __attribute__((weak_import))
 extern volatile unsigned native_touch_stage_req __attribute__((weak_import));
 extern char native_touch_rows[4][120] __attribute__((weak_import));
 extern char fajita_touch_rows[12][120] __attribute__((weak_import));
+extern char fajita_wifi_rows[8][160] __attribute__((weak_import));
 extern volatile uint64_t native_adreno_reassert_ticks __attribute__((weak_import));
 extern volatile uint64_t native_adreno_cache_stats[5] __attribute__((weak_import));
 // NativeAdrenoPublish.cpp: per process name that opened the GPU, and the processes that asked the Metal discovery for its plugin.
@@ -669,6 +670,11 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     at = put(out, at, cap, "[fajita touch]", 16);
     at = put(out, at, cap, native_touch_rows[0], sizeof native_touch_rows[0]);
     for (unsigned i = 0; i < 12; ++i) if (fajita_touch_rows[i][0]) at = put(out, at, cap, fajita_touch_rows[i], sizeof fajita_touch_rows[i]);
+  }
+  // fajita Wi-Fi (FajitaWifiProbe.cpp, fajita-wifi=<stage>, default off): the stage rows, so the first session shows where it stopped.
+  if (&fajita_wifi_rows && fajita_wifi_rows[0][0]) {
+    at = put(out, at, cap, "[fajita wifi]", 14);
+    for (unsigned i = 0; i < 8; ++i) if (fajita_wifi_rows[i][0]) at = put(out, at, cap, fajita_wifi_rows[i], sizeof fajita_wifi_rows[i]);
   }
   // The submissions' write-combine work: audits, IB lines compared and found dirty, pages set back to write-combined, the re-assertion's
   // total time, and the CPU cache maintenance passes (count, total ms, MiB).

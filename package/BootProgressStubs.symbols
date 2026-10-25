@@ -16,6 +16,7 @@ boot_ui_trace_rows
 boot_ui_trace_snapshot
 fajita_cpufreq_rows
 fajita_pmic_poll
+fajita_wifi_poll
 fajita_gpu_probe
 native_dwc3_panic_drain
 fajita_touch_rows

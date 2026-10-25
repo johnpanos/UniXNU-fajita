@@ -148,6 +148,9 @@ extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
 // fajita: the PMIC bring-up (FajitaPmic.cpp, fajita-pmic=<stage>) starts its thread from here once IOKit is up; it returns at once
 // when the argument is absent or the thread already runs.
 extern void fajita_pmic_poll(void) __attribute__((weak_import));
+// fajita: the Wi-Fi bring-up (FajitaWifiProbe.cpp, fajita-wifi=<stage>, default off) starts its thread from here once IOKit is up;
+// it returns at once when the argument is absent or the thread already runs.
+extern void fajita_wifi_poll(void) __attribute__((weak_import));
 // fajita: the touch bring-up (FajitaTouchProbe.cpp, fajita-touch=<stage>) starts itself from here once IOKit is up; the display
 // kit's late probe may call it first. It returns at once when the argument is absent or the thread already runs.
 extern void native_touch_probe(void) __attribute__((weak_import));
@@ -1209,6 +1212,7 @@ static void monitor(void *arg, wait_result_t result) {
     if(boot_log_tick)boot_log_tick(now);
     if(sheng_cpufreq_poll)sheng_cpufreq_poll();
     if(fajita_pmic_poll)fajita_pmic_poll();
+    if(fajita_wifi_poll)fajita_wifi_poll();
     if(native_touch_probe)native_touch_probe();
     if(fajita_gpu_probe)fajita_gpu_probe();
     if(boot_ui_trace_snapshot)boot_ui_trace_snapshot(now);

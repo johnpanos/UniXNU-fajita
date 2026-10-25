@@ -25,7 +25,7 @@ CONFIG_XNU_NATIVE_PAN=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # The touch bring-up and the CPU clock probe (both default off), as on the iPad board; NativeDwc3 is not linked (its personality patch is iPad-only).
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/fajita-dwc3/libNativeDwc3.a -Wl,-force_load,{tree}/build/native-spmi/libNativeSpmi.a -Wl,-force_load,{tree}/build/fajita-pmic/libFajitaPmic.a -Wl,-force_load,{tree}/build/fajita-rtc/libFajitaRtc.a -Wl,-force_load,{tree}/build/fajita-touch/libFajitaTouch.a -Wl,-force_load,{tree}/build/fajita-cpufreq/libFajitaCpuFreq.a -Wl,-force_load,{tree}/build/fajita-gpu/libFajitaGpu.a"
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/fajita-dwc3/libNativeDwc3.a -Wl,-force_load,{tree}/build/native-spmi/libNativeSpmi.a -Wl,-force_load,{tree}/build/fajita-pmic/libFajitaPmic.a -Wl,-force_load,{tree}/build/fajita-wifi/libFajitaWifi.a -Wl,-force_load,{tree}/build/fajita-rtc/libFajitaRtc.a -Wl,-force_load,{tree}/build/fajita-touch/libFajitaTouch.a -Wl,-force_load,{tree}/build/fajita-cpufreq/libFajitaCpuFreq.a -Wl,-force_load,{tree}/build/fajita-gpu/libFajitaGpu.a"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
