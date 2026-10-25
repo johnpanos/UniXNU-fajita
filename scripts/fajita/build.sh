@@ -40,7 +40,7 @@ say() { echo "[$(date +%T)] $*" | tee -a "$LOG"; }
     f=$(ls -t "$OUT"/kernel.log "$OUT"/plugin.log "$OUT"/payload.log "$OUT"/candidate.log 2>/dev/null | head -1)
     [ -n "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 120 ] && echo "[$(date +%T)] ... $(basename "$f" .log): $(tail -1 "$f" | cut -c1-140)"
   done ) &
-HEARTBEAT=$!; trap 'kill $HEARTBEAT 2>/dev/null' EXIT
+HEARTBEAT=$!; trap 'kill $HEARTBEAT 2>/dev/null || true' EXIT   # || true: under set -e a failed kill (heartbeat already gone) made a good build exit 1
 NEED="storage-candidate/kernel.macho storage-candidate/kernel.json"; [ $CAND = 1 ] && NEED=
 for f in boot.img $NEED metal-base.ngpu platform-seed fjdbg-agent; do
   [ -e "$IN/$f" ] || { echo "missing input $IN/$f (see AGENTS.md, Inputs)"; exit 1; }
