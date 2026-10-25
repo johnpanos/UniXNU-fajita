@@ -180,7 +180,7 @@ bool NativeGOPPresenter::offer(void *display,IOMemoryDescriptor *memory,uint64_t
     bool accepted=online && gpuClient && !swap.offered;
     if(accepted) {
         memory->retain();
-        swap={true,false,++swapSequence,display,memory,nullptr,stride,width,height};
+        swap={true,false,++swapSequence,display,memory,nullptr,stride,width,height,0};
         native_gop_gpu_offers=native_gop_gpu_offers+1;
         IOLockWakeup(gate,&swap,false);
     }
