@@ -589,3 +589,21 @@ motion 51.8 / 54.3 / 53.6.**
   period median 17.4 ms.
 - 7% of busy frames are heavy (10 passes, ~160 draws, 26.8 ms GPU) and miss vsync. Right swipes keep rendering about 2.2 s at ~53.
 - GMEM again (`TU_DEBUG=nocb`, and `prefer_gmem`): 45.0 / 44.5 vs sysmem 45.1, no change.
+
+### Inside the measured phases (2026-10-25, clean frame trace over one fps.sh run)
+
+- Home phase: full-content frames (90+ draws) run at 56.8 fps, and 5% miss vsync (GPU ~13 ms on those). App Library phase:
+  full-content frames run at 50.7 fps. Its 26-pass frames take 24-30 ms: worker translation 10-29 ms (median 14), GPU 9-15 ms.
+- Most of the remaining 33 ms intervals in the motion numbers are content that changes at 30 Hz: ~44-draw frames with ~2 ms of
+  GPU, which backboardd starts ~28 ms after the previous offer. Not a performance loss.
+- The heavy frames (10-17 passes, ~13 Mpix, ~27 ms GPU) come only from home-page1.sh leaving the App Library, outside the
+  measured windows.
+- A/Bs with motion fps, all within noise (about ±2):
+  - `NGPU_LINEAR_ALIGNMENT=64` + `M2V_ALIAS_PADDED_TARGETS=1`: CA's surfaces get 64-byte rows and render in place, and
+    copy_image_to_buffer is gone (GPU per presented frame 8.7 ms on a swipe). Motion 54.5 / 55.0 vs 55.8 / 49.9.
+  - `NGPU_SCHEDULED_EARLY=1`: 53.9 / 54.7 vs 54.7 / 53.9 home, 50.5 / 54.8 vs 54.3 / 52.8 App Library.
+  - `NMB_TCACHE=1`: 55.2 / 54.9 vs 54.4 home, 50.7 / 54.9 vs 49.7 App Library.
+- App Library profile (worker sampled): draw_resident 40% (settle_draw 18%, record 17%, instantiate 9%), end_encoding 13%,
+  malloc 16.5% inclusive. GCD blocks (one per encoder call: _Block_copy/_Block_release) ~5%.
+- The kernel config has no AMP (P/E cluster) support, and drivers/ArmCpu registers every core as one cluster: XNU cannot keep the
+  render server's threads on the A75s.
