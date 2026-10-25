@@ -34,6 +34,13 @@ for a in "$@"; do case $a in
 esac; done
 mkdir -p "$OUT"; LOG=$OUT/build.txt; : > "$LOG"
 say() { echo "[$(date +%T)] $*" | tee -a "$LOG"; }
+# Heartbeat: the long steps write to their own logs, so every 30 s say which step is running and its last line (keeps bg.sh's
+# stall detection and anyone tailing the output from mistaking a long compile for a hang).
+( while kill -0 $$ 2>/dev/null; do sleep 30
+    f=$(ls -t "$OUT"/kernel.log "$OUT"/plugin.log "$OUT"/payload.log "$OUT"/candidate.log 2>/dev/null | head -1)
+    [ -n "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 120 ] && echo "[$(date +%T)] ... $(basename "$f" .log): $(tail -1 "$f" | cut -c1-140)"
+  done ) &
+HEARTBEAT=$!; trap 'kill $HEARTBEAT 2>/dev/null' EXIT
 NEED="storage-candidate/kernel.macho storage-candidate/kernel.json"; [ $CAND = 1 ] && NEED=
 for f in boot.img $NEED metal-base.ngpu platform-seed fjdbg-agent; do
   [ -e "$IN/$f" ] || { echo "missing input $IN/$f (see AGENTS.md, Inputs)"; exit 1; }
