@@ -236,3 +236,22 @@ probe itself reads through its own mapped windows, not the peek path, so the gua
 Host-test the register/GMU/HFI/PM4 logic before touching the phone (`drivers/FajitaAdreno/tests/test_a630.c`). The msm
 reference is Linux v6.16 at `/home/john/src/ref/linux` (drivers/gpu/drm/msm/adreno a6xx_*, the register XMLs, gpucc/gcc
 -sdm845.c, cmd-db.c); A630Regs.h is regenerated from it by scripts/derive-a630-hwinit.py.
+
+---
+
+## 7. Zero-copy DPU scan-out: findings (2026-10-24, deferred until the frame is near 16 ms)
+
+Goal: scan CoreAnimation's final 1125x2436 BGRA surface out directly with the DPU, QSEED3 scaling it to the 1080x2340 panel, instead
+of the GPU presenter's scale copy into the firmware framebuffer (3.6 ms of GPU a frame with scanout_scale4v, and it queues behind CA's
+next render on the single ring).
+
+- `kcmd gpu` "frame layout" (fea21f9, NativeGOPPresenter.cpp `native_gop_frame_runs`): CA's offered frames are 1,911-2,634
+  physically contiguous runs over 11,227,136 bytes, scattered 4 KiB pages. The DPU cannot read them by physical address.
+- `kcmd dpu`: VIG0 scans the splash carve-out by physical address (src 0x9d400000, 1080x2340, ystride 4320), so the MDP streams are in
+  bypass on apps_smmu; PP0 autorefresh is on (command-mode panel refreshed from memory: no swap flip, tearing as today).
+- `kcmd dpu scale-test` (package/FajitaDpu.cpp) already showed VIG0 + QSEED3 scaling a 1125x2436 card from carve-out + 16 MiB.
+- Needed: an apps_smmu context bank for the MDP streams (sdm845 mdss `iommus = <&apps_smmu 0x880 0x8>, <&apps_smmu 0xc80 0x8>`),
+  page tables mapping each swap surface contiguously in IOVA (one mapping per surface, cached like the presenter's map ids), the stream
+  switched from bypass to that context without a scan-out fault (expect the same S2CR quirk as adreno_smmu, section 2), then per swap
+  VIG0 src = the surface's IOVA + CTL flush, completed at the next TE/autorefresh. The ArmSmmu4K kit programs contexts already
+  (the GPU's). Cheaper but small: an unscaled GPU copy into a contiguous carve-out buffer with QSEED3 scaling (saves about 1 ms).
