@@ -670,3 +670,24 @@ Now:
   (2021 deliveries held).
 - **Next.** QSEED3 scaling at scanout (the presenter's scale pass goes, a plain copy instead), then direct scan-out of CA's surfaces
   through an MDP SMMU context (SID 0x880), then two outstanding GPU swaps in the display so `=1` costs nothing.
+
+## Handoff (2026-10-25, GPU perf round 3, end of the phone stretch)
+
+State: render defaults on (NativeAdrenoMetalPlugin.mm sets NGPU_ENCODE_BATCH=32, NMB_TCACHE=1, NGPU_LINEAR_ALIGNMENT=64,
+M2V_ALIAS_PADDED_TARGETS=1; gpu-env overrides each). Board defaults fajita-hw-vsync=2 and fajita-fb-flip=2 (tear-free flips, TE-paced).
+Motion fps: home ~55, App Library ~48-56 (single runs vary). Judge 60 on motion fps (fps.sh prints it beside the window rate).
+
+What limits now, from the clean frame trace: App Library frames of 26 passes take 24-30 ms, with the encode worker's translation at 10-29 ms
+(median 14). Translation is ~96 us a draw on the A75 (encode_bench on the host: 4.3 us a draw, so the bench under-represents CA's
+draws). Profile of the worker: draw_resident ~40% (settle_draw 18%, record 17%, instantiate 9%, bind 5%), end_encoding 13%,
+malloc 16%.
+
+Next, host only (no phone until the lead schedules a slot):
+1. Translator draw memo (metal2vulkan fajita-a630), measured with scripts/encode-bench-callgrind (instructions and allocations a draw)
+   and command-replay `M2V_REPLAY_TIMES=N`. A CA-like host bench needs a frame capture (NGPU_CAPTURE=1 NGPU_CAPTURE_FRAMES=200
+   NGPU_CAPTURE_SKIP=200, pulled by scripts/pipeline-census/fajita-pull, replayed via frames_manifest.py). capture-r3 is pipeline-only.
+   A host A630 Turnip exists read-only in ~/src/UniXNU-shaderstats-stack/build (another agent's tree: do not build there).
+2. Display: QSEED3 scaling at scanout, direct scan-out through an MDP SMMU context (SID 0x880), and two outstanding GPU swaps in
+   NativeLegacyDisplay so fajita-fb-flip=1 costs nothing.
+Tools added this round: ngpu-metal cpu / spin (push to /private/var/ngpu/sbin/ngpu-metal, built through scripts/gpu-local's xcrun
+stand-in), kcmd dpu te|tear-test, motion fps, gpu-ab ROUNDS=N, CPU profile of the encode worker.
