@@ -719,3 +719,42 @@ Memo candidates, cheapest first:
 3. Allocations: ~46 a draw.
 The bench under-represents CA (4.3 us a draw on the host against ~96 us on the phone): take a frame capture for command-replay
 `M2V_REPLAY_TIMES` when the phone is free again.
+
+### Draw cost round 4 handoff (2026-10-25, translator a13ca97a, host only, stopped for the Wi-Fi priority)
+
+No translator behavior changed this round; defaults are as at a0c465aa. Nothing is pinned in the stack and the phone was not used.
+The only commit is a measuring tool: `STEADY=1 scripts/encode-bench-callgrind [FRAMES]` in metal2vulkan runs FRAMES and 2*FRAMES
+under callgrind with collection on inside `RenderCommandEncoder::draw_primitives` only. It prints the per-draw difference (draws,
+draw_resident, allocations) and the top inclusive and self functions. Pass M2V_* switches through it for A/B runs.
+
+Baseline, steady state (40 frames minus 20, 1200 draws, lavapipe): draw_primitives **35.3k** instructions a draw,
+draw_resident 34.2k, **19.5 allocations a draw** (the 46 in the earlier note counted setup). DHAT (valgrind --tool=dhat, same
+20/40 difference) puts 14.7 a draw under draw_primitives: 3.0 DescriptorArena::allocate (set_zero), 3.0 bind_buffers, then one
+each from binding::bind, graphics::instantiate, its PushConstantWrite Vec, SpecializationKey::clone in draw_resident,
+EncoderState::draw_viewports, the vk::Viewport and Rect2D Vecs (vk_scissors), and command_uses' ViewClear Vec. All are small
+per-draw Vecs that could be SmallVec or encoder-owned scratch. Malloc+free self time is only ~1.1k a draw, so step 1 is worth ~1.5k at most.
+
+Where the time is inside the big pieces (line-table build, `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_TARGET_DIR=target/cg-lines`):
+- settle_draw 4.4k: **ArgumentTable::refresh_reading 2.0k** is most of it; settle_shape 0.2k, sampler_maps 0.14k.
+- draw_settings 2.6k: zeroed_colors 0.65k; **render_state::native_depth_range 0.55k**, which depends only on the device
+  profile and is recomputed every draw (an easy, sound cache per device); EncoderState::compensation 0.26k; announce_unclamped_bias 0.13k.
+- draw_resident self 2.5k plus 1.8k of memcpy (0.8k of it from draw_resident's own moves of large values, 0.25k
+  PassStartReads::tables, 0.2k zeroed_colors).
+- Also: set_zero 2.0k, ArgumentTable::retain 1.1k, binding::bind 1.1k, FixedState::without_dynamic 0.85k, command_uses 0.8k,
+  begin_graphics_pipeline 0.7k, write_sets 0.7k, note_reaching 0.6k, degrade_bound_formats 0.5k, vk_scissors 0.45k.
+
+Next, cheapest and safest first:
+1. Direct fixes that need no memo key: cache native_depth_range per device; skip refresh_reading when no table has changed
+   since the last refresh (a dirty flag on the ArgumentTable setters); compute zeroed_colors once per draw (draw() calls it
+   again for coverage); avoid the large by-value moves in draw_resident.
+2. Allocations (list above), then descriptor-set reuse keyed by layout plus resource identities and generations. Note that
+   encode_bench changes its vertex bytes and texture every draw, so the bench can't show set reuse. It needs the CA capture.
+3. The draw_settings/settle_draw memo per pipeline. draw_settings reads EncoderState (depth/stencil, bias, viewports, clamp),
+   layout.depth_stencil, amplification, visibility, rate_map, the tile size, and the routing of the current instance.
+   draw_resident itself changes some of these (reroute, next_instance, the extended shadows, hidden depth), so the generation
+   must bump there too, not only in the setters. It also announces degradations when `announce` is set; check those are
+   once-only before skipping them on a memo hit. Gate it with M2V_MEMO_CHECK=1 (recompute and assert on a hit) under the full suite.
+Measuring on the phone later: pin the translator in gpu-metal-vulkan-inputs.json (refresh the bridge patches with
+scripts/refresh-bridge-patches.py if refused), `scripts/fajita/build.sh --test`, then fps.sh motion fps via `gpu-ab.sh` FPS=1
+ROUNDS=3 against the current pin, plus corr-tour.sh. A CA-like host bench needs a frame capture (NGPU_CAPTURE=1
+NGPU_CAPTURE_FRAMES=200 NGPU_CAPTURE_SKIP=200, scripts/pipeline-census/fajita-pull) replayed with command-replay M2V_REPLAY_TIMES=N.
