@@ -411,6 +411,7 @@ extern "C" unsigned int pmap_cache_attributes(unsigned int pn);
 // Every CPU mapping of the page is uncached (write-combined or device: VM_MEM_NOT_CACHEABLE in the pmap's attribute of the page).
 static bool pageUncached(uint64_t physical) {return pmap_cache_attributes((unsigned int)(physical >> PAGE_SHIFT)) & 0x4u;}
 extern "C" volatile uint64_t native_legacy_copy_n __attribute__((weak)), native_legacy_copy_sum __attribute__((weak)), native_legacy_copy_max __attribute__((weak));
+extern "C" volatile uint64_t native_gop_frame_runs[6] __attribute__((weak));
 extern "C" volatile uint64_t native_gop_gpu_offers __attribute__((weak)), native_gop_gpu_completions __attribute__((weak)),
     native_gop_gpu_failures __attribute__((weak)), native_gop_gpu_abandoned __attribute__((weak));
 extern "C" volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak)), native_legacy_gpu_last_status __attribute__((weak));
@@ -1060,12 +1061,17 @@ size_t kcmd(const char *args, size_t len, char *out, size_t cap)
                     (unsigned long long)(native_legacy_copy_max * tb.numer / tb.denom / 1000));
     }
     // The GPU hand-off (sheng-fb-gpu=1): frames offered to the render server's presenter, completed, failed, abandoned, CPU fallbacks.
-    if (&native_gop_gpu_offers && native_gop_gpu_offers)
+    if (&native_gop_gpu_offers && native_gop_gpu_offers) {
+        if (&native_gop_frame_runs)
+            w = appendf(out, cap, w, "frame layout: %llu measured, last %llu physical runs (min %llu max %llu) over %llu bytes at %llx\n",
+                        (unsigned long long)native_gop_frame_runs[0], (unsigned long long)native_gop_frame_runs[1], (unsigned long long)native_gop_frame_runs[3],
+                        (unsigned long long)native_gop_frame_runs[2], (unsigned long long)native_gop_frame_runs[4], (unsigned long long)native_gop_frame_runs[5]);
         w = appendf(out, cap, w, "handoff offers %llu done %llu failed %llu abandoned %llu fallback %u last %x\n",
                     (unsigned long long)native_gop_gpu_offers, (unsigned long long)(&native_gop_gpu_completions ? native_gop_gpu_completions : 0),
                     (unsigned long long)(&native_gop_gpu_failures ? native_gop_gpu_failures : 0),
                     (unsigned long long)(&native_gop_gpu_abandoned ? native_gop_gpu_abandoned : 0),
                     &native_legacy_gpu_fallbacks ? native_legacy_gpu_fallbacks : 0u, &native_legacy_gpu_last_status ? native_legacy_gpu_last_status : 0u);
+    }
     if (&native_adreno_import_check)
         w = appendf(out, cap, w, "import check %llu unmapped %llu replaced %llu\n", (unsigned long long)native_adreno_import_check[0],
                     (unsigned long long)native_adreno_import_check[1], (unsigned long long)native_adreno_import_check[2]);

@@ -12,6 +12,9 @@
 extern "C" {
 volatile uint32_t native_gop_ready,native_gop_failures;
 volatile uint64_t native_gop_transfers,native_gop_bytes,native_gop_physical,native_gop_virtual;
+// Physical layout of the offered frames (zero-copy scan-out study): [0] frames measured, [1] physically contiguous runs of the last,
+// [2] the most runs of any, [3] the fewest, [4] the last frame's bytes, [5] its first physical address. Measured once per new mapping.
+volatile uint64_t native_gop_frame_runs[6];
 volatile uint64_t native_gop_gpu_offers,native_gop_gpu_completions,native_gop_gpu_failures,native_gop_gpu_abandoned;
 /* waitSwap: [0] calls, [1] timeouts, [2] the requested timeout of the last call (ms), [3] time the last timed-out call really waited (ns), [4] the shortest
  * and [5] the longest such wait (ns), [6] total ns waited in timed-out calls. A timed wait that returns long before its deadline shows here. */
@@ -189,6 +192,19 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     }
     bool cached=map!=nullptr;
     if(!map) {
+        {
+            uint64_t runs=0,offset=0,last=0,first=0;const uint64_t length=memory->getLength();
+            while(offset<length) {
+                IOByteCount seg=0;const addr64_t pa=memory->getPhysicalSegment(offset,&seg,kIOMemoryMapperNone);
+                if(!pa || !seg)break;
+                if(!runs || pa!=last)++runs;
+                if(!first)first=pa;
+                last=pa+seg;offset+=seg;
+            }
+            native_gop_frame_runs[0]=native_gop_frame_runs[0]+1;native_gop_frame_runs[1]=runs;native_gop_frame_runs[4]=length;native_gop_frame_runs[5]=first;
+            if(runs>native_gop_frame_runs[2])native_gop_frame_runs[2]=runs;
+            if(!native_gop_frame_runs[3] || runs<native_gop_frame_runs[3])native_gop_frame_runs[3]=runs;
+        }
         map=memory->createMappingInTask(task,0,kIOMapAnywhere);
         if(mapLimit && map && map->getVirtualAddress()) {
             native_gop_map_stats[1]=native_gop_map_stats[1]+1;
