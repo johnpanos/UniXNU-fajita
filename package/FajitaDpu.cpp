@@ -34,6 +34,7 @@ volatile uint64_t fajita_dpu_irq_stamp;   // mach time of the last PP0 rd_ptr
 // told to make into the buffer on screen (the tear counter: 0 with flips; see fajita_dpu_scanned).
 volatile uint32_t fajita_dpu_flips[4];
 extern volatile uint32_t native_legacy_hw_vsync[8] __attribute__((weak));   // NativeLegacyDisplay's hardware vsync counters
+extern volatile uint32_t native_gop_flip_stats[8] __attribute__((weak));     // NativeGOPPresenter's flip bookkeeping
 }
 
 namespace {
@@ -380,6 +381,10 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
     o.add("flips: requested %u latched %u refused %u scanned-buffer writes %u | VIG0 %08x pending %d | ctl0 starts %u INTR2_EN %08x\n",
           fajita_dpu_flips[0], fajita_dpu_flips[1], fajita_dpu_flips[2], fajita_dpu_flips[3], rd(r, kVig + 0x14), (int)gFlip.pending, gCtlStarts,
           rd(r, kIntr2En));
+    if (&native_gop_flip_stats[0])
+        o.add("presenter flips: handed %u latched %u watchdog %u refused %u held %u queued %u buffers %u\n", native_gop_flip_stats[0],
+              native_gop_flip_stats[1], native_gop_flip_stats[2], native_gop_flip_stats[3], native_gop_flip_stats[4], native_gop_flip_stats[5],
+              native_gop_flip_stats[6]);
     if (&native_legacy_hw_vsync[0])
         o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
               native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,

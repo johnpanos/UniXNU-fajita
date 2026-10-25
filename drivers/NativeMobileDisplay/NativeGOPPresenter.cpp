@@ -62,7 +62,7 @@ class NativeGOPPresenter : public IOService {
     // retires when the DPU latched it. No frame is delivered while a flip is pending.
     // Triple buffering where the third buffer fits (buffer 2): a frame completed while a flip is pending waits as `queued` and is
     // flipped to at that flip's latch, so the GPU always has a buffer that is neither on screen nor about to be.
-    bool flipWanted=false,flipMode=false,flipTried=false,flipPending=false,queuedValid=false;
+    bool flipWanted=false,flipMode=false,flipTried=false,flipPending=false,queuedValid=false,retireEarly=false;
     IOMemoryMap *backMapping=nullptr,*thirdMapping=nullptr;
     uint64_t phys[3]={};
     unsigned front=0,buffers=0;
@@ -142,7 +142,10 @@ bool NativeGOPPresenter::start(IOService *provider) {
        mapping->getLength()!=video.v_rowBytes*video.v_height)return false;
     gate=IOLockAlloc();if(!gate)return false;
     {unsigned v=0;PE_parse_boot_argn("sheng-fb-gpu",&v,sizeof v);gpuMode=(v==1);}
-    {unsigned v=0;PE_parse_boot_argn("fajita-fb-flip",&v,sizeof v);flipWanted=gpuMode && v==1;}
+    // fajita-fb-flip=1: a swap retires when the DPU shows its frame (the compositor's frame-done means on the panel); =2: when its copy
+    // completes (as without flips: the display offers one swap at a time, so retiring at the latch holds the next frame back a frame),
+    // the flip still taking the frame at the next frame boundary.
+    {unsigned v=0;PE_parse_boot_argn("fajita-fb-flip",&v,sizeof v);flipWanted=gpuMode && (v==1 || v==2);retireEarly=v==2;}
     {unsigned v=4;PE_parse_boot_argn("fajita-gop-mapcache",&v,sizeof v);mapLimit=v>8?8:v;}
     mode={NGP_VERSION,NGP_BGRX8888,video.v_width,video.v_height,video.v_rowBytes,mapping->getLength()};
     native_gop_physical=mapping->getPhysicalAddress();native_gop_virtual=mapping->getVirtualAddress();
@@ -297,14 +300,22 @@ IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
     else native_gop_gpu_completions=native_gop_gpu_completions+1;
     // Flipped: the swap retires when the DPU shows the frame (retireFlip), the frame's pages stay held until then.
     if(flipMode && !status) {
+        void *display=nullptr;
+        if(retireEarly) {   // retired now; the flip keeps only the buffer
+            OSSafeReleaseNULL(done.map);done.memory->release();display=done.display;
+            done.memory=nullptr;done.display=nullptr;
+        }
         IOLockLock(gate);
         if(flipPending) {   // behind the pending flip: flipped to at its latch
             queued=done;queuedValid=true;native_gop_flip_stats[5]=native_gop_flip_stats[5]+1;
-            IOLockUnlock(gate);return kIOReturnSuccess;
+            IOLockUnlock(gate);
+        } else {
+            flipDone=done;flipPending=true;
+            IOLockUnlock(gate);
+            startFlip();
         }
-        flipDone=done;flipPending=true;
-        IOLockUnlock(gate);
-        startFlip();return kIOReturnSuccess;
+        if(display)native_legacy_gpu_complete(display,0);
+        return kIOReturnSuccess;
     }
     OSSafeReleaseNULL(done.map);done.memory->release();
     native_legacy_gpu_complete(done.display,status);return kIOReturnSuccess;
@@ -329,7 +340,7 @@ void NativeGOPPresenter::startFlip() {
         IOLockWakeup(gate,&swap,false);
         IOLockUnlock(gate);
         OSSafeReleaseNULL(done.map);if(done.memory)done.memory->release();
-        native_legacy_gpu_complete(done.display,0);
+        if(done.display)native_legacy_gpu_complete(done.display,0);
     }
 }
 void NativeGOPPresenter::setupFlip() {
@@ -380,7 +391,7 @@ void NativeGOPPresenter::retireFlip(uint64_t serial,bool latched) {
     if(latched){thread_call_cancel(watchdogCall);native_gop_flip_stats[1]=native_gop_flip_stats[1]+1;}
     else native_gop_flip_stats[2]=native_gop_flip_stats[2]+1;
     OSSafeReleaseNULL(done.map);if(done.memory)done.memory->release();
-    native_legacy_gpu_complete(done.display,0);
+    if(done.display)native_legacy_gpu_complete(done.display,0);
     if(next)startFlip();
 }
 // The client went away with a frame outstanding: the display driver is told it failed, so it can use its own path instead of waiting forever.
