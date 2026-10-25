@@ -53,6 +53,33 @@ static int sheng_boot_setup_reset(proc_t p,uint64_t scratch) {
  return 0;
 }
 
+// First-boot data migration (iOS's own DataMigrator and its migrator plugins; SystemAppMigrator installs the staged system apps).
+// The Data seed (ios16/data-seed.json, packed on macOS) carries a com.apple.migration.plist with LastSystemVersion 20H392, which tells
+// DataMigrator that migration already ran. By default that seeded file is removed once, on the first boot of a fresh Data (no marker
+// yet), so Apple's migration runs and writes the file itself; the marker keeps later boots from touching Apple's copy. Persistent Data
+// (sheng-data-persist=2) keeps both. sheng-seed-migration=1 keeps the seeded file (the old behavior: migration skipped).
+static int sheng_boot_migration_unseed(proc_t p,uint64_t scratch) {
+ static const char plist[]="/private/var/mobile/Library/Preferences/com.apple.migration.plist";
+ static const char marker[]="/private/var/db/.sheng-migration-unseeded";
+ int32_t result=0;
+ int error=copyout(marker,scratch,sizeof(marker));
+ if(error)return error;
+ struct open_args mark={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0644};
+ error=open(p,&mark,&result);
+ if(error==EEXIST)return 0;              // not the first boot of this Data: DataMigrator's own file stays
+ if(error)return error;
+ int fd=result;
+ if((error=copyout(plist,scratch,sizeof(plist))))goto out;
+ struct unlink_args rm={.path=scratch};
+ error=unlink(p,&rm,&result);
+ if(error==ENOENT)error=0;
+ if(!error)printf("sheng migration: seeded com.apple.migration.plist removed, DataMigrator runs on this boot\n");
+ out:;
+ struct fsync_args sync={.fd=fd};(void)fsync(p,&sync,&result);
+ struct close_args cl={.fd=fd};int e=sys_close(p,&cl,&result);
+ return error?error:e;
+}
+
 // One comma-separated label at *c into the policy as a disabled key; advances *c past it.
 static int append_job(const char **cursor) {
  const char *c=*cursor,*e=c;while(*e && *e!=',')++e;
@@ -83,6 +110,9 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
   return error;
  }
  if(setup==1)printf("sheng setup flags reset: Hello page on this boot\n");
+ int seeded=0;PE_parse_boot_argn("sheng-seed-migration",&seeded,sizeof(seeded));
+ if(seeded!=1 && (error=sheng_boot_migration_unseed(p,scratch)))printf("sheng migration unseed failed: %d\n",error);
+ error=0;
  if(!enabled && !jobs[0] && !lite)return 0;
  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));
