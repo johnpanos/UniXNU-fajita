@@ -4,7 +4,8 @@
 # Metal), wait until backboardd is back and settled, run the swipe sampler, screenshot the home screen and diff it against
 # $FAJITA_WORK/home-base.png (the first home page; home-page1.sh goes there first). Prints one summary row per variant and appends it to $FAJITA_WORK/ab-results.txt.
 # Needs a running GPU session (gpu-status.sh) whose kernel has fajita-gpu=11 and kcmd touch. Env: SPECS (swipes, default
-# "left right left:60 right:60"), SETTLE_S (wait after restart, default 25), BASE (reference png).
+# "left right left:60 right:60"), SETTLE_S (wait after restart, default 25), BASE (reference png),
+# FPS=1 (fps.sh, home and App Library, instead of the swipe sampler).
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; mkdir -p "$W"; S=$W; G=$W
 H() { python3 -I "$(dirname "$0")/../../fajita-usbdbg-hub.py" call --timeout ${T:-20} "$@"; }
 BASE=${BASE:-$G/home-base.png}; OUT=$G/ab-results.txt
@@ -24,9 +25,14 @@ from PIL import Image,ImageChops
 a=Image.open('$G/lock-off.png').convert('RGB').crop((0,300,540,1170)); b=Image.open('$G/lock-ab-$name.png').convert('RGB').crop((0,300,540,1170))
 px=list(ImageChops.difference(a,b).get_flattened_data()); print('lock maxdiff %d px>8 %d' % (max(max(p) for p in px), sum(1 for p in px if max(p)>8)))" 2>&1)
   T=8 H kcmd touch swipe up >/dev/null; sleep 2   # wake / unlock to the home screen
+  if [ "${FPS:-0}" = 1 ]; then   # FPS=1: the standard benchmark (fps.sh: home and App Library) instead of the swipe sampler
+    rate=$(timeout 300 $TD/fps.sh 2>&1); echo "$rate" | grep "FPS "
+    fps=$(echo "$rate" | grep "^FPS " | sed 's/^FPS //; s/ (n=[0-9]*)//g')
+  else
   rate=$(cd /tmp && SETTLE=1.0 timeout 150 python3 -I $TD/swipe-rate.py ${SPECS:-left right left:60 right:60} 2>&1 | grep -v Deprec)
   echo "$rate" | tail -6
   fps=$(echo "$rate" | grep -o "MEAN: [0-9.]*" | grep -o "[0-9.]*$")   # swipe-rate.py's mean over the swipes
+  fi
   perf=$(python3 -I $TD/perf.py left:100 900 2>/dev/null | sed -n 1,2p | tr '\n' ' ' | grep -o "gpu busy [0-9]*%\|alu [0-9]*% of busy" | tr '\n' ' ')
   # The home check compares the FIRST home page: the swipes above end on whichever page they reached (often the App Library).
   sleep 1.5; pg=""; $TD/home-page1.sh 2>/dev/null || pg=" !! NOT ON HOME PAGE 1"
