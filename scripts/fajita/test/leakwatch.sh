@@ -13,7 +13,7 @@ snap() {   # n retire_us total_us own_bytes objects(x100)
   local obj=$(echo "$g" | grep -o 'owned [0-9]* KiB in [0-9]*' | awk '{print $5}')
   echo "$n $avgs $own $obj"
 }
-row() { python3 -I $TD/rows.py - 2>/dev/null | grep -E "^N no-copy|^N xr|^S |^N surface gen" | tr '\n' ' ' | cut -c1-260; }
+row() { python3 -I $TD/rows.py - 2>/dev/null | grep -E "^N live|^N no-copy|^N xr|^S |^N surface gen" | tr '\n' ' ' | cut -c1-260; }
 echo "== $(date +%T) leakwatch $RUNS runs" | tee -a $OUT
 for r in $(seq 1 $RUNS); do
   read n0 r0 t0 o0 b0 <<< "$(snap)"

@@ -11,16 +11,26 @@ for l in open('$1'):
     if m: (s if ':' in m.group(1) else p).append(float(m.group(2)))
 f=lambda v: '%.1f (n=%d)'%(sum(v)/len(v),len(v)) if v else 'n/a'
 print('$2', f(p), '| 60-frame', f(s))"; }
-$TD/home-page1.sh >/dev/null 2>&1 || echo 'fps.sh: !! not on home page 1'
-(cd /tmp && SETTLE=1.0 timeout 200 python3 -I $TD/swipe-rate.py left right left right left:60 right:60 left:60 right:60 2>&1 | grep -v Deprec) > $G/fps-last.txt
+# A phase whose swipes lost the screen (a swipe with under 5 frames: a locked screen, the wrong page, a lost touch) is run again once,
+# and reported INVALID if it fails again, so a navigation slip never reads as a frame rate.
+valid() { [ -s "$1" ] && ! grep -q 'not queued\|App Library not reached' "$1" && python3 -I -c "
+import re,sys
+n=[int(m.group(1)) for l in open('$1') for m in [re.match(r'\s*\S+: (\d+) frames in',l)] if m]
+sys.exit(0 if n and min(n)>=5 else 1)"; }
+home() { $TD/home-page1.sh >/dev/null 2>&1 || echo 'fps.sh: !! not on home page 1'
+  (cd /tmp && SETTLE=1.0 timeout 200 python3 -I $TD/swipe-rate.py left right left right left:60 right:60 left:60 right:60 2>&1 | grep -v Deprec) > $G/fps-last.txt; }
+home; valid $G/fps-last.txt || { echo 'fps.sh: home phase invalid, running it again'; home; }
+valid $G/fps-last.txt || HOMEBAD=1
 # The App Library: swipe left from page 1 until the screen matches applib-base.png above the list.
-$TD/home-page1.sh >/dev/null 2>&1; inlib=0
+applib() { $TD/home-page1.sh >/dev/null 2>&1; inlib=0
 for i in 1 2 3 4 5; do
   $H kcmd touch swipe left >/dev/null; sleep 2; T=30 $H screenshot $G/.applib-check.png >/dev/null 2>&1
   n=$(python3 -I $TD/scrdiff.py $G/applib-base.png $G/.applib-check.png 0 90 540 260 | awk '{print $4}'); [ "${n:-99999}" -lt 4000 ] && { inlib=1; break; }
 done
 if [ $inlib = 1 ]; then
   (cd /tmp && SETTLE=1.0 timeout 200 python3 -I $TD/swipe-rate.py xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 2>&1 | grep -v Deprec) > $G/fps-applib.txt
-else echo 'fps.sh: !! App Library not reached' > $G/fps-applib.txt; fi
+else echo 'fps.sh: !! App Library not reached' > $G/fps-applib.txt; fi; }
+applib; valid $G/fps-applib.txt || { echo 'fps.sh: App Library phase invalid, running it again'; applib; }
+valid $G/fps-applib.txt || LIBBAD=1
 $TD/home-page1.sh >/dev/null 2>&1
-echo "FPS home: $(mean $G/fps-last.txt plain) || App Library: $(mean $G/fps-applib.txt scroll | sed 's/scroll n\/a | 60-frame/scroll/')"
+echo "FPS home: $([ -n "$HOMEBAD" ] && echo INVALID || mean $G/fps-last.txt plain) || App Library: $([ -n "$LIBBAD" ] && echo INVALID || mean $G/fps-applib.txt scroll | sed 's/scroll n\/a | 60-frame/scroll/')"
