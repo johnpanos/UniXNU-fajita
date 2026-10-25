@@ -550,3 +550,25 @@ Frame trace, median busy frame 21.9 ms = cpu_gap 7.7 + encode 2.9 + commit 9.6. 
 CoreAnimation's `commitAndWaitUntilSubmitted` waits for it. GPU 10.6 ms overlaps, plus the presenter's 3.6 ms. The render thread runs
 only about 27% of a core, and the rest is waiting. Next: `NGPU_SCHEDULED_EARLY=1` (A/B), so the wait ends once the commit is queued
 on the worker.
+
+### Where a swipe frame goes after the memo (2026-10-25, right swipe, frame trace C lines)
+
+Steady state: CA commits its command buffer (about 120 draws, 6-12 passes). The encode worker finishes translating and submitting
+it about 15 ms later, and the GPU runs it for about 14.6 ms. Then the presenter's copy takes 3.6 ms. Translation of frame N+1
+overlaps the GPU work on frame N, so the period is 20-22 ms, which vsync quantization turns into about 45 fps (swap intervals cluster
+at 16.7 and 33.3 ms).
+- Neither half alone is the limit. `NGPU_SCHEDULED_EARLY=1` (CA's waitUntilScheduled returns before the worker submits) and the
+  present-skip experiment (`NGPU_PRESENT_SKIP_FILE=1` plus a non-empty /private/var/ngpu/present-skip: frames handed back without
+  their copy) both left the swipe rates unchanged (left 37, right 52).
+- GPU: the pass trace accounts for about 11.1 ms of CA's passes and copies in a 14.6 ms GPU span; the other ~3.5 ms is not inside
+  any traced pass.
+- CPU: the worker's translation is about 125 us a draw (5.8 us on the Zen 5 host bench). With the worker sampled (the CPU profile
+  now registers the encode worker's threads): draw_resident about 49% (record, settle_draw, instantiate, bind), end_encoding 11%,
+  malloc 13% of all running samples.
+- Cores: all 8 are online, and cpufreq-hw sits near the top of both clusters (little state 17 = 1766 MHz, big state 22 = 2650
+  MHz). But drivers/ArmCpu registers every core as cluster 0 with the boot cluster's type, so XNU schedules without core types.
+  `ngpu-metal spin`: a lone thread runs at 440 M it/s (big), and under 8-thread load slices fall to ~290 (the A55 rate for this
+  latency-bound loop). A P cluster for cpus 4-7 is a kernel/board decision, raised with the lead.
+- Swipe asymmetry (left 37 vs right 52 in swipe-rate.py) is mostly the window: in-motion frames are 20-22 ms both ways.
+- Tools: `ngpu-metal cpu SECONDS [NAME...]` (per-process and per-thread CPU over a window) and `ngpu-metal spin`. Built on Linux
+  through scripts/gpu-local's xcrun stand-in and pushed to /private/var/ngpu/sbin/ngpu-metal (run that path directly).

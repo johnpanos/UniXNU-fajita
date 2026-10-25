@@ -3,16 +3,35 @@
 // sandbox). With the NativeAdrenoMetal plugin installed and this process listed in NativeAdrenoMetal.clients, Metal's own discovery
 // (IOAcceleratorES -> MetalPluginName -> the plugin) returns the native device: metal2vulkan on Turnip on the Adreno 630.
 //   ngpu-metal [fill]   discovery, then a shared buffer filled by a blit command buffer and read back
+//   ngpu-metal cpu SECONDS [NAME...]   per-process CPU time over SECONDS (and the threads of each NAME)
+//   ngpu-metal spin THREADS SECONDS [QOS]   per-thread rate of a dependent integer chain per 100 ms slice (core types, placement)
 // One line per step; the exit status is the first failed step (0 = all passed).
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include <algorithm>
+#include <pthread.h>
+#include <vector>
 #include <initializer_list>
 #include <signal.h>
 // libproc (no header in the iPhoneOS SDK; the functions are in libSystem)
 extern "C" int proc_listallpids(void *buffer, int buffersize);
 extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
+extern "C" int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
+// sys/proc_info.h's (not in the iPhoneOS SDK): PROC_PIDTASKINFO (task times in mach absolute units), PROC_PIDLISTTHREADS and
+// PROC_PIDTHREADINFO (thread times in ns).
+struct ProcTaskInfo {
+    uint64_t virtualSize, residentSize, totalUser, totalSystem, threadsUser, threadsSystem;
+    int32_t policy, faults, pageins, cowFaults, messagesSent, messagesReceived, syscallsMach, syscallsUnix, csw, threadnum, numrunning,
+        priority;
+};
+struct ProcThreadInfo {
+    uint64_t userTime, systemTime;
+    int32_t cpuUsage, policy, runState, flags, sleepTime, curpri, priority, maxpriority;
+    char name[64];
+};
+enum { kProcTaskInfo = 4, kProcThreadInfo = 5, kProcListThreads = 6 };
 #include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +115,112 @@ int main(int argc, char **argv) {
                 error = nil;
                 id<MTLFunction> f = [library newFunctionWithDescriptor:d error:&error];
                 printf("function %s: %s error %s\n", argv[3], f ? "made" : "nil", error ? error.localizedDescription.UTF8String : "-");
+            }
+            return 0;
+        }
+        if (argc > 3 && !strcmp(argv[1], "spin")) {
+            // spin THREADS SECONDS [QOS]: THREADS threads each run a dependent integer chain and report its rate per 100 ms slice (M
+            // iterations/s: min, median, max). On a big.LITTLE SoC the kernel schedules without knowing the core types, a thread's slices
+            // show which cores it ran on. QOS: ui (USER_INTERACTIVE, the default), default, utility, bg.
+            const int n = atoi(argv[2]);
+            const double seconds = atof(argv[3]);
+            const char *q = argc > 4 ? argv[4] : "ui";
+            const qos_class_t qos = !strcmp(q, "bg") ? QOS_CLASS_BACKGROUND : !strcmp(q, "utility") ? QOS_CLASS_UTILITY
+                                  : !strcmp(q, "default") ? QOS_CLASS_DEFAULT : QOS_CLASS_USER_INTERACTIVE;
+            struct Run {double seconds; qos_class_t qos; std::vector<double> rates; uint64_t sink;};
+            std::vector<Run> runs(n > 0 && n <= 64 ? n : 1, Run{seconds, qos, {}, 0});
+            std::vector<pthread_t> threads(runs.size());
+            for (size_t i = 0; i < runs.size(); ++i) {
+                pthread_attr_t attr;
+                pthread_attr_init(&attr);
+                pthread_attr_set_qos_class_np(&attr, qos, 0);
+                pthread_create(&threads[i], &attr, [](void *arg) -> void * {
+                    Run &r = *(Run *)arg;
+                    uint64_t x = 88172645463325252ull;
+                    const double end = nowMs() + r.seconds * 1000;
+                    while (nowMs() < end) {
+                        const double t = nowMs();
+                        uint64_t k = 0;
+                        while (nowMs() - t < 100) {
+                            for (int j = 0; j < 4096; ++j) {x ^= x << 13; x ^= x >> 7; x ^= x << 17;}
+                            k += 4096;
+                        }
+                        r.rates.push_back(k / (nowMs() - t) / 1000.0);
+                    }
+                    r.sink = x;
+                    return nullptr;
+                }, &runs[i]);
+                pthread_attr_destroy(&attr);
+            }
+            for (pthread_t t : threads) pthread_join(t, nullptr);
+            for (size_t i = 0; i < runs.size(); ++i) {
+                std::vector<double> v = runs[i].rates;
+                std::sort(v.begin(), v.end());
+                if (v.empty()) continue;
+                printf("thread %zu: %zu slices, M it/s min %.0f median %.0f max %.0f | slices:", i, v.size(), v.front(), v[v.size() / 2], v.back());
+                for (double rate : runs[i].rates) printf(" %.0f", rate);
+                printf("\n");
+            }
+            return 0;
+        }
+        if (argc > 2 && !strcmp(argv[1], "cpu")) {
+            // cpu SECONDS [NAME...]: each process's CPU time over the next SECONDS (user+system, ms and % of one core), the busiest first;
+            // for each NAME also its threads'. For finding which process limits a frame rate (run it during a swipe).
+            static mach_timebase_info_data_t base;
+            mach_timebase_info(&base);
+            struct Proc {int pid; char name[64]; uint64_t ns;};
+            auto taskNs = [&](int pid) -> uint64_t {
+                ProcTaskInfo ti = {};
+                if (proc_pidinfo(pid, kProcTaskInfo, 0, &ti, sizeof ti) != (int)sizeof ti) return 0;
+                return (ti.totalUser + ti.totalSystem) * base.numer / base.denom;
+            };
+            auto threads = [&](int pid, uint64_t *ids, char (*names)[64], uint64_t *ns, int max) -> int {
+                static uint64_t list[512];
+                const int bytes = proc_pidinfo(pid, kProcListThreads, 0, list, sizeof list);
+                int n = bytes > 0 ? bytes / (int)sizeof(uint64_t) : 0;
+                if (n > max) n = max;
+                int k = 0;
+                for (int i = 0; i < n; ++i) {
+                    ProcThreadInfo th = {};
+                    if (proc_pidinfo(pid, kProcThreadInfo, list[i], &th, sizeof th) != (int)sizeof th) continue;
+                    ids[k] = list[i]; memcpy(names[k], th.name, 64); names[k][63] = 0; ns[k] = th.userTime + th.systemTime; ++k;
+                }
+                return k;
+            };
+            static int pids[4096];
+            static Proc before[4096];
+            const int n = proc_listallpids(pids, sizeof pids);
+            for (int i = 0; i < n; ++i) {before[i].pid = pids[i]; proc_name(pids[i], before[i].name, 64); before[i].ns = taskNs(pids[i]);}
+            static uint64_t tid0[64][512], tns0[64][512]; static char tname[64][512][64]; static int tn[64]; static int tpid[64];
+            int named = 0;
+            for (int a = 3; a < argc && named < 64; ++a)
+                for (int i = 0; i < n && named < 64; ++i)
+                    if (!strcmp(before[i].name, argv[a])) {tpid[named] = before[i].pid; tn[named] = threads(before[i].pid, tid0[named], tname[named], tns0[named], 512); ++named;}
+            const double t1 = nowMs();
+            usleep((useconds_t)(atof(argv[2]) * 1e6));
+            const double ms = nowMs() - t1;
+            static Proc delta[4096];
+            int m = 0;
+            for (int i = 0; i < n; ++i) {
+                const uint64_t now = taskNs(before[i].pid);
+                if (now > before[i].ns) {delta[m] = before[i]; delta[m].ns = now - before[i].ns; ++m;}
+            }
+            std::sort(delta, delta + m, [](const Proc &a, const Proc &b) {return a.ns > b.ns;});
+            printf("cpu over %.0f ms (ms, %% of one core):\n", ms);
+            for (int i = 0; i < m && i < 25; ++i) printf("%8.1f %5.1f%%  %d %s\n", delta[i].ns / 1e6, delta[i].ns / 1e4 / ms, delta[i].pid, delta[i].name);
+            for (int p = 0; p < named; ++p) {
+                static uint64_t ids[512], ns[512]; static char names[512][64];
+                const int k = threads(tpid[p], ids, names, ns, 512);
+                struct T {uint64_t ns; const char *name; uint64_t id;};
+                static T rows[512]; int r = 0;
+                for (int i = 0; i < k; ++i) {
+                    uint64_t was = 0;
+                    for (int j = 0; j < tn[p]; ++j) if (tid0[p][j] == ids[i]) {was = tns0[p][j]; break;}
+                    if (ns[i] > was) rows[r++] = {ns[i] - was, names[i], ids[i]};
+                }
+                std::sort(rows, rows + r, [](const T &a, const T &b) {return a.ns > b.ns;});
+                printf("threads of %d:\n", tpid[p]);
+                for (int i = 0; i < r && i < 12; ++i) printf("%8.1f %5.1f%%  0x%llx %s\n", rows[i].ns / 1e6, rows[i].ns / 1e4 / ms, (unsigned long long)rows[i].id, rows[i].name);
             }
             return 0;
         }
