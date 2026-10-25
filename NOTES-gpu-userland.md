@@ -504,3 +504,13 @@ postponed by the user), and CPU per draw again now that gpu busy is below 90%.
   8-restart stress run on the default build was clean.
 
 Next: the presenter scale (3.6 ms, DPU scan-out: the user's decision), copy-backs of CA's frame surfaces (1.3 ms), the composite.
+
+### Per-draw GPU split after async encode (2026-10-25, passtrace TU_GPU_TRACEPOINT=+draw; Mesa log .cache/fajita-work/pt-r3f)
+
+15.2 ms GPU per presented frame. One draw dominates: fs=0e6c0aededb80ab0 (vs=bd2a8fc2a9bba6f7), 0.77 a frame, 3.47 ms median each,
+4.0 ms a frame (26%). Its fragment shader is 1079 instructions (2400 dwords): one `samb` of the main texture, `getsize`, and four
+`isam.base0.1d` texel-buffer fetches from t#3 blended with 8-bit integer weights (256 - frac) — a texture buffer (likely the 256x1
+RGBA16Float LUTs CoreAnimation makes, 283 creations in the texture log) read four times and interpolated per pixel, a full-screen
+backdrop/vibrancy draw. Everything else is small per draw (fs=42c7... 18 a frame, 1.1 ms; fs=745f... 11 a frame, 1.1 ms).
+Also measured: `M2V_ALIAS_PADDED_TARGETS=1` (render CA's frame surfaces in place) does nothing: their rows are 4512 bytes, not a
+multiple of 64, so Turnip makes no linear image there.
