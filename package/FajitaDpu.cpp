@@ -98,6 +98,7 @@ void *gVsyncContext;
 // the new buffer, so the old one is free, and `latched` is called (interrupt context).
 struct Flip {uint64_t phys; void (*latched)(void *); void *context; volatile bool pending;};
 Flip gFlip;
+volatile bool gTearTest;   // kcmd dpu tear-test owns the scan-out: other flips are refused
 uint64_t gScanned = 0;   // the buffer VIG0 reads (0 until the first flip: the firmware's)
 void dpuIrq(void *) {
     volatile uint32_t *r = gIrqRegs;
@@ -162,6 +163,61 @@ void teRun(void *arg, wait_result_t) {
     snprintf(gTeResult, sizeof gTeResult, "te %s: rd_ptr %u/2s before, %u/2s after%s | vsync %08x height %u init %u rd %u start %u en %u",
              on ? "on" : "off", b - a, d - c, reverted ? ", no rd_ptr within 200 ms: restored" : "", rd(r, kPp + 0x04), rd(r, kPp + 0x08),
              rd(r, kPp + 0x10), rd(r, kPp + 0x20), rd(r, kPp + 0x1c), rd(r, kPp + 0x00));
+    gBusy = false;
+    thread_terminate(current_thread());
+}
+
+// kcmd dpu tear-test [SECONDS] [single|flip]: a white bar 64 px wide moving 24 px a frame across black, the whole frame redrawn each time.
+// single: drawn straight into the buffer VIG0 reads (as the presenter did before flips: the bar shears where the drawing passes the scan);
+// flip: drawn into the other buffer of the carve-out, flipped to at the next frame boundary, the next frame drawn once that latched. For the
+// eye (or a camera): our screenshots read memory, not the panel. The presenter's flips are refused meanwhile.
+void flush(volatile uint32_t *r);
+char gTearResult[160] = "tear-test: not run";
+struct TearArgs {uint32_t seconds; bool flip;};
+TearArgs gTear;
+void tearRun(void *, wait_result_t) {
+    volatile uint32_t *r = regs();
+    IODeviceMemory *m = IODeviceMemory::withRange(kCarve, kCarveSize);
+    OSSharedPtr<IOMemoryMap> carve(m ? m->map(kIOMapAnywhere | kIOMapWriteCombineCache) : nullptr, OSNoRetain);
+    if (m) m->release();
+    const uint32_t size = r ? rd(r, kVig + 0x00) : 0, W = size & 0xffff, H = size >> 16, stride = r ? rd(r, kVig + 0x24) & 0xffff : 0;
+    const uint64_t original = r ? rd(r, kVig + 0x14) : 0;
+    if (!carve || !W || !H || stride < W * 4 || (uint64_t)stride * H > kTestOffset || !gIrqRegs) {
+        snprintf(gTearResult, sizeof gTearResult, "tear-test: setup failed (map %d %ux%u stride %u irq %d)", carve != nullptr, W, H, stride, gIrqRegs != nullptr);
+        gBusy = false; thread_terminate(current_thread()); return;
+    }
+    gTearTest = true;
+    while (gFlip.pending) IOSleep(1);
+    const uint64_t end = mach_absolute_time() + (uint64_t)gTear.seconds * 19200000ull;
+    uint32_t frames = 0, waits = 0, x = 0;
+    while (mach_absolute_time() < end) {
+        const uint64_t scanned = rd(r, kVig + 0x14);
+        const uint64_t target = !gTear.flip ? scanned : scanned == kCarve ? kCarve + kTestOffset : kCarve;
+        volatile uint8_t *base = reinterpret_cast<volatile uint8_t *>(carve->getVirtualAddress() + (target - kCarve));
+        for (uint32_t y = 0; y < H; ++y) {
+            volatile uint32_t *row = reinterpret_cast<volatile uint32_t *>(base + (size_t)y * stride);
+            for (uint32_t i = 0; i < W; ++i) row[i] = (i >= x && i < x + 64) ? 0xffffffffu : 0xff000000u;
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (gTear.flip) {
+            gFlip.phys = target; gFlip.latched = nullptr; gFlip.context = nullptr;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            gFlip.pending = true;
+            wr(r, kVig + 0x14, (uint32_t)target); flush(r);
+            for (unsigned k = 0; gFlip.pending && k < 100; ++k) {IOSleep(1); ++waits;}
+        }
+        x = (x + 24) % (W > 64 ? W - 64 : 1);
+        ++frames;
+    }
+    // Back to the buffer the presenter left on screen.
+    if (gTear.flip && rd(r, kVig + 0x14) != original) {
+        gFlip.phys = original; gFlip.latched = nullptr; gFlip.pending = true;
+        wr(r, kVig + 0x14, (uint32_t)original); flush(r);
+        for (unsigned k = 0; gFlip.pending && k < 100; ++k) IOSleep(1);
+    }
+    gTearTest = false;
+    snprintf(gTearResult, sizeof gTearResult, "tear-test %s: %u frames in %u s, %u ms waiting for latches", gTear.flip ? "flip" : "single", frames,
+             gTear.seconds, waits);
     gBusy = false;
     thread_terminate(current_thread());
 }
@@ -256,6 +312,19 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
         o.add("dpu: scale test %ux%u for %u s started\n", gArgs.w, gArgs.h, gArgs.seconds);
         return o.n;
     }
+    if (end - s >= 9 && !strncmp(s, "tear-test", 9)) {
+        s += 9;
+        if (gBusy) {o.add("dpu: busy\n"); return o.n;}
+        const uint32_t secs = parse(s, end);
+        while (s < end && *s == ' ') ++s;
+        gTear = {secs ? (secs > 60 ? 60 : secs) : 10, end - s >= 4 && !strncmp(s, "flip", 4)};
+        gBusy = true;
+        thread_t t = nullptr;
+        if (kernel_thread_start(tearRun, nullptr, &t) != KERN_SUCCESS) {gBusy = false; o.add("dpu: thread failed\n"); return o.n;}
+        thread_deallocate(t);
+        o.add("dpu: tear-test %s for %u s started\n", gTear.flip ? "flip" : "single", gTear.seconds);
+        return o.n;
+    }
     if (end - s >= 2 && !strncmp(s, "te", 2)) {
         s += 2; while (s < end && *s == ' ') ++s;
         const bool on = end - s >= 2 && !strncmp(s, "on", 2);
@@ -300,7 +369,7 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
         o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
               native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,
               native_legacy_hw_vsync[5]);
-    o.add("%s\n%s\n", gResult, gTeResult);
+    o.add("%s\n%s\n%s\n", gResult, gTeResult, gTearResult);
     return o.n;
 }
 }  // namespace
@@ -344,7 +413,7 @@ extern "C" void fajita_dpu_count_scanned_write(void) {fajita_dpu_flips[3] = faji
 // Show `phys` from the next frame on; `latched` (interrupt context) once the old buffer is no longer read. 0 on success.
 extern "C" int fajita_dpu_flip(uint64_t phys, void (*latched)(void *), void *context) {
     volatile uint32_t *r = gIrqRegs;
-    if (!r || gFlip.pending || (phys != kCarve && phys != kCarve + kTestOffset)) {fajita_dpu_flips[2] = fajita_dpu_flips[2] + 1; return -1;}
+    if (!r || gFlip.pending || gTearTest || (phys != kCarve && phys != kCarve + kTestOffset)) {fajita_dpu_flips[2] = fajita_dpu_flips[2] + 1; return -1;}
     gFlip.phys = phys; gFlip.latched = latched; gFlip.context = context;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     gFlip.pending = true;
@@ -360,5 +429,5 @@ extern "C" void fajita_dpu_poll(void) {
     if (done || !IOService::getPlatform()) return;
     done = true;
     if (fajita_usbdbg_register_kcmd)
-        fajita_usbdbg_register_kcmd("dpu", kcmdDpu, "DPU scan-out path: dpu | dpu q | dpu r OFF [N] | dpu scale-test [W H SECONDS] | dpu te on|off");
+        fajita_usbdbg_register_kcmd("dpu", kcmdDpu, "DPU scan-out path: dpu | dpu q | dpu r OFF [N] | dpu scale-test [W H SECONDS] | dpu te on|off | dpu tear-test [S] [single|flip]");
 }
