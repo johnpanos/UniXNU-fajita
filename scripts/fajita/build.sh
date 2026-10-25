@@ -55,10 +55,21 @@ if [ "$(git -C "$STACK" rev-parse HEAD)" != "$(git -C "$UNIXNU_REPO" rev-parse "
   git -C "$STACK" checkout -q --detach "$REF"
 fi
 # Submodule pins that are not upstream yet live on the johnpanos forks (branch fajita-a630): fetch any missing pin from there.
+# A submodule checked out at another commit than its pin is built as it is, with a warning, never reset: `submodule update` used to
+# revert a fresh checkout before its pin was committed, so a kernel built without the change (NativeAdreno HostDirty, 2026-10-25).
 subs() {
-  local top=$1
-  git -C "$top" submodule update --init -q 2>/dev/null && return 0
-  git -C "$top" config -f .gitmodules --get-regexp '\.path$' | while read -r _ p; do
+  local top=$1 p c h paths=()
+  while read -r _ p; do
+    c=$(git -C "$top" ls-tree HEAD "$p" | awk '{print $3}')
+    h=$(git -C "$top/$p" rev-parse -q --verify HEAD 2>/dev/null) || h=
+    if [ -e "$top/$p/.git" ] && [ -n "$h" ] && [ "$h" != "$c" ]; then
+      say "!! $(basename "$top")/$p is at ${h:0:9}, its pin is ${c:0:9}: building the checkout (commit the pin)"; continue
+    fi
+    paths+=("$p")
+  done < <(git -C "$top" config -f .gitmodules --get-regexp '\.path$')
+  [ ${#paths[@]} -gt 0 ] || return 0
+  git -C "$top" submodule update --init -q -- "${paths[@]}" 2>/dev/null && return 0
+  for p in "${paths[@]}"; do
     c=$(git -C "$top" ls-tree HEAD "$p" | awk '{print $3}')
     git -C "$top/$p" cat-file -e "$c^{commit}" 2>/dev/null && continue
     git -C "$top" submodule init -q -- "$p"; git -C "$top" submodule update -q -- "$p" 2>/dev/null && continue
@@ -68,7 +79,7 @@ subs() {
     say "fetching $p $c from johnpanos/$n"
     git -C "$top/$p" fetch -q "git@github.com:johnpanos/$n.git" "$c"
   done
-  git -C "$top" submodule update --init -q
+  git -C "$top" submodule update --init -q -- "${paths[@]}"
 }
 subs "$STACK"; subs "$BOARD"
 say "board $(git -C "$BOARD" rev-parse --short HEAD) ($(git -C "$BOARD" rev-parse --abbrev-ref HEAD)), stack $(git -C "$STACK" rev-parse --short HEAD)"
