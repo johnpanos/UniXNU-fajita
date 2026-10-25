@@ -1,7 +1,8 @@
 #!/bin/bash
 # bg.sh: run long jobs (builds, fps.sh, session start, leakwatch, pulls) without ever blocking a tool call on them.
-#   bg.sh start NAME [--max S] CMD...   start CMD in the background (output in $W/jobs/NAME.log), return at once; killed after
-#                                       --max seconds (default 1800). NAME must be new (or finished).
+#   bg.sh start NAME [--max S] [--quiet] CMD...   start CMD in the background (output in $W/jobs/NAME.log), return at once; killed after
+#                                       --max seconds (default 1800). NAME must be new (or finished). --quiet: a job that is silent by
+#                                       design (a phone session held open) is never flagged STALLED.
 #   bg.sh status [NAME]                 one line per job: running/done/killed/STALLED, elapsed, exit code, output age; with NAME also
 #                                       its last 8 output lines. STALLED = running but no new output for BG_STALL s (default 180).
 #   bg.sh wait NAME [S]                 wait up to S seconds (default 60, capped at 90) for NAME to finish, print its last 20 lines, then
@@ -17,16 +18,17 @@ state() {   # state NAME -> running|done|killed|STALLED ...
   if [ -f "$J/$n.rc" ]; then rc=$(cat "$J/$n.rc"); case $rc in killed|timeout) echo "$rc";; *) echo "done rc=$rc";; esac; return; fi
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     local age=$(( $(now) - $(stat -c %Y "$J/$n.log") ))
-    [ $age -gt "$STALL" ] && echo "STALLED (no output ${age}s)" || echo running
+    if [ -f "$J/$n.quiet" ] || [ $age -le "$STALL" ]; then echo running; else echo "STALLED (no output ${age}s)"; fi
   else echo "gone (no rc: killed from outside?)"; fi
 }
 line() { local n=$1 t0; t0=$(cat "$J/$n.t0" 2>/dev/null || now); printf '%-24s %-28s %5ss  output %ss ago\n' "$n" "$(state "$n")" $(( $(now) - t0 )) $(( $(now) - $(stat -c %Y "$J/$n.log" 2>/dev/null || now) )); }
 case $1 in
 start)
-  n=$2; shift 2; max=1800; [ "$1" = --max ] && { max=$2; shift 2; }
+  n=$2; shift 2; max=1800; quiet=0
+  while :; do case $1 in --max) max=$2; shift 2;; --quiet) quiet=1; shift;; *) break;; esac; done
   [ -n "$n" ] && [ $# -gt 0 ] || { sed -n 2,11p "$0"; exit 1; }
   case $(state "$n") in running*|STALLED*) echo "$n is still running (bg.sh status $n)"; exit 1;; esac
-  rm -f "$J/$n.rc" "$J/$n.pid"; : > "$J/$n.log"; now > "$J/$n.t0"
+  rm -f "$J/$n.rc" "$J/$n.pid" "$J/$n.quiet"; : > "$J/$n.log"; now > "$J/$n.t0"; [ $quiet = 1 ] && : > "$J/$n.quiet"
   # the job runs in its own process group (its pid = the group id), so kill and --max take its whole tree; the wrapper outlives it
   # and records the exit code, or "timeout"
   bash -c '
