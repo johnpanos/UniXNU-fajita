@@ -63,7 +63,11 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 **One tree.**
 - Work on `ios16-port`, or a short-lived branch of it.
 - Merge the latest `origin/ios16-port` before every build. Push when a change works; unpushed work is invisible to everyone else.
-- Use real git worktrees (`git worktree add`), never copied directories. A copy shares or loses the gitdir and its submodule state.
+- Use real git worktrees (`git worktree add`), never copied directories.
+- Two agents never edit the same worktree at the same time. The second agent works in its own worktree on a short-lived branch
+  (`git worktree add ../UniXNU-fajita-<topic> -b <topic> origin/ios16-port`), and merges into ios16-port when a piece is done.
+  In a shared worktree, one agent's commit of a shared file (board.toml) sweeps up the other's half-finished edit to it: the
+  Wi-Fi archive line once landed in a GPU commit before its script existed, and HEAD stopped building. A copy shares or loses the gitdir and its submodule state.
 - Commit explicit paths (`git add PATH`), never `git commit -a`. In trees with submodules, `-a` silently reverts submodule pins
   (NativeAdreno, NativeMetal, metal2vulkan).
 - Bump a submodule pin in the same commit as the code that needs it.
