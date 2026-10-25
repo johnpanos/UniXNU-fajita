@@ -572,3 +572,20 @@ at 16.7 and 33.3 ms).
 - Swipe asymmetry (left 37 vs right 52 in swipe-rate.py) is mostly the window: in-motion frames are 20-22 ms both ways.
 - Tools: `ngpu-metal cpu SECONDS [NAME...]` (per-process and per-thread CPU over a window) and `ngpu-metal spin`. Built on Linux
   through scripts/gpu-local's xcrun stand-in and pushed to /private/var/ngpu/sbin/ngpu-metal (run that path directly).
+
+### The fps.sh window and motion fps (2026-10-25)
+
+swipe-rate.py counts frames over the swipe plus SETTLE (1 s) after its lift, and the render server presents only what changes. On a
+clean frame trace of one left:60 swipe, swaps come every 16-17 ms from touch to the animation's end at +1.03 s (three misses: 41,
+33 and 26 ms), then only the idle Clock icon's 10 Hz frames. swipe-rate read 37.2 fps; a perfect 60 Hz animation would read about
+35-38 there. swipe-rate.py and fps.sh now also print **motion fps**: frames over the longest stretch of submissions under 50 ms
+apart.
+
+**fps.sh x3 (default build): home 44.5 / 45.0 / 38.6 window, motion 55.1 / 54.7 / 46.0; App Library 34.1 / 34.9 / 32.9 window,
+motion 51.8 / 54.3 / 53.6.**
+
+- Clean frame trace (no pass trace: TU_GPU_TRACEPOINT=+draw serializes draws and showed 2 ms GPU gaps that a clean trace does not
+  have, 0.03 ms): CA GPU 9.7 ms median (p90 14.1), worker commit-to-submitted 10.0 ms (p90 15.1), presenter 3.6 ms. Busy CA frame
+  period median 17.4 ms.
+- 7% of busy frames are heavy (10 passes, ~160 draws, 26.8 ms GPU) and miss vsync. Right swipes keep rendering about 2.2 s at ~53.
+- GMEM again (`TU_DEBUG=nocb`, and `prefer_gmem`): 45.0 / 44.5 vs sysmem 45.1, no change.
