@@ -280,3 +280,40 @@ Findings (20H392 journal, 196 pipelines, 147 fragment shaders):
   computing both the unorm8 and the half rule and selecting by a rule word: +70-76 instructions a fragment. A sampled copy (wallpaper)
   was 85 instructions for one sample; a 27-tap blur 221. metal2vulkan `ColorWritePolicy::Device` (now the default, `Exact` opt-in):
   copy 85 -> 11, blur27 221 -> 146, blur15 179 -> 104 (24 -> 19 full registers, 8 -> 10 waves), weighted 31850 -> 20190 (-37%).
+
+### Shader-perf handoff (2026-10-24)
+
+Landed on johnpanos/metal2vulkan `fajita-a630` (fast-forwarded; `shader-perf` is the same commits; no wip branch):
+- `77fb5b2c` pipeline-census (A630 host census, `scripts/pipeline-census`, `journal_manifest.py --xr-as-f16`).
+- `fc4e10e9` `ColorWritePolicy::Device` default: no in-shader rounding of unblended unorm/half color writes (-70..76 instr a
+  fragment). 147 journal states (XR as RGBA16F): 31850 -> 20190 instructions weighted by creations; wallpaper copy 85 -> 11.
+- `b91baaa4` `ExtendedRangePolicy::Device` default: XR (BGRA10_XR...) decode/encode/half roundings in float arithmetic, note
+  `DeviceExtendedRange`; `f372253f` the XR blend model's sums in f32 too. XR-kept states (161): 68072 -> 25909; the 11 heaviest
+  13220 -> 2611 (source-over fill into BGRA10_XR 977 -> 158, 8 -> 6 full regs, 12 -> 16 waves). Exact forms: `DevicePolicy::exact_answers()`.
+- Suite: no worse than base 5c4752a4 (pre-existing: golden_hashes table stale, air_input goldens, bind_shape_of,
+  constant_blob_footprint, api_surface table/doc, engine_matmul2d order-dependent; runtime clippy items-after-test-module).
+- Not yet measured on the phone (pin `f372253f` in the stack's gpu-metal-vulkan-inputs.json).
+
+Running the census (`tools/gpu/shader-stats`):
+```sh
+tools/gpu/shader-stats build          # once: makes ~/src/UniXNU-shaderstats-stack (worktree of ~/src/UniXNU at ios16/gpu-plugin.ref,
+                                      # submodules NativeAdreno NativeMetal ArmSmmu4K AdrenoPM4 AdrenoFirmware), host Turnip a630 + libhostiokit
+cp <QuartzCore.metallib> <RenderBox.metallib> .cache/fajita-work/shader-stats/libs/   # 20H392's (a copy sits in ~/src/metal2vulkan-fajita/.cache/fajita-20H392)
+tools/gpu/shader-stats run NAME [--exact-xr] [--only r1,r2]   # M2V defaults to ~/src/metal2vulkan-fajita (its translator is measured)
+tools/gpu/shader-stats top NAME [--format 80]; tools/gpu/shader-stats compare A B; tools/gpu/shader-stats disasm NAME rID
+```
+Runs kept in .cache/fajita-work/shader-stats: `before` (5c4752a4), `after3` (f372253f), `base` (XR kept, 5c4752a4), `xr-after3`.
+
+Findings for the next levers (A630 rules in NOTES-a630.md):
+- Remaining XR fill (158 instr): fetch + unpack ~25, NaN/clamp of source and tile ~25, blend ~40, encode + pack ~45; a hand-written
+  equivalent is ~35. Next: drop the NaN selects under the device policy (NanMinMaxPolicy::Native already allows the device's NaN),
+  and fold the tile clamp into the decode (codes 0..1022 already bound the value).
+- Half: 0 half registers everywhere. The translator holds `half` widened in f32 by design (lower/arith/legal.rs), and CA's `_lph`
+  shaders do their math in float in AIR (NIR shows f2f16 only at outputs), so a whole-chain RelaxedPrecision would find little
+  half ALU; forcing the existing F16 strategy gave +2.1% instructions, no register change. Re-check `x2` (double_threadsize) in
+  `top` after any RelaxedPrecision prototype; ir3 wants >20% half ALU.
+- Texture prefetch: none of the 147 shaders gets one. 50 single-sample shaders (fixed_frag Timg/Tcim, the icon and wallpaper draws)
+  are otherwise eligible (coords straight from the varying, constant bindless handles) but sample with a bias operand (`txb`) whose
+  value comes from CA's uniform buffer, so it is Metal's own bias, not the translator's; 77 `txl lod 0` (explicit level 0) samples
+  could become implicit-LOD only for textures with one level (a variant key on the bound texture), not built.
+- Occupancy: fixed_frag Bvcm variants sit at 19 full regs (10 waves); 16 regs would give 12. Blurs are 24 regs (8 waves) but cheap.

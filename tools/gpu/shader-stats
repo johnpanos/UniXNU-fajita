@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """shader-stats: the render server's shaders as the Adreno 630 compiles them, on the Linux host, no phone.
 
-    tools/gpu/shader-stats build                                   # once: the host Turnip (a630) in $FAJITA_SHADER_STACK
+    tools/gpu/shader-stats build                                   # once: worktree + host Turnip (a630) in $FAJITA_SHADER_STACK
     tools/gpu/shader-stats run NAME [--journal LOG] [--only r1,r2] [--exact-xr]
     tools/gpu/shader-stats top NAME [-n 25] [--stage FRAG] [--format 80]
     tools/gpu/shader-stats compare BASE NEW [-n 25] [--stage FRAG]
@@ -16,13 +16,17 @@ ir3's numbers are the phone's for the same translator, Mesa pin and constants. O
 (census.tsv, census.jsonl, logs/ID.log with the NIR and the disassembly).
 
 `top`: the heaviest shaders of one stage: instructions, ALU (cat2+cat3), texture (cat5), cat6 (memory), nops,
-(ss)/(sy) stall cycles (sstall, systall), half/full registers (registers bound waves: max_waves of 16), `count` = creations in the journal (a proxy for use), the label.
+(ss)/(sy) stall cycles (sstall, systall), half/full registers (registers bound waves: max_waves of 16), x2 = ir3 double
+threadsize (wave128), `count` = creations in the journal (a proxy for use), the label.
 `compare`: two runs by pipeline id. Turnip's in-memory pipeline cache is off (VK_ENABLE_PIPELINE_CACHE=false), so every
 pipeline compiles and has its rows, and two runs over one journal compare row for row. `disasm`: one shader's ir3 disassembly and statistics.
 
-Environment: M2V (required for run: a metal2vulkan checkout that carries scripts/pipeline-census, johnpanos/metal2vulkan shader-perf),
-FAJITA_SHADER_STACK (a worktree of the UniXNU stack with the Linux host Turnip: scripts/build-turnip-linux-host.py and
-scripts/check-turnip-darwin-linux-host.py --gpu a630; default $FAJITA_STACK or ~/src/UniXNU-fajita-stack), SHADER_LIBS (the
+Environment: M2V (a metal2vulkan checkout that carries scripts/pipeline-census: johnpanos/metal2vulkan fajita-a630; default
+~/src/metal2vulkan-fajita; the census measures that checkout's translator, built in its target/), FAJITA_SHADER_STACK (default
+~/src/UniXNU-shaderstats-stack: `build` makes it a detached worktree of UNIXNU_REPO (default ~/src/UniXNU) at ios16/gpu-plugin.ref
+with the submodules the host build needs, referencing FAJITA_STACK's (~/src/UniXNU-fajita-stack) objects, then runs its
+scripts/build-turnip-linux-host.py (fetches the pinned Mesa) and scripts/check-turnip-darwin-linux-host.py --gpu a630; never the
+GPU build's own stack), SHADER_LIBS (the
 directory holding QuartzCore.metallib and RenderBox.metallib of the build the journal came from, 20H392; default
 .cache/fajita-work/shader-stats/libs; Apple's, never committed).
 
@@ -38,8 +42,11 @@ import sys
 BOARD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WORK = os.environ.get('FAJITA_WORK', os.path.join(BOARD, '.cache/fajita-work'))
 OUT = os.path.join(WORK, 'shader-stats')
-STACK = os.environ.get('FAJITA_SHADER_STACK', os.environ.get('FAJITA_STACK', os.path.expanduser('~/src/UniXNU-fajita-stack')))
-M2V = os.environ.get('M2V', '')
+STACK = os.environ.get('FAJITA_SHADER_STACK', os.path.expanduser('~/src/UniXNU-shaderstats-stack'))
+GPU_STACK = os.environ.get('FAJITA_STACK', os.path.expanduser('~/src/UniXNU-fajita-stack'))
+UNIXNU_REPO = os.environ.get('UNIXNU_REPO', os.path.expanduser('~/src/UniXNU'))
+M2V = os.environ.get('M2V', os.path.expanduser('~/src/metal2vulkan-fajita'))
+SUBMODULES = ['drivers/NativeAdreno', 'drivers/NativeMetal', 'kits/ArmSmmu4K', 'kits/AdrenoPM4', 'kits/AdrenoFirmware']
 LIBS = os.environ.get('SHADER_LIBS', os.path.join(OUT, 'libs'))
 
 
@@ -68,16 +75,25 @@ def num(r, k):
 def line(r, p):
     alu = num(r, 'cat2') + num(r, 'cat3')
     fmt = (p.get('colors') or [{}])[0] or {}
-    return '%-5s %5d %5d %4d %4d %4d %4d %4d %3d/%-3d %3s %4s %4s  %-26s %s' % (
+    return '%-5s %5d %5d %4d %4d %4d %4d %4d %3d/%-3d %3s %2s %4s %4s  %-26s %s' % (
         r['id'], num(r, 'instr'), alu, num(r, 'cat5'), num(r, 'cat6'), num(r, 'nops'), num(r, 'sstall'), num(r, 'systall'),
-        num(r, 'half'), num(r, 'full'), r.get('max_waves') or '-', p.get('count', '-'), fmt.get('format', '-'),
+        num(r, 'half'), num(r, 'full'), r.get('max_waves') or '-', r.get('double_threadsize') or '-', p.get('count', '-'),
+        fmt.get('format', '-'),
         r.get('fragment' if r['stage'] == 'FRAG' else 'vertex', '')[:26], r.get('label', '').replace('com.apple.coreanimation.draw.', ''))
 
 
-HEAD = 'id    instr   alu  tex  mem nops sstl sytl half/full wav cnt  fmt  function                   label'
+HEAD = 'id    instr   alu  tex  mem nops sstl sytl half/full wav x2 cnt  fmt  function                   label'
 
 
 def cmd_build(a):
+    if not os.path.exists(os.path.join(STACK, '.git')):
+        ref = open(os.path.join(BOARD, 'ios16/gpu-plugin.ref')).read().split()[0]
+        subprocess.run(['git', '-C', UNIXNU_REPO, 'worktree', 'add', '--detach', STACK, ref], check=True)
+    for m in SUBMODULES:
+        cmd = ['git', '-C', STACK, 'submodule', 'update', '--init']
+        if os.path.exists(os.path.join(GPU_STACK, m, '.git')):
+            cmd += ['--reference', os.path.join(GPU_STACK, m)]
+        subprocess.run(cmd + [m], check=True)
     for script, extra in (('scripts/build-turnip-linux-host.py', []), ('scripts/check-turnip-darwin-linux-host.py', ['--gpu', 'a630'])):
         if subprocess.run([sys.executable, os.path.join(STACK, script)] + extra, cwd=STACK).returncode:
             sys.exit('shader-stats: %s failed' % script)
