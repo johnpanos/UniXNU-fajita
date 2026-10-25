@@ -22,8 +22,10 @@ $H kcmd touch swipe left >/dev/null; sleep 2; shot applib
 $H kcmd touch swipe xy 540 1900 540 900 60 >/dev/null; sleep 2; shot applib-u1
 $H kcmd touch swipe xy 540 900 540 1900 60 >/dev/null; sleep 2; shot applib-d1
 # Lock and unlock; the lock screen's clock again 61 s later (CPU-drawn content that changes: a missed update shows the old minute).
-$H kcmd key power >/dev/null; sleep 2; $H kcmd key power >/dev/null; sleep 2; shot lock
-if [ "${MINUTE:-1}" = 1 ]; then for i in 1 2 3 4 5 6; do sleep 10; T=8 $H kcmd touch tap 270 1900 >/dev/null 2>&1; done; sleep 1; shot lock-61s; fi
+# kcmd key power has hung the hub call (no answer in 10 s, 2026-10-25): bounded, and the lock steps skipped when it does not answer.
+if T=8 timeout 12 $H kcmd key power >/dev/null 2>&1; then sleep 2; T=8 timeout 12 $H kcmd key power >/dev/null 2>&1; sleep 2; shot lock; locked=1
+else echo "$N: !! kcmd key power did not answer; lock steps skipped"; locked=0; fi
+if [ "${MINUTE:-1}" = 1 ] && [ $locked = 1 ]; then for i in 1 2 3 4 5 6; do sleep 10; T=8 $H kcmd touch tap 270 1900 >/dev/null 2>&1; done; sleep 1; shot lock-61s; fi
 $H kcmd touch swipe up >/dev/null; sleep 3; shot unlocked
 # Apps from page 1: Notes (row 2, column 1) and Calendar (row 1, column 2) on the stock layout, as half-resolution 80x80 templates.
 for app in notes:41,515 calendar:166,378 clock:292,515; do
