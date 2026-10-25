@@ -25,6 +25,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
+#include <xpc/xpc.h>
 #include <sys/wait.h>
 
 extern char **environ;
@@ -333,8 +335,57 @@ static void builtin(char *line)
   }
 }
 
+// launchd runs this agent as the com.apple.wifid job, so all of that job's Mach services (CoreWiFi's XPC endpoints) point here. Left
+// unclaimed, a client's synchronous call never returns: iOS's first-boot data migration hung in WiFiDataMigrator's CoreWiFi call
+// (datamigrator blocked on com.apple.private.corewifi-xpc, 2026-10-24), and Settings' Wi-Fi pane would hang the same way. Check them
+// all in on a queue of their own (the debug channel never waits on it) and cancel every peer at once, so each client gets
+// XPC_ERROR_CONNECTION_INVALID immediately, as on a device without a Wi-Fi daemon. The first refusal per service is logged, with the
+// caller's pid, to /private/var/ngpu/fjdbg-wifi-refused.log (not to the channel, where it could cut into a transfer).
+// The SDK marks these calls unavailable on iOS; launchd jobs use it all the same.
+extern xpc_connection_t fjdbg_create_mach_service(const char *name, dispatch_queue_t q, uint64_t flags)
+    __asm__("_xpc_connection_create_mach_service");
+extern pid_t fjdbg_connection_pid(xpc_connection_t c) __asm__("_xpc_connection_get_pid");
+#define FJDBG_REFUSED_LOG "/private/var/ngpu/fjdbg-wifi-refused.log"
+static const char *const kWifiServices[] = {
+  "com.apple.private.corewifi-xpc", "com.apple.private.corewifi.internal-xpc", "com.apple.private.corewifi.readonly-xpc",
+  "com.apple.wifi-xpc", "com.apple.wifid.store.cache", "com.apple.wifid.watchdog",
+  "com.apple.usernotifications.delegate.com.apple.wifid.usernotification"};
+static int gWifiLogged[sizeof kWifiServices / sizeof kWifiServices[0]];
+
+static void refuseWifiServices(void)
+{
+  dispatch_queue_t q = dispatch_queue_create("fjdbg.wifi-refuse", DISPATCH_QUEUE_SERIAL);
+  for (size_t i = 0; i < sizeof kWifiServices / sizeof kWifiServices[0]; i++) {
+    xpc_connection_t listener = fjdbg_create_mach_service(kWifiServices[i], q, XPC_CONNECTION_MACH_SERVICE_LISTENER);
+    if (!listener)
+      continue;
+    xpc_connection_set_event_handler(listener, ^(xpc_object_t peer) {
+      if (xpc_get_type(peer) != XPC_TYPE_CONNECTION)
+        return;
+      xpc_connection_t c = (xpc_connection_t)peer;
+      if (!gWifiLogged[i]) {   // the handler runs on the serial queue: no lock needed
+        gWifiLogged[i] = 1;
+        int fd = open(FJDBG_REFUSED_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+          char msg[256];
+          int n = snprintf(msg, sizeof msg, "%ld refused %s (first caller pid %d)\n", (long)time(NULL), kWifiServices[i],
+                           (int)fjdbg_connection_pid(c));
+          if (n > 0)
+            (void)!write(fd, msg, (size_t)n < sizeof msg ? (size_t)n : sizeof msg - 1);
+          close(fd);
+        }
+      }
+      xpc_connection_set_event_handler(c, ^(xpc_object_t event) { (void)event; });
+      xpc_connection_activate(c);
+      xpc_connection_cancel(c);
+    });
+    xpc_connection_activate(listener);
+  }
+}
+
 int main(void)
 {
+  refuseWifiServices();
   for (int tries = 0; gDev < 0 && tries < 600; tries++) {
     gDev = open(FJDBG_DEV, O_RDWR);
     if (gDev < 0)
