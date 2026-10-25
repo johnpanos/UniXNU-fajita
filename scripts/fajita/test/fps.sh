@@ -2,15 +2,20 @@
 # fps.sh: the two standard rates, reported side by side:
 #   home   4 plain swipes and 4 60-frame swipes, page 1 <-> page 2 (starts from home page 1, home-page1.sh)
 #   applib 4 60-frame scrolls of the App Library's blurred list (up/down drags; reached by swiping left from page 1)
+# Each rate is frames over swipe-rate.py's window (the swipe and SETTLE s after its lift, idle time included: the render server presents
+# only what changes, so a perfect 60 Hz animation reads well under 60 there); "motion" is the rate over the stretch where frames come
+# under 50 ms apart (swipe-rate.py), the frame rate while something moves.
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; mkdir -p "$W"; G=$W; H=$TD/hc
 mean() { python3 -I -c "
 import sys,re
-p=[];s=[]
+p=[];s=[];mo=[]
 for l in open('$1'):
     m=re.match(r'\s*(\S+): \d+ frames in [\d.]+ s = ([\d.]+) fps',l)
     if m: (s if ':' in m.group(1) else p).append(float(m.group(2)))
+    m=re.search(r'\| motion ([\d.]+) fps',l)
+    if m: mo.append(float(m.group(1)))
 f=lambda v: '%.1f (n=%d)'%(sum(v)/len(v),len(v)) if v else 'n/a'
-print('$2', f(p), '| 60-frame', f(s))"; }
+print('$2', f(p), '| 60-frame', f(s), '| motion %.1f'%(sum(mo)/len(mo)) if mo else '')"; }
 # A phase whose swipes lost the screen (a swipe with under 5 frames: a locked screen, the wrong page, a lost touch) is run again once,
 # and reported INVALID if it fails again, so a navigation slip never reads as a frame rate.
 valid() { [ -s "$1" ] && ! grep -q 'not queued\|App Library not reached' "$1" && python3 -I -c "

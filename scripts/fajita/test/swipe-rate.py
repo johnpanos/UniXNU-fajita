@@ -86,7 +86,19 @@ def one(spec):
     frames = b['done'] - a0['done']
     sub = b['n'] - a0['n']
     dn = max(sub, 1)
-    res = dict(spec=spec, win=win, frames=frames, fps=frames / win if win else 0, sub=sub, missing=sub - len(ks),
+    # Motion fps: the window also holds the time after the animation ends, when the render server presents only what changes (the
+    # home screen's idle clock, 10 Hz), so frames / window understates the rate while something moves. The motion run is the longest
+    # stretch of submissions under 50 ms apart; its frames are its submissions over the window's submissions per frame.
+    run, best, first = 0.0, (0.0, 0), 0
+    for i, g in enumerate(gaps):
+        if g < 50:
+            run += g
+            if run > best[0]: best = (run, i + 1 - first)
+        else:
+            run, first = 0.0, i + 1
+    per = sub / frames if frames else 0
+    motion = (best[1] / per) / (best[0] / 1000) if per and best[0] > 0 else 0
+    res = dict(spec=spec, win=win, frames=frames, fps=frames / win if win else 0, motion=motion, motion_s=best[0] / 1000, sub=sub, missing=sub - len(ks),
                tot_avg=st.mean(tot) / 1000 if tot else 0, tot_max=max(tot) / 1000 if tot else 0,
                pub_avg=st.mean(pub) / 1000 if pub else 0, imp_kib=(b['imp'] - a0['imp']) / dn / 1024,
                own_kib=(b['own'] - a0['own']) / dn / 1024, unc_kib=(b['unc'] - a0['unc']) / dn / 1024,
@@ -94,7 +106,7 @@ def one(spec):
                retire=(b['retire'] - a0['retire']) / dn / 1000, acq=b['acq'] - a0['acq'], acqskip=b['acqskip'] - a0['acqskip'],
                done_med=st.median(dones) if dones else 0, done_max=max(dones) if dones else 0, acq_avg=st.mean(acqs) if acqs else 0,
                svc_med=st.median(svc) if svc else 0, busy=sum(svc) / 1000 / win * 100 if win else 0)
-    print('{spec:>8}: {frames} frames in {win:.2f} s = {fps:.1f} fps | {sub} submits (ring miss {missing}) total avg {tot_avg:.1f} '
+    print('{spec:>8}: {frames} frames in {win:.2f} s = {fps:.1f} fps | motion {motion:.1f} fps over {motion_s:.2f} s | {sub} submits (ring miss {missing}) total avg {tot_avg:.1f} '
           'max {tot_max:.1f} ms publish avg {pub_avg:.1f} ms | per submit imp {imp_kib:.0f} own {own_kib:.0f} unc-skip {unc_kib:.0f} KiB'
           ' | submit gap med {gap_med:.1f} max {gap_max:.1f} ms | retire {retire:.1f} ms acquires {acq} skipped {acqskip} avg {acq_avg:.1f} ms | complete after med {done_med:.1f} max {done_max:.1f} ms | gpu service med {svc_med:.1f} ms busy {busy:.0f}%'.format(**res), flush=True)
     return res
@@ -104,8 +116,8 @@ def main():
     specs = sys.argv[1:] or ['left', 'right', 'left', 'right', 'up']
     rs = [r for r in (one(s) for s in specs) if r]
     if rs:
-        print('MEAN: {:.1f} fps, submit {:.1f} ms, publish {:.1f} ms, gap med {:.1f} ms'.format(
-            st.mean(r['fps'] for r in rs), st.mean(r['tot_avg'] for r in rs), st.mean(r['pub_avg'] for r in rs),
+        print('MEAN: {:.1f} fps (motion {:.1f}), submit {:.1f} ms, publish {:.1f} ms, gap med {:.1f} ms'.format(
+            st.mean(r['fps'] for r in rs), st.mean(r['motion'] for r in rs), st.mean(r['tot_avg'] for r in rs), st.mean(r['pub_avg'] for r in rs),
             st.mean(r['gap_med'] for r in rs)))
 
 
