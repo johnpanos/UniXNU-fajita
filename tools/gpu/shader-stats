@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""shader-stats: the render server's shaders as the Adreno 630 compiles them, on the Linux host, no phone.
+
+    tools/gpu/shader-stats build                                   # once: the host Turnip (a630) in $FAJITA_SHADER_STACK
+    tools/gpu/shader-stats run NAME [--journal LOG] [--only r1,r2] [--exact-xr]
+    tools/gpu/shader-stats top NAME [-n 25] [--stage FRAG] [--format 80]
+    tools/gpu/shader-stats compare BASE NEW [-n 25] [--stage FRAG]
+    tools/gpu/shader-stats disasm NAME ID [--stage FRAG]
+
+`run` turns the frontend's pipeline journal (pipelines.log, default .cache/fajita-work/pipelines.log: its R and S lines name every
+render pipeline backboardd made, with its function constants and attachments) into a manifest (metal2vulkan
+scripts/pipeline-census/journal_manifest.py, the extended-range formats as RGBA16Float as the frontend maps them unless --exact-xr),
+then makes every pipeline through metal2vulkan's runtime on Turnip for the A630 over the NativeAdreno host kernel stack
+(pipeline-census, scripts/pipeline-census/a630-host: the phone's TU_DEBUG=sysmem,nocb, IR3_SHADER_DEBUG=disasm). Nothing executes;
+ir3's numbers are the phone's for the same translator, Mesa pin and constants. Output: .cache/fajita-work/shader-stats/NAME/
+(census.tsv, census.jsonl, logs/ID.log with the NIR and the disassembly).
+
+`top`: the heaviest shaders of one stage: instructions, ALU (cat2+cat3), texture (cat5), cat6 (memory), nops,
+(ss)/(sy) stall cycles (sstall, systall), half/full registers (registers bound waves: max_waves of 16), `count` = creations in the journal (a proxy for use), the label.
+`compare`: two runs by pipeline id. A pipeline whose shader is identical to an earlier one's has no row of its own (the driver
+reuses the compiled shader and prints nothing). `disasm`: one shader's ir3 disassembly and statistics.
+
+Environment: M2V (required for run: a metal2vulkan checkout that carries scripts/pipeline-census, johnpanos/metal2vulkan shader-perf),
+FAJITA_SHADER_STACK (a worktree of the UniXNU stack with the Linux host Turnip: scripts/build-turnip-linux-host.py and
+scripts/check-turnip-darwin-linux-host.py --gpu a630; default $FAJITA_STACK or ~/src/UniXNU-fajita-stack), SHADER_LIBS (the
+directory holding QuartzCore.metallib and RenderBox.metallib of the build the journal came from, 20H392; default
+.cache/fajita-work/shader-stats/libs; Apple's, never committed).
+
+GUEST DATA: the journal, the metallibs and every output are Apple's shaders: they stay in .cache/."""
+import argparse
+import csv
+import json
+import os
+import re
+import subprocess
+import sys
+
+BOARD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+WORK = os.environ.get('FAJITA_WORK', os.path.join(BOARD, '.cache/fajita-work'))
+OUT = os.path.join(WORK, 'shader-stats')
+STACK = os.environ.get('FAJITA_SHADER_STACK', os.environ.get('FAJITA_STACK', os.path.expanduser('~/src/UniXNU-fajita-stack')))
+M2V = os.environ.get('M2V', '')
+LIBS = os.environ.get('SHADER_LIBS', os.path.join(OUT, 'libs'))
+
+
+def rows(name, stage):
+    path = os.path.join(OUT, name, 'census.tsv')
+    if not os.path.exists(path):
+        sys.exit('shader-stats: no %s (run `shader-stats run %s` first)' % (path, name))
+    return {r['id']: r for r in csv.DictReader(open(path), delimiter='\t') if r['stage'] == stage}
+
+
+def manifest(name):
+    for f in ('manifest.json',):
+        p = os.path.join(OUT, name, f)
+        if os.path.exists(p):
+            return json.load(open(p)).get('renderPipelines', {})
+    return {}
+
+
+def num(r, k):
+    try:
+        return int(r.get(k) or 0)
+    except ValueError:
+        return 0
+
+
+def line(r, p):
+    alu = num(r, 'cat2') + num(r, 'cat3')
+    fmt = (p.get('colors') or [{}])[0] or {}
+    return '%-5s %5d %5d %4d %4d %4d %4d %4d %3d/%-3d %3s %4s %4s  %-26s %s' % (
+        r['id'], num(r, 'instr'), alu, num(r, 'cat5'), num(r, 'cat6'), num(r, 'nops'), num(r, 'sstall'), num(r, 'systall'),
+        num(r, 'half'), num(r, 'full'), r.get('max_waves') or '-', p.get('count', '-'), fmt.get('format', '-'),
+        r.get('fragment' if r['stage'] == 'FRAG' else 'vertex', '')[:26], r.get('label', '').replace('com.apple.coreanimation.draw.', ''))
+
+
+HEAD = 'id    instr   alu  tex  mem nops sstl sytl half/full wav cnt  fmt  function                   label'
+
+
+def cmd_build(a):
+    for script, extra in (('scripts/build-turnip-linux-host.py', []), ('scripts/check-turnip-darwin-linux-host.py', ['--gpu', 'a630'])):
+        if subprocess.run([sys.executable, os.path.join(STACK, script)] + extra, cwd=STACK).returncode:
+            sys.exit('shader-stats: %s failed' % script)
+
+
+def cmd_run(a):
+    d = os.path.join(OUT, a.name)
+    os.makedirs(d, exist_ok=True)
+    libs = [('qc', 'QuartzCore.metallib'), ('rb', 'RenderBox.metallib')]
+    for _, f in libs:
+        if not os.path.exists(os.path.join(LIBS, f)):
+            sys.exit('shader-stats: no %s in %s (SHADER_LIBS)' % (f, LIBS))
+    tool = os.path.join(M2V, 'scripts/pipeline-census')
+    if not os.path.exists(os.path.join(tool, 'a630-host')):
+        sys.exit('shader-stats: %s has no scripts/pipeline-census (M2V)' % M2V)
+    cmd = [sys.executable, os.path.join(tool, 'journal_manifest.py'), a.journal, '--out', os.path.join(d, 'manifest.json')]
+    cmd += ['--xr-as-f16'] if not a.exact_xr else []
+    for i, f in libs:
+        cmd += ['--library', '%s=%s' % (i, os.path.join(LIBS, f))]
+    subprocess.run(cmd, check=True)
+    census = [os.path.join(tool, 'a630-host'), '--manifest', os.path.join(d, 'manifest.json'), '--out', d, '--keep-logs']
+    census += ['--only', a.only] if a.only else []
+    with open(os.path.join(d, 'run.log'), 'w') as log:
+        rc = subprocess.run(census, env=dict(os.environ, UNIXNU=STACK), stdout=log, stderr=subprocess.STDOUT).returncode
+    print(open(os.path.join(d, 'status.txt')).read().strip() if os.path.exists(os.path.join(d, 'status.txt')) else 'no status')
+    if rc:
+        sys.exit('shader-stats: census exited %d; see %s/run.log' % (rc, d))
+    a.n, a.stage, a.format = 25, 'FRAG', None
+    cmd_top(a)
+
+
+def cmd_top(a):
+    rs, m = rows(a.name, a.stage), manifest(a.name)
+    sel = [r for r in rs.values() if a.format is None or ((m.get(r['id'], {}).get('colors') or [{}])[0] or {}).get('format') == a.format]
+    weighted = sum(num(r, 'instr') * m.get(r['id'], {}).get('count', 1) for r in sel)
+    print('%s %s: %d shaders, %d instructions weighted by creations' % (a.name, a.stage, len(sel), weighted))
+    print(HEAD)
+    for r in sorted(sel, key=lambda r: -num(r, 'instr'))[:a.n]:
+        print(line(r, m.get(r['id'], {})))
+
+
+def cmd_compare(a):
+    b, n = rows(a.base, a.stage), rows(a.new, a.stage)
+    m = manifest(a.new) or manifest(a.base)
+    ids = [i for i in b if i in n]
+    w = lambda rs: sum(num(rs[i], 'instr') * m.get(i, {}).get('count', 1) for i in ids)
+    print('%s -> %s, %s, %d shaders in both: weighted instructions %d -> %d (%+.1f%%)' % (
+        a.base, a.new, a.stage, len(ids), w(b), w(n), 100.0 * (w(n) - w(b)) / max(w(b), 1)))
+    worse = [i for i in ids if num(n[i], 'instr') > num(b[i], 'instr')]
+    print('more instructions in %d shaders%s' % (len(worse), (': ' + ','.join(worse[:20])) if worse else ''))
+    print('id    instr (base->new)  alu         tex     full     waves   function / label')
+    for i in sorted(ids, key=lambda i: -num(b[i], 'instr'))[:a.n]:
+        x, y = b[i], n[i]
+        print('%-5s %5d -> %-5d  %4d -> %-4d %2d -> %-2d %2d -> %-2d %2s -> %-2s %s %s' % (
+            i, num(x, 'instr'), num(y, 'instr'), num(x, 'cat2') + num(x, 'cat3'), num(y, 'cat2') + num(y, 'cat3'),
+            num(x, 'cat5'), num(y, 'cat5'), num(x, 'full'), num(y, 'full'), x.get('max_waves') or '-', y.get('max_waves') or '-',
+            x.get('fragment', '')[:24], x.get('label', '').replace('com.apple.coreanimation.draw.', '')))
+
+
+def cmd_disasm(a):
+    log = os.path.join(OUT, a.name, 'logs', a.id + '.log')
+    if not os.path.exists(log):
+        sys.exit('shader-stats: no %s' % log)
+    lines = [l[len('MESA: info: '):] if l.startswith('MESA: info: ') else l for l in open(log, errors='replace').read().splitlines()]
+    stats = [i for i, l in enumerate(lines) if re.match(r'; %s prog ' % a.stage, l)]
+    if not stats:
+        sys.exit('shader-stats: no %s statistics in %s (the driver printed none: it reused an identical shader of an earlier '
+                 'pipeline, or the state has no such stage)' % (a.stage, log))
+    end = stats[-1]
+    start = end
+    # The disassembly runs back to the shader's header line (the NIR dump before it ends with a blank line or '}').
+    while start > 0 and not re.match(r'^(; |@|shader:|\})', lines[start - 1]) or (start > 0 and lines[start - 1].startswith('; ')):
+        start -= 1
+        if end - start > 4000:
+            break
+    while end + 1 < len(lines) and lines[end + 1].startswith('; %s prog' % a.stage):
+        end += 1
+    print('\n'.join(l for l in lines[start:end + 1] if l.strip()))
+
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+sub = ap.add_subparsers(dest='cmd', required=True)
+p = sub.add_parser('build')
+p.set_defaults(f=cmd_build)
+p = sub.add_parser('run')
+p.add_argument('name')
+p.add_argument('--journal', default=os.path.join(WORK, 'pipelines.log'))
+p.add_argument('--only')
+p.add_argument('--exact-xr', action='store_true', help='keep the extended-range formats (NGPU_XR_AS_F16=0)')
+p.set_defaults(f=cmd_run)
+p = sub.add_parser('top')
+p.add_argument('name')
+p.add_argument('-n', type=int, default=25)
+p.add_argument('--stage', default='FRAG')
+p.add_argument('--format', type=int, help='only pipelines whose attachment 0 has this MTLPixelFormat (80 BGRA8Unorm, 115 RGBA16Float)')
+p.set_defaults(f=cmd_top)
+p = sub.add_parser('compare')
+p.add_argument('base')
+p.add_argument('new')
+p.add_argument('-n', type=int, default=25)
+p.add_argument('--stage', default='FRAG')
+p.set_defaults(f=cmd_compare)
+p = sub.add_parser('disasm')
+p.add_argument('name')
+p.add_argument('id')
+p.add_argument('--stage', default='FRAG')
+p.set_defaults(f=cmd_disasm)
+a = ap.parse_args()
+a.f(a)

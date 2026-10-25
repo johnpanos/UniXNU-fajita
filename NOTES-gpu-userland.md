@@ -261,3 +261,22 @@ Fixes:
 - Zero-copy DPU scan-out study: CA's offered frames are 1900-2600 physical runs over 11 MiB (kcmd gpu "frame layout"), and VIG0 scans
   the splash carve-out by physical address (MDP streams in bypass). Scanning CA's surfaces directly needs an apps_smmu context for the
   MDP streams (sdm845 mdss iommus 0x880/0xc80) with the frames mapped contiguously in IOVA, then VIG0 + QSEED3 per swap.
+
+## Shader statistics on the host (2026-10-24)
+
+`tools/gpu/shader-stats` compiles every render pipeline of a frontend journal (`pipelines.log`) with ir3 for the A630 on the Linux
+host, no phone: metal2vulkan's pipeline-census (`scripts/pipeline-census`, branch `shader-perf`) through the runtime on Turnip's Linux
+host build over the NativeAdreno host kernel stack, the phone's TU_DEBUG and the frontend's XR-as-RGBA16Float mapping. Per shader:
+instructions, ALU (cat2+cat3), texture (cat5), memory (cat6), nops, (ss)/(sy) stalls, half/full registers, waves, the disassembly.
+
+```sh
+tools/gpu/shader-stats build                     # once, in FAJITA_SHADER_STACK (a UniXNU stack worktree; not the GPU agent's)
+M2V=~/src/metal2vulkan-shaderperf tools/gpu/shader-stats run base     # QuartzCore/RenderBox metallibs in .cache/fajita-work/shader-stats/libs
+tools/gpu/shader-stats top base --format 80; tools/gpu/shader-stats compare base new; tools/gpu/shader-stats disasm new r10
+```
+
+Findings (20H392 journal, 196 pipelines, 147 fragment shaders):
+- Every unblended color write (and one/zero blends) into BGRA8Unorm or RGBA16Float rounded in the shader to Metal's exact code,
+  computing both the unorm8 and the half rule and selecting by a rule word: +70-76 instructions a fragment. A sampled copy (wallpaper)
+  was 85 instructions for one sample; a 27-tap blur 221. metal2vulkan `ColorWritePolicy::Device` (now the default, `Exact` opt-in):
+  copy 85 -> 11, blur27 221 -> 146, blur15 179 -> 104 (24 -> 19 full registers, 8 -> 10 waves), weighted 31850 -> 20190 (-37%).
