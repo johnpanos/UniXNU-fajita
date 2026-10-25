@@ -42,6 +42,7 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `to-fastboot.sh` | get the phone back to fastboot |
 | `bright-probe.py STAGE LEVEL` | DSI brightness probe |
 | `scripts/fajita/build-usbdbg-agent.sh` | rebuild the phone's USB debug agent (package/usb-debug-tools/fjdbg-agent.c) on Linux into .cache/fajita-inputs |
+| `bg.sh start NAME [--max S] CMD...` / `status` / `wait NAME [S]` / `kill` | run anything long (builds, fps.sh, session start, leakwatch) in the background: returns at once, `wait` polls at most 90 s, flags STALLED output, kills at --max |
 | `hc OP ...` | a raw hub call (`run`, `kcmd`, `screenshot`, `read32`, `reset`, ...) |
 
 ## Best practices
@@ -82,8 +83,8 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Touch, charging, keys and battery are on in every build (`board_args`). Don't turn them off.
 
 **No long blind waits.**
-- Every tool call finishes in under about 2 minutes. Builds, fps.sh, leakwatch, session start and large pulls run in the background
-  with output to a file, and you poll them with short checks (tail, gpu-status.sh). An agent's messages from the lead only arrive
+- Every tool call finishes in under about 2 minutes. Builds, fps.sh, leakwatch, session start and large pulls run through
+  `scripts/fajita/test/bg.sh start NAME CMD...`, and you poll with `bg.sh wait NAME` (returns within 90 s) or `bg.sh status`. An agent's messages from the lead only arrive
   between its tool calls, so a long blocking call also makes it deaf.
 - Never sleep long, or wait for a timeout to run out. Give hub calls a short T= (10-30 s for run/kcmd; pushes and pulls are chunked).
 - A call that times out means the phone may be stuck: check gpu-status.sh, lsusb and fastboot, then act (end the session, reboot,
