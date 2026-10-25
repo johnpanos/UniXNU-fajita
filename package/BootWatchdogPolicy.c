@@ -29,7 +29,10 @@ static const char lite_jobs[]=
  // Crash or respawn loops seen on hardware (int-176): fairplayd.A2 is KeepAlive and exits at once (22 launches in 6 minutes), passd crashes,
  // obliteration is a data-wipe daemon with nothing to do here. iconservicesagent also dies in CI::GLContext::init, but disabling it leaves
  // the icons missing (seen on hardware), so it stays enabled.
- "com.apple.fairplayd.A2,com.apple.passd,com.apple.mobile.obliteration";
+ "com.apple.fairplayd.A2,com.apple.passd,com.apple.mobile.obliteration,"
+ // aggregated (powerlog) is KeepAlive and aborts about every 10 s from boot on, so launchd relaunches it all boot and the kernel
+ // keeps creating corpses for it ("Too many corpses"); syncdefaultsd (iCloud key-value sync, no account here) aborts the same way.
+ "com.apple.aggregated,com.apple.syncdefaultsd";
 static char policy[2048],jobs[200];
 volatile int sheng_watchdog_policy_status=-1;
 
