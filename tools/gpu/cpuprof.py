@@ -5,7 +5,7 @@ threads spend their time.
 
 The phone writes each distinct stack once with four counts: enc (running while a command buffer is open: the frame trace's encode window),
 cpu (running, none open), blocked_enc / blocked_other (in the kernel). Frames of the plugin's own images (NativeAdrenoMetal,
-libvulkan_freedreno) are image+0xOFFSET; they are resolved here with llvm-symbolizer against the unstripped copies the plugin build keeps
+libvulkan_freedreno) are image+0xOFFSET; they are resolved here with llvm-nm and llvm-cxxfilt against the unstripped copies the plugin build keeps
 (<stack>/build/adreno-metal-plugin/*.unstripped; --stack, default ~/src/UniXNU-fajita-stack). They match only the build that ran.
 Apple's libraries read <redacted> (the shared cache's local symbols).
 
@@ -19,6 +19,7 @@ ap.add_argument('--stack', default=os.path.expanduser('~/src/UniXNU-fajita-stack
 ap.add_argument('--thread')
 ap.add_argument('--only', choices=('enc', 'cpu', 'all'), default='enc')
 ap.add_argument('--rows', type=int, default=30)
+ap.add_argument('--under', help='a function (substring): the split of its samples by the callee directly under it (self = in it)')
 a = ap.parse_args()
 
 head, rows = '', []
@@ -44,21 +45,19 @@ for img, offs in want.items():
     if not os.path.exists(obj):
         print('cpuprof: no %s: %s frames stay offsets' % (obj, img), file=sys.stderr)
         continue
-    offs = sorted(offs)
-    # a return address points after the call: look up the call itself (-4)
-    inp = '\n'.join('0x%x' % (o - 4 if o >= 4 else o) for o in offs)
-    out = subprocess.run(['llvm-symbolizer', '--obj', obj, '--demangle', '--no-inlines', '--functions=short', '--output-style=GNU'],
-                         input=inp, capture_output=True, text=True).stdout
-    lines = out.splitlines()   # two lines per address: the containing function, file:line
-    i = 0
+    # the image's symbol table (llvm-nm, address order), demangled (llvm-cxxfilt: Itanium and Rust v0); each offset -> the symbol at or
+    # below it (a return address points after its call: look up offset - 4)
+    nm = subprocess.run(['llvm-nm', '-n', '--defined-only', obj], capture_output=True, text=True).stdout.splitlines()
+    syms = [(int(f[0], 16), f[2][1:] if f[2].startswith('_') else f[2]) for f in (l.split(None, 2) for l in nm) if len(f) == 3 and f[1] in 'tTsS']
+    dem = subprocess.run(['llvm-cxxfilt'], input='\n'.join(n for _, n in syms), capture_output=True, text=True).stdout.splitlines()
+    if len(dem) == len(syms):
+        syms = [(ad, re.sub(r'::h[0-9a-f]{16}$', '', d)) for (ad, _), d in zip(syms, dem)]
+    addrs = [ad for ad, _ in syms]
+    import bisect
     for o in offs:
-        if i >= len(lines):
-            break
-        fn = lines[i].strip()
-        i += 2
-        fn = re.sub(r'::h[0-9a-f]{16}$', '', fn)
-        fn = re.sub(r'<[^<>]*>', '<>', fn) if len(fn) > 140 else fn
-        names['%s+0x%x' % (img, o)] = '%s`%s' % (img.split('.')[0], fn if fn != '??' else '0x%x' % o)
+        i = bisect.bisect_right(addrs, o - 4 if o >= 4 else o) - 1
+        fn = syms[i][1] if i >= 0 else '0x%x' % o
+        names['%s+0x%x' % (img, o)] = '%s`%s' % (img.split('.')[0], fn)
 
 name = lambda fr: names.get(fr, fr)
 threads = collections.defaultdict(lambda: [0, 0, 0, 0])
@@ -86,6 +85,26 @@ for e, c, be, bo, st in rows:
         for f in dict.fromkeys(frames):
             blocked[f] += nb
 total = sum(self_.values())
+if a.under:
+    kids, n_under = collections.Counter(), 0
+    for e, c, be, bo, st in rows:
+        if a.thread and st[0] != a.thread:
+            continue
+        n = pick(e, c)
+        frames = [name(f) for f in st[1:]]
+        idx = [i for i, f in enumerate(frames) if a.under in f]
+        if not n or not idx:
+            continue
+        i = idx[-1]   # the outermost occurrence
+        j = i - 1
+        while j >= 0 and frames[j] == frames[i]:
+            j -= 1    # the walk repeats a frame when lr and the first saved return agree
+        n_under += n
+        kids['(self)' if j < 0 else frames[j]] += n
+    print('\nunder %s (%s): %d samples' % (a.under, a.only, n_under))
+    for f, n in kids.most_common(a.rows):
+        print('%7d %5.1f%%  %s' % (n, 100 * n / n_under, f[:170]))
+    sys.exit(0)
 print('\n%s running samples (1 ms each): %d' % (a.only, total))
 for title, cnt in (('self', self_), ('inclusive', incl)):
     print('\n%s:' % title)

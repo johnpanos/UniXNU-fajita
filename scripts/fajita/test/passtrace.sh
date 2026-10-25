@@ -5,6 +5,8 @@
 #   passtrace.sh pull [OUT]            the summary (default $FAJITA_WORK/passes.csv), then tools/gpu/frametrace.py --passes on it; with
 #                                      CPU=1 also the CPU profile (NGPU_CPU_PROFILE, CpuProfile.h) into OUT's directory as cpuprof.txt
 #   CPU=1 passtrace.sh on              also NGPU_CPU_PROFILE=backboardd: the render server's command-buffer threads sampled every 1 ms
+#   CPU=1 PASSES=0 passtrace.sh on     the CPU profile and frame trace without the pass trace (u_trace allocates BOs at encode: it adds
+#                                      CPU time to the render server's encode, so profile CPU without it)
 #   passtrace.sh off                   the plain gpu-env back (empty), restart backboardd
 #   passtrace.sh fps [OUT]             reset, fps.sh, pull: the per-pass split of the standard benchmark
 TD=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$TD/../../.." && pwd); W=${FAJITA_WORK:-$ROOT/.cache/fajita-work}; mkdir -p "$W"; H=$TD/hc
@@ -20,11 +22,12 @@ pushenv() {
 }
 reset() { printf 'reset\n' > "$W/.pt-reset"; T=30 $H push "$W/.pt-reset" $DIR/passtrace-reset 644 >/dev/null 2>&1
   [ -n "$CPU" ] && T=30 $H push "$W/.pt-reset" $DIR/cpuprof-reset 644 >/dev/null 2>&1; sleep 3; }
-pull() { out=${1:-$W/passes.csv}; T=60 $H pull $DIR/backboardd-passes.csv "$out" >/dev/null 2>&1 || { echo "passtrace: pull failed"; exit 1; }
-  python3 -I "$ROOT/tools/gpu/frametrace.py" --passes "$out"
+pull() { out=${1:-$W/passes.csv}; mkdir -p "$(dirname "$out")"
+  [ "$PASSES" != 0 ] && { T=60 $H pull $DIR/backboardd-passes.csv "$out" >/dev/null 2>&1 || { echo "passtrace: pull failed"; exit 1; }; }
+  [ "$PASSES" != 0 ] && python3 -I "$ROOT/tools/gpu/frametrace.py" --passes "$out"
   [ -n "$CPU" ] && { T=60 $H pull $DIR/backboardd-cpuprof.txt "$(dirname "$out")/cpuprof.txt" >/dev/null 2>&1 && echo "cpu profile: $(dirname "$out")/cpuprof.txt" || echo 'passtrace: cpu profile pull failed'; }; }
 case "$1" in
-  on) { printf 'NGPU_FRAME_TRACE=1\nNGPU_PASS_TRACE=backboardd\n'; [ -n "$CPU" ] && printf 'NGPU_CPU_PROFILE=backboardd\n'; [ -n "$2" ] && cat "$2"; } > "$W/.pt-env"; pushenv "$W/.pt-env"; restart ;;
+  on) { printf 'NGPU_FRAME_TRACE=1\n'; [ "$PASSES" != 0 ] && printf 'NGPU_PASS_TRACE=backboardd\n'; [ -n "$CPU" ] && printf 'NGPU_CPU_PROFILE=backboardd\n'; [ -n "$2" ] && cat "$2"; } > "$W/.pt-env"; pushenv "$W/.pt-env"; restart ;;
   off) printf '# plain\n' > "$W/.pt-env"; pushenv "$W/.pt-env"; restart ;;
   reset) reset ;;
   pull) pull "$2" ;;

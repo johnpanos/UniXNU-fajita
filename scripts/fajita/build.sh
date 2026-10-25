@@ -95,7 +95,7 @@ fi
 # 3. GPU plugin (Turnip, metal2vulkan, NativeMetal), packed into the boot add-on with the plugin's settings.
 if [ $SKIP_P = 0 ] || [ ! -e "$OUT/metal.ngpu" ]; then
   say "GPU plugin ..."
-  "$BOARD/scripts/build-gpu-plugin-local.sh" --unixnu "$STACK" --pack "$OUT/metal.ngpu" --base "$IN/metal-base.ngpu" > "$OUT/plugin.log" 2>&1 \
+  NMB_TARGET_CPU=${NMB_TARGET_CPU-cortex-a75} "$BOARD/scripts/build-gpu-plugin-local.sh" --unixnu "$STACK" --pack "$OUT/metal.ngpu" --base "$IN/metal-base.ngpu" > "$OUT/plugin.log" 2>&1 \
     || { say "PLUGIN BUILD FAILED"; tail -8 "$OUT/plugin.log"; exit 1; }
   say "$(grep -a 'built\|packed' "$OUT/plugin.log" | tail -2 | tr '\n' ' ')"
 fi
