@@ -17,8 +17,8 @@ ir3's numbers are the phone's for the same translator, Mesa pin and constants. O
 
 `top`: the heaviest shaders of one stage: instructions, ALU (cat2+cat3), texture (cat5), cat6 (memory), nops,
 (ss)/(sy) stall cycles (sstall, systall), half/full registers (registers bound waves: max_waves of 16), `count` = creations in the journal (a proxy for use), the label.
-`compare`: two runs by pipeline id. A pipeline whose shader is identical to an earlier one's has no row of its own (the driver
-reuses the compiled shader and prints nothing). `disasm`: one shader's ir3 disassembly and statistics.
+`compare`: two runs by pipeline id. Turnip's in-memory pipeline cache is off (VK_ENABLE_PIPELINE_CACHE=false), so every
+pipeline compiles and has its rows, and two runs over one journal compare row for row. `disasm`: one shader's ir3 disassembly and statistics.
 
 Environment: M2V (required for run: a metal2vulkan checkout that carries scripts/pipeline-census, johnpanos/metal2vulkan shader-perf),
 FAJITA_SHADER_STACK (a worktree of the UniXNU stack with the Linux host Turnip: scripts/build-turnip-linux-host.py and
@@ -101,7 +101,7 @@ def cmd_run(a):
     census = [os.path.join(tool, 'a630-host'), '--manifest', os.path.join(d, 'manifest.json'), '--out', d, '--keep-logs']
     census += ['--only', a.only] if a.only else []
     with open(os.path.join(d, 'run.log'), 'w') as log:
-        rc = subprocess.run(census, env=dict(os.environ, UNIXNU=STACK), stdout=log, stderr=subprocess.STDOUT).returncode
+        rc = subprocess.run(census, env=dict(os.environ, UNIXNU=STACK, VK_ENABLE_PIPELINE_CACHE='false'), stdout=log, stderr=subprocess.STDOUT).returncode
     print(open(os.path.join(d, 'status.txt')).read().strip() if os.path.exists(os.path.join(d, 'status.txt')) else 'no status')
     if rc:
         sys.exit('shader-stats: census exited %d; see %s/run.log' % (rc, d))
