@@ -247,3 +247,11 @@ Fixes:
 - `scanout_scale4v` (NGPU_SCALE4V=0 opts out): 16-byte source and tap loads, scale 7.86 -> 3.70 ms; GPU 22.0 -> 19.0 ms a frame.
 - NGPU_XR_AS_F16 left IOSurface-backed XR attachments with RGBA16Float pipelines: those passes refused their command buffers
   (App Library backdrop black). Pipelines now make a variant per combination of attachments a pass keeps XR on.
+- Run-over-run slowdown in one boot (`scripts/fajita/test/leakwatch.sh`): the kernel's retire sweep grew 2.9 -> 14 ms a submission,
+  because every completed job's acquireImported cleaned and invalidated every writable import of backboardd, and Vm::find scanned 4096
+  slots per handle. NativeAdreno b9ab096: acquire only the imports a job named since their last acquire, and find by a hash index.
+  Retire is 0.0 ms flat; App Library scroll 16 -> 31-33 fps; Settings scroll and home/App Library screenshots unchanged.
+- `home-page1.sh --rebase` saves home-base/applib-base for the current Data (its layout changes as apps are installed and moved);
+  `FAJITA_AUTORESET=1500 build.sh --test` gives sessions long enough for several fps runs.
+- "N no-copy ... dealloc 0/0" is not a leak: in copy mode (NGPU_HOST_COPY) no-copy requests become owned copies, which are freed with
+  their MTLBuffer; dealloc counts only real imports.
