@@ -41,6 +41,7 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `rows.py` | the Metal frontend's telemetry rows |
 | `to-fastboot.sh` | get the phone back to fastboot |
 | `bright-probe.py STAGE LEVEL` | DSI brightness probe |
+| `scripts/fajita/build-usbdbg-agent.sh` | rebuild the phone's USB debug agent (package/usb-debug-tools/fjdbg-agent.c) on Linux into .cache/fajita-inputs |
 | `hc OP ...` | a raw hub call (`run`, `kcmd`, `screenshot`, `read32`, `reset`, ...) |
 
 ## Best practices

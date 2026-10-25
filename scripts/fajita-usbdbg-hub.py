@@ -23,7 +23,10 @@ import sys
 import threading
 import zlib
 import time
+
 from pathlib import Path
+
+PULL_CHUNK = 512 << 10   # pull piece size: a bad line or a stall costs at most this much, not the whole file
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('fjdbg', HERE / 'fajita-usbdbg.py')
@@ -246,20 +249,51 @@ class Hub:
                 return {'ok': False, 'out': 'push: timeout\n'}
             return {'ok': b'fjdbg: put ok' in body, 'out': body.decode(errors='replace')}
         if op == 'pull':
-            # pull REMOTE LOCAL
-            body = self.shell_exchange([b'@get ' + a[0].encode()], timeout)
-            if body is None:
-                return {'ok': False, 'out': 'pull: timeout\n'}
-            m = re.search(rb'fjdbg: get (\d+)\n', body)
-            c = re.search(rb'fjdbg: get crc ([0-9a-f]+)\n', body)
-            if not m or not c:
-                return {'ok': False, 'out': body.decode(errors='replace')}
-            data = bytes.fromhex(b''.join(re.findall(rb'@d ([0-9a-f]*)\n', body)).decode())
-            if len(data) != int(m.group(1)) or zlib.crc32(data) != int(c.group(1), 16):
-                return {'ok': False, 'out': 'pull: size/crc mismatch (%d bytes)\n' % len(data)}
+            # pull REMOTE LOCAL: in PULL_CHUNK pieces (@getr), each checked by size and CRC and retried, so one bad line costs one piece;
+            # an agent without @getr gets the whole file in one @get. A file that grows while it is pulled is taken at its size at the start.
+            limit = time.time() + timeout
+            total, piece = None, self.get_piece(a[0], 0, 1, limit)
+            if piece and piece.get('total') is not None:
+                total = piece['total']
+            if total is None:
+                piece = self.get_piece(a[0], None, None, limit)
+                if not piece or 'data' not in piece:
+                    return {'ok': False, 'out': (piece or {}).get('error', 'pull: timeout\n')}
+                data = piece['data']
+            else:
+                parts, off = [], 0
+                while off < total:
+                    for attempt in range(3):
+                        piece = self.get_piece(a[0], off, min(PULL_CHUNK, total - off), limit)
+                        if piece and 'data' in piece:
+                            break
+                        self.note('pull %s: piece at %d failed (%s), retry %d' % (a[0], off, (piece or {}).get('error', 'timeout').strip(), attempt + 1))
+                    else:
+                        return {'ok': False, 'out': 'pull: piece at %d of %d failed 3 times: %s' % (off, total, (piece or {}).get('error', 'timeout\n'))}
+                    if not piece['data']:
+                        return {'ok': False, 'out': 'pull: file shrank to %d bytes while pulled\n' % off}
+                    parts.append(piece['data'])
+                    off += len(piece['data'])
+                data = b''.join(parts)
             open(a[1], 'wb').write(data)
             return {'ok': True, 'out': 'pulled %s -> %s, %d bytes, crc %08x\n' % (a[0], a[1], len(data), zlib.crc32(data))}
         return {'ok': False, 'out': 'unknown op %s\n' % op}
+
+    def get_piece(self, path, off, length, limit):
+        """One @getr OFF LEN PATH (or @get PATH when off is None): {'data', 'total'} when its size and CRC check, else {'error'}; None on timeout."""
+        cmd = b'@get ' + path.encode() if off is None else b'@getr %d %d %s' % (off, length, path.encode())
+        body = self.shell_exchange([cmd], max(1.0, limit - time.time()))
+        if body is None:
+            return None
+        t = re.search(rb'fjdbg: get total (\d+)\n', body)
+        m = re.search(rb'fjdbg: get (\d+)\n', body)
+        c = re.search(rb'fjdbg: get crc ([0-9a-f]+)\n', body)
+        if not m or not c:
+            return {'error': body.decode(errors='replace'), 'total': None}
+        data = bytes.fromhex(b''.join(re.findall(rb'@d ([0-9a-f]*)\n', body)).decode())
+        if len(data) != int(m.group(1)) or zlib.crc32(data) != int(c.group(1), 16):
+            return {'error': 'size/crc mismatch (%d of %s bytes)\n' % (len(data), m.group(1).decode()), 'total': int(t.group(1)) if t else None}
+        return {'data': data, 'total': int(t.group(1)) if t else None}
 
     def shell_send(self, lines, marker=None):
         """Send lines to the agent; a new exchange starts with a unique marker line (returned) that output is found after."""

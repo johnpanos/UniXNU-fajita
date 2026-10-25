@@ -167,6 +167,9 @@ static int hexVal(char c)
 // File transfer, hex lines so the line-based channel carries any bytes.
 //   @put PATH MODE SIZE   then `@d HEX` lines (each acked `fjdbg: k BYTES`), then `@end CRC32`: written to PATH.fjtmp, checked, chmod MODE (octal), renamed
 //   @get PATH             replies `fjdbg: get SIZE`, `@d HEX` lines, `fjdbg: get crc CRC32`
+//   @getr OFF LEN PATH    the same for LEN bytes from OFF (LEN 0: to the end), after `fjdbg: get total SIZE`, so the host pulls a
+//                         large file in pieces. Both send exactly the SIZE they announce, so a file still being written cannot
+//                         make the data disagree with the size (a trace file that keeps growing did).
 static struct { int fd; char path[1024]; unsigned mode; long size, got; uint32_t crc; } gPut = {.fd = -1};
 
 static void putFinish(const char *arg)
@@ -237,7 +240,7 @@ static void putStart(char *args)
   }
 }
 
-static void getFile(const char *path)
+static void getRange(const char *path, long long off, long long len, int ranged)
 {
   char msg[1200];
   int fd = open(path, O_RDONLY);
@@ -249,14 +252,27 @@ static void getFile(const char *path)
       close(fd);
     return;
   }
-  snprintf(msg, sizeof msg, "fjdbg: get %lld\n", (long long)st.st_size);
+  long long total = (long long)st.st_size;
+  if (off < 0 || off > total)
+    off = total;
+  long long want = total - off;
+  if (len > 0 && len < want)
+    want = len;
+  if (ranged) {
+    snprintf(msg, sizeof msg, "fjdbg: get total %lld\n", total);
+    say(msg);
+  }
+  snprintf(msg, sizeof msg, "fjdbg: get %lld\n", want);
   say(msg);
   static const char digits[] = "0123456789abcdef";
   unsigned char buf[512];
   char line[3 + 2 * sizeof buf + 2];
   uint32_t crc = 0;
-  ssize_t n;
-  while ((n = read(fd, buf, sizeof buf)) > 0) {
+  ssize_t n = 0;
+  if (off > 0 && lseek(fd, (off_t)off, SEEK_SET) != (off_t)off)
+    want = 0;
+  while (want > 0 && (n = read(fd, buf, want < (long long)sizeof buf ? (size_t)want : sizeof buf)) > 0) {
+    want -= n;
     crc = crc32Update(crc, buf, (size_t)n);
     size_t o = 0;
     line[o++] = '@'; line[o++] = 'd'; line[o++] = ' ';
@@ -272,6 +288,21 @@ static void getFile(const char *path)
   say(msg);
 }
 
+static void getFile(const char *path)
+{
+  getRange(path, 0, 0, 0);
+}
+
+static void getFileRange(const char *arg)
+{
+  char *end;
+  long long off = strtoll(arg, &end, 10);
+  long long len = strtoll(end, &end, 10);
+  while (*end == ' ')
+    end++;
+  getRange(end, off, len, 1);
+}
+
 // Built-ins: `@read PATH` streams a text file to the host; @put/@d/@end and @get move any file (see above).
 static void builtin(char *line)
 {
@@ -283,6 +314,8 @@ static void builtin(char *line)
     putFinish(line + 5);
   else if (strncmp(line, "@get ", 5) == 0)
     getFile(line + 5);
+  else if (strncmp(line, "@getr ", 6) == 0)
+    getFileRange(line + 6);
   else if (strncmp(line, "@read ", 6) == 0) {
     int fd = open(line + 6, O_RDONLY);
     if (fd < 0) {
