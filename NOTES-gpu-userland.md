@@ -514,3 +514,14 @@ RGBA16Float LUTs CoreAnimation makes, 283 creations in the texture log) read fou
 backdrop/vibrancy draw. Everything else is small per draw (fs=42c7... 18 a frame, 1.1 ms; fs=745f... 11 a frame, 1.1 ms).
 Also measured: `M2V_ALIAS_PADDED_TARGETS=1` (render CA's frame surfaces in place) does nothing: their rows are 4512 bytes, not a
 multiple of 64, so Turnip makes no linear image there.
+
+### Default build, held + async (2026-10-25, stack with staleHeld)
+
+**fps.sh x3, fresh boot: home 40.9 / 41.5 / 41.5 plain, 41.0 / 40.3 / 39.9 60-frame; App Library 30.7 / 31.8 / 29.7.**
+
+- The intermittent garbage dock icon under NGPU_CPU_HELD (2 of 6 backboardd restarts) was a command buffer that never ran (released
+  uncommitted, refused or failed) after the runtime had marked its planned copies into shadows held. NativeMetal `staleHeld()` moves
+  the held generation of every root texture such a command buffer used. 13 of 13 restarts and a tour clean since.
+- `NGPU_TRUSTED_RENDER_SERVER=1`: no gain (39.7 / 40.5 / 27.6).
+- Seen once at a cold boot of this build: a black lock screen (no poster, no clock; swipe up did nothing); a restart of PosterBoard,
+  SpringBoard and backboardd cured it with held on or off, and the next cold boot was fine. Not reproduced; watch for it.
