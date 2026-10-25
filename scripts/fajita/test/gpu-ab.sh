@@ -10,7 +10,11 @@ TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/
 H() { python3 -I "$(dirname "$0")/../../fajita-usbdbg-hub.py" call --timeout ${T:-20} "$@"; }
 BASE=${BASE:-$G/home-base.png}; OUT=$G/ab-results.txt
 $TD/gpu-status.sh >/dev/null; [ $? -eq 2 ] && { echo "no run holds the phone"; exit 1; }
-for env in "$@"; do
+# ROUNDS=N (default 1): the variants N times, interleaved (A B A B ...), so drift over the boot cancels; a summary at the end gives each
+# variant's median and spread of home and App Library motion fps over its rounds.
+RUN=$G/.ab-run-$$; : > $RUN
+list=(); for r in $(seq 1 ${ROUNDS:-1}); do list+=("$@"); done
+for env in "${list[@]}"; do
   name=$(basename $env); echo "=== $name: $(tr '\n' ' ' < $env)"
   T=60 H push $(realpath $env) /private/var/ngpu/gpu-env 644 >/dev/null 2>&1   # the agent may answer "eof"; the pull checks it
   T=60 H pull /private/var/ngpu/gpu-env $G/ab-env-check >/dev/null 2>&1; cmp -s $env $G/ab-env-check || { echo "$name: push failed"; continue; }
@@ -43,6 +47,16 @@ a=Image.open('$BASE').convert('RGB').crop((0,60,540,1170)); b=Image.open('$G/hom
 px=list(ImageChops.difference(a,b).get_flattened_data()); print('maxdiff %d px>8 %d' % (max(max(p) for p in px), sum(1 for p in px if max(p)>8)))" 2>&1)
   # Loud when most of the screen differs: a stale BASE or the wrong screen, never a rendering verdict.
   for c in "$lchk" "$chk"; do n=$(echo "$c" | grep -o "px>8 [0-9]*" | grep -o "[0-9]*$"); [ "${n:-0}" -gt 180000 ] && pg="$pg !! >30% OF THE SCREEN DIFFERS: stale baseline or wrong screen ($c)"; done
-  row="$(date +%T) $name fps ${fps:-?} | $lchk | home $chk | $perf$pg"; echo "$row"; echo "$row" >> $OUT
+  row="$(date +%T) $name fps ${fps:-?} | $lchk | home $chk | $perf$pg"; echo "$row"; echo "$row" >> $OUT; echo "$row" >> $RUN
   [ -n "$pg" ] && echo "$pg" >&2
 done
+python3 -I -c "
+import re,statistics as st,collections
+v=collections.defaultdict(lambda:([],[]))
+for l in open('$RUN'):
+    p=l.split()
+    m=re.findall(r'motion ([\d.]+)',l)
+    if len(p)>1 and len(m)>=2: v[p[1]][0].append(float(m[0])); v[p[1]][1].append(float(m[1]))
+f=lambda x:'%.1f [%.1f-%.1f] n=%d'%(st.median(x),min(x),max(x),len(x)) if x else 'n/a'
+for k,(h,a) in v.items(): print('SUMMARY %-24s home motion %s | App Library motion %s'%(k,f(h),f(a)))
+" | tee -a $OUT; rm -f $RUN
