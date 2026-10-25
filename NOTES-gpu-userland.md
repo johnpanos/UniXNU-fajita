@@ -143,14 +143,18 @@ Equivalence with CI run 40080075126 (same ref 8190417 and submodules). Results f
 
 ## Fork branches
 
+One branch per repository (2026-10-24 consolidation; frame-trace, vm-index, shader-perf and shadow-held-copyback were merged and deleted):
+
 | Repo | Branch | Content |
 | --- | --- | --- |
-| johnpanos/UniXNU | `fajita-a630-userland` | Linux host Turnip build/check, Mesa host patch (on ios16-stack) |
-| johnpanos/NativeAdreno | `fajita-a630` | Linux hostsim + A630 device info (fe43efc), kernel A630 changes (4ee23ca) |
-| johnpanos/NativeMetal | `fajita-a630` | NativeTurnipSmoke watchdog guarded to Apple (080bb79) |
-| johnpanos/UniXNU-fajita | `gpu-userland` | this note, package/gpu-tools (ngpu-probe), gpu-tools CI |
+| johnpanos/UniXNU | `fajita-a630-userland` | the stack (`ios16/gpu-plugin.ref`): Linux host Turnip, the plugin build, pins |
+| johnpanos/NativeAdreno | `fajita-a630` | kernel A630 changes, the VM handle index and acquire fixes (b9ab096) |
+| johnpanos/NativeMetal | `fajita-a630` | the plugin and frontend, frame trace, pass trace, CPU profile, bridge patches (57bda1f) |
+| johnpanos/metal2vulkan | `fajita-a630` | the translator, pinned in the stack's scripts/data/gpu-metal-vulkan-inputs.json (f372253f) |
+| johnpanos/UniXNU-fajita | `ios16-port` | the board, this note |
 
-Local worktrees: /home/john/src/UniXNU-ios16-stack-gpuuser (UniXNU), /home/john/src/UniXNU-fajita-gpuuser (board).
+After a translator pin bump, `python3 scripts/refresh-bridge-patches.py` (in the stack) rebases NativeMetal's recorded bridge patches
+onto the new pin; build-native-metal-bridge.py refuses patches that apply only with offsets.
 
 ## Hardware results (2026-10-23 sessions)
 
@@ -317,3 +321,84 @@ Findings for the next levers (A630 rules in NOTES-a630.md):
   value comes from CA's uniform buffer, so it is Metal's own bias, not the translator's; 77 `txl lod 0` (explicit level 0) samples
   could become implicit-LOD only for textures with one level (a variant key on the bound texture), not built.
 - Occupancy: fixed_frag Bvcm variants sit at 19 full regs (10 waves); 16 regs would give 12. Blurs are 24 regs (8 waves) but cheap.
+
+## Current state (2026-10-24, end of GPU round 2)
+
+Pins: board ios16-port c9f4745 (+ this note), stack 93f2e41, NativeMetal 57bda1f, NativeAdreno b9ab096, translator f372253f.
+
+fps.sh on a fresh boot (home plain / 60-frame, App Library scroll):
+
+| Build | Home | App Library |
+| --- | --- | --- |
+| round 1 end (translator ad80f293) | 16-18 | 29-32 |
+| + ColorWritePolicy::Device (fc4e10e9; stack 68008b8), 5 runs | 9.8-17.2 plain (one 48 outlier), median ~15 | 28.8-33.2, median 31.8 |
+| + bridge fat LTO, one codegen unit (stack 8260d45 built with NMB_TARGET_CPU empty) | 17.1-17.5 / 17.0-18.9 (one 44 outlier) | **39.2 / 41.0 / 42.6** |
+| + ExtendedRangePolicy::Device (b91baaa4, f372253f; stack 93f2e41) | built, not yet run on the phone | |
+
+- Correctness of fc4e10e9: home maxdiff 1, App Library maxdiff 2, Settings scroll matches copyskip.
+- `NMB_TARGET_CPU=cortex-a75` (the bridge tuned for Kryo 385) is wrong: the render server's surface imports failed with
+  `surface import refused: no-copy buffer: OutOfMemory(Device)` in pipelines.log, and the App Library backdrop was black. LTO alone is
+  correct. The knob stays in build-native-metal-bridge.py, off by default; the cause is not found.
+- Home plain swipes sometimes read 44-48 fps. Check whether those swipes changed pages before trusting them.
+- fps.sh found the App Library by the folders under the search field. Those reorder as the categories change with use, so it reported
+  "not reached". It now compares the search field only (box 30,88,510,155).
+
+### Per-pass GPU split (passtrace.sh, during fps.sh; ColorWritePolicy build)
+
+GPU ms per presented frame, 450-850 swaps, about 20.5 ms in total:
+
+| Pass | n/frame | ms/frame | median ms | p95 ms |
+| --- | --- | --- | --- | --- |
+| CA main composite rp 1125x2436 (10-99 draws, sysmem) | 1.05 | 7.7-8.8 | 4.9-13.7 | 14.7 |
+| copy_buffer_to_image b8g8r8a8 (shadow copy-ins) | 3.9-4.0 | 3.8-3.9 | 0.69 | 2.7 |
+| copy_buffer_to_image r8g8b8a8 | 4.3-6.5 | 0.8-1.2 | 0.21 | 0.22 |
+| copy_buffer_to_image a8 | 9.2 | 0.5 | 0.07 | 0.16 |
+| presenter scale cs 17x293 | 1.00 | 3.6 | 3.6 | 3.7 |
+| copy_image_to_buffer b8g8r8a8 (copy-backs) | 2.0-2.2 | 1.4-1.6 | 0.71 | 0.8 |
+| small full-screen passes (2-9 draws) | 0.7-0.9 | 0.55 | 0.45 | 1.2 |
+| 0-draw load/store passes (64x32, 32x32, 64x128 a1 cl0/ld4/st4) | ~1.2 | 0.1 | 0.07 | 0.08 |
+
+### CPU (frame trace + CpuProfile, home swipes, LTO not yet applied)
+
+- Frame median 29.6 ms: cpu_gap 12.1 + encode 10.75 + commit 1.1 ms on the render thread, GPU 22.8 ms, gpu_queue 27.8 ms. CPU and
+  GPU are about equal, so both need to come down.
+- The 100-210 ms encode spikes in the first trace were **my own pass trace**: u_trace allocates its timestamp buffers per command
+  buffer (tu_trace_create_buffer -> darwin_bo_init -> IOConnectCallMethod). Without it (`PASSES=0`) the spikes are gone. What remains
+  are rare first-use pipeline creations (pipe up to 36 ms) and 200 ms gaps between idle 5 Hz frames.
+- Render thread (t1) while encoding: the translator's draw path is 47% (draw_resident: settle_draw 18%, Recording::record 13%,
+  bind::graphics::instantiate 9%, binding::bind 6%, ...: many small pieces, no single hotspot), end_pass 17% (shadow_copies 23% of
+  it), malloc 10%, the render encoder's creation 6%. Blocked in encode: tu_cs_reserve_space -> darwin_bo_init (Turnip growing a command
+  stream with a fresh BO through IOKit). Fat LTO took App Library from 32 to 41 fps, which confirms the CPU bound.
+
+### Tools
+
+- `scripts/fajita/test/passtrace.sh on|reset|pull|fps|off` (`CPU=1`: also the CPU profile; `PASSES=0`: without the pass trace).
+  NativeMetal PassTrace.h feeds Turnip's u_trace through a pipe and aggregates it on the phone into
+  `<cache>/frametrace/backboardd-passes.csv` (about 30 KB). Keys: render pass size, attachments, clear/load/store bytes, gmem|sysmem
+  and draw bucket; transfers by format; with `TU_GPU_TRACEPOINT=+draw` in gpu-env, per draw by shader blake3. The pass trace adds CPU
+  time to encode, so measure CPU without it.
+- `tools/gpu/frametrace.py --passes FILE [--mesa-log LOG]`: the split. The Mesa log, with IR3_SHADER_DEBUG=fs,
+  MESA_SHADER_CACHE_DISABLE=true and VK_ENABLE_PIPELINE_CACHE=false, names the draws' shaders.
+- NativeMetal CpuProfile.h (`NGPU_CPU_PROFILE=backboardd`) samples the command-buffer threads about once a millisecond (suspend, frame
+  walk, resume). It writes distinct stacks with enc/cpu/blocked counts to `backboardd-cpuprof.txt`.
+  `tools/gpu/cpuprof.py FILE [--thread t1] [--only enc|cpu|all] [--under FUNC]` symbolizes against the unstripped images the plugin
+  build now keeps (build/adreno-metal-plugin/*.unstripped; they match only the build that ran). The counts are relative: the real
+  period is about 1-2 ms.
+- `scripts/fajita/test/leakwatch.sh` (round 1): run-over-run slowdown in one boot.
+
+### Next (in order)
+
+1. Measure f372253f (stack 93f2e41): fps.sh x3, screenshot diffs within a few codes.
+2. The CPU-time breakdown of backboardd per frame on home swipes, without the pass trace. Split it into CA's own work, the NativeMetal
+   frontend, the metal2vulkan bridge (translate, encode, binding, pipeline), Turnip (vkCmd*, submit) and the kernel (ioctls, waits).
+   Give the top 10 by self time and say whether pipeline compiles show up (so far: rarely, up to 36 ms on first use). Report the
+   breakdown before fixing anything.
+3. Translator per-draw CPU (draw_resident and end_pass above). Turnip command-stream BO growth: reuse command buffers and pools, or
+   suballocate cs BOs, so encode never reaches IOKit.
+4. Copy-ins: about 18 a frame (4 BGRA at 0.7 ms, 4-6 RGBA, 9 A8), 5 ms of GPU. List which surfaces and why the held-state skip
+   misses them, before fixing.
+5. Drop the 0-draw load/store passes (no draws and no clear: no pass at all; with a clear, DONT_CARE loads).
+6. The lead's A630 items (NOTES-a630.md): LLCC slice activation for the GPU and SMMU walks (a6xx_llc_activate, behind a boot arg);
+   GMEM through the autotuner (TU_AUTOTUNE_ALGO=profiled|prefer_gmem, TU_AUTOTUNE_FLAGS=tune_small); a TU_DEBUG=perf run for UBWC
+   demotions; normalize perf.py's SP busy by the 2 SPs.
+7. Shader next steps from the handoff above (XR fill NaN selects, texture prefetch, occupancy).
