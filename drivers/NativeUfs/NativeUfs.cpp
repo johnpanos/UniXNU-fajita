@@ -1027,6 +1027,7 @@ static uint32_t be32w (const uint8_t *at)
 static char gRootManifestText[900];
 #include "RootLayout.h"
 #include "RootWindowRead.h"
+#include "PartRead.h"
 
 // native-ufs-root-base=<MiB>: byte offset in userdata of the root image's manifest (0, the default: its first block, the
 // first image). A second image sits at a fixed base after the first; its manifest is version 2 and names that base.
@@ -1987,6 +1988,7 @@ bool NativeUfs::startRoot (IOService *provider)
     return false;
   }
   native_ufs_root_step = 3;
+  partread::registerOnce ();   // native-ufs-partread=1 only: the read-only named-partition kcmd
   if (layout->manifestStatus != 0) {
     rootDiagnosticFailure ("root manifest rejected");
     printf ("NativeUfs: no valid root manifest in userdata (status %u, base %llx, magic %08x %08x)\n",

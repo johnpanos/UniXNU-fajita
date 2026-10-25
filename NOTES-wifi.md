@@ -155,6 +155,27 @@ session dumps `modemst1/2`, `fsg`, `fsc` to `.cache/` before rmtfs is enabled. N
 (`native_ufs_store_*`) but it is a dedicated region, not arbitrary partitions; serving these partitions needs a read path
 to those GPT entries — an open item for the NativeUfs side (likely a small read-only partition-by-name accessor).
 
+### EFS backup (done 2026-10-25, verified)
+
+`drivers/NativeUfs/PartRead.h` (on with `native-ufs-partread=1`, off by default) is a read-only reader for any named GPT
+partition on LUNs 0..5: `kcmd ufspart find NAME | list LUN | read NAME OFF COUNT` (READ(10) only), plus the in-kernel
+`native_ufs_part_find` / `native_ufs_part_read` that rmtfs will use. `scripts/fajita/test/ufspart.py backup` reads each
+partition twice through a held session (each 128 KiB chunk CRC32-checked between the kernel buffer and the host), requires
+both passes identical, checks the size and GUIDs against the GPT before and after, and writes `.cache/efs-backup/NAME.img`
+(mode 400) + `manifest.json`; `ufspart.py verify` re-checks a backup against the live GPT and the manifest sha256.
+
+| Partition | LUN | first..last (4 KiB) | Size | Content |
+| --- | --- | --- | --- | --- |
+| modemst1 | 5 | 32..543 | 2 MiB | populated (EFS) |
+| modemst2 | 5 | 544..1055 | 2 MiB | populated (EFS) |
+| fsg | 5 | 1056..1567 | 2 MiB | **all zero** on this phone |
+| fsc | 5 | 1568..1599 | 128 KiB | all zero |
+| persist | 0 | 8..8199 | 32 MiB | populated |
+| oem_stanvbk, oem_dycnvbk | 0 | 77064.., 74504.. | 10 MiB each | in `.cache/efs-backup-oem/` |
+
+Type GUIDs are the Qualcomm ones (modemst1 `ebbeadaf-22c9-e33b-8f5d-0e81686a68cb`, ...); the sha256s are in the manifests.
+Nothing has written these partitions; rmtfs stays read-only until a write path is reviewed.
+
 ## 6. Code map (host phase)
 
 | File | What | Tested |

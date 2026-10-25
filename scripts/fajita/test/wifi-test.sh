@@ -57,7 +57,7 @@ fails=0; declare -A VERDICT
 # --- build one --test image at fajita-wifi=$maxN (never committed; PSK is not a boot arg) ---
 build() {
   [ -n "${WIFI_NO_BUILD:-}" ] && { [ -f "$OUT/payload.img" ] && return 0; echo "WIFI_NO_BUILD set but no image at $OUT"; exit 1; }
-  local args=(fajita-wifi=$maxN fajita-wifi-dump=1)
+  local args=(fajita-wifi=$maxN fajita-wifi-dump=1 native-ufs-partread=1)   # partread: rmtfs reads the EFS partitions (read-only)
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
