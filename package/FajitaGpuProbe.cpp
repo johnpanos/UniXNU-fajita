@@ -416,7 +416,7 @@ extern "C" volatile uint64_t native_gop_gpu_offers __attribute__((weak)), native
     native_gop_gpu_failures __attribute__((weak)), native_gop_gpu_abandoned __attribute__((weak));
 extern "C" volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak)), native_legacy_gpu_last_status __attribute__((weak));
 // ---- GPU system cache (LLCC) ------------------------------------------------------------------------------------------
-// fajita-gpu-llc=BITS (default 0; bit 2: see the GPU context's MAIR below): bit 0 activates the GPU data slice (SCID 12, 2304 KiB), bit 1 the GPU page-table-walk slice
+// fajita-gpu-llc=BITS (default 0): bit 0 activates the GPU data slice (SCID 12, 2304 KiB), bit 1 the GPU page-table-walk slice
 // (SCID 11, 512 KiB), and points the GPU's traffic at them, as Linux's llcc-qcom (sdm845_data, v1 registers) and a6xx_llc_activate
 // do for an SDM845 GPU behind its SMMU v2 (not MMU-500): slice attributes ATTR0/ATTR1 through the LLCC broadcast window, ACT_CTRL
 // activate and STATUS poll, then CX_MISC SYSTEM_CACHE_CNTL_1 (the SCIDs) and CNTL_0 (no allocation on a write miss). The walks only
@@ -465,24 +465,9 @@ void llcActivate()
         if (scid != ~0u) cntl1 |= (scid & 0x1f) << 25;
     }
     if (!cntl1) return;
-    // Bit 2: the GPU context bank's MAIR index 0 (the GPU's non-cacheable BOs) becomes inner non-cacheable, outer write-back
-    // read/write-allocate (0xf4, Linux's IOMMU_SYS_CACHE attribute), so the LLC allocates GPU data: an outer non-cacheable
-    // access bypasses it whatever the SCID. The CPU's accesses go through the same system cache, so nothing else changes.
-    if (want & 4) {
-        const uint32_t id1 = *reinterpret_cast<volatile uint32_t *>(gSmmu.va + 0x24);
-        const uint32_t page = (id1 & (1u << 31)) ? 0x10000 : 0x1000, cb = (1u << (((id1 >> 28) & 7) + 1)) * page;   // CB0
-        volatile uint32_t *r = reinterpret_cast<volatile uint32_t *>(gSmmu.va + cb);
-        if (cb + page <= gSmmu.bytes) {
-            const uint32_t was = r[0x38 / 4];
-            r[0x38 / 4] = (was & ~0xffu) | 0xf4;
-            __asm__ volatile("dsb sy" ::: "memory");
-            r[0x618 / 4] = 0;   // TLBIALL
-            r[0x7f0 / 4] = 0;   // TLBSYNC
-            unsigned us = 0;
-            while ((r[0x7f4 / 4] & 1) && us < 1000) {IODelay(1); ++us;}
-            gpuLog("llc smmu cb0 at +%x mair0 %08x->%08x sync %u us", cb, was, r[0x38 / 4], us);
-        } else gpuLog("llc smmu cb0 at +%x outside the window", cb);
-    }
+    // A bit-2 variant (ac8174c) that rewrote the GPU context's MAIR index 0 to outer write-back (0xf4) so the LLC would allocate GPU
+    // data broke rendering (backboardd crashed, the boot logo stayed): the CPU writes those BOs through non-cacheable mappings that
+    // bypass the system cache, so the GPU read stale LLC lines. Data allocation needs matching CPU attributes first; not done.
     winWr(gCxMisc, 8, cntl1);
     winWr(gCxMisc, 4, (winRd(gCxMisc, 4) & ~0xfu) | 0x3);
     gpuLog("llc cx_misc cntl0 %08x cntl1 %08x (wrote %08x)", winRd(gCxMisc, 4), winRd(gCxMisc, 8), cntl1);
