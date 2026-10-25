@@ -19,7 +19,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WIFI = ROOT / 'drivers/FajitaWifi'
-SOURCES = ['WifiMdt.c', 'WifiQmi.c', 'WifiQrtr.c', 'WifiBoard.c', 'tests/test_wifi.c']
+SOURCES = ['WifiMdt.c', 'WifiQmi.c', 'WifiQrtr.c', 'WifiBoard.c', 'WifiFat.c', 'tests/test_wifi.c']
+DEFAULT_MODEM = ROOT / '.cache/fw-modem-part/modem_b.img'   # ufspart.py backup --passes 1 --out .cache/fw-modem-part modem_b
+FAT_FILES = ['image/mba.mbn', 'image/modem.mdt', 'image/modem.b20', 'image/modem.b28', 'image/wlanmdsp.mbn', 'image/bdwlan.102',
+             'image/modemr.jsn']
 DEFAULT_FW = ROOT / '.cache/firmware-wifi/src/lib/firmware/qcom/sdm845/OnePlus/enchilada'
 DEFAULT_BOARD = ROOT / '.cache/firmware-wifi/src/lib/firmware/postmarketos/ath10k/WCN3990/hw1.0/board-2.bin'
 
@@ -38,6 +41,8 @@ def main():
     parser.add_argument('--out')
     parser.add_argument('--firmware', default=str(DEFAULT_FW) if DEFAULT_FW.is_dir() else None)
     parser.add_argument('--board', default=str(DEFAULT_BOARD) if DEFAULT_BOARD.is_file() else None)
+    parser.add_argument('--modem', default=str(DEFAULT_MODEM) if DEFAULT_MODEM.is_file() else None,
+                        help='a dumped modem_a/modem_b partition: the FAT reader is checked against mtools (mcopy)')
     args = parser.parse_args()
     out = Path(args.out or tempfile.mkdtemp(prefix='fajita-wifi-host-'))
     out.mkdir(parents=True, exist_ok=True)
@@ -53,6 +58,20 @@ def main():
     result = subprocess.run(run)
     if result.returncode:
         raise SystemExit('FAIL: fajita Wi-Fi host tests')
+    if args.modem and shutil.which('mcopy'):
+        fat = out / 'test_fat'
+        subprocess.run([args.cc, '-std=c11', '-g', '-O1', '-Wall', '-Wextra', '-Werror', *san, str(WIFI / 'WifiFat.c'),
+                        str(WIFI / 'WifiMdt.c'), str(WIFI / 'tests/test_fat.c'), '-o', str(fat)], check=True)
+        mine, ref = out / 'fat-mine', out / 'fat-ref'
+        mine.mkdir(exist_ok=True); ref.mkdir(exist_ok=True)
+        if subprocess.run([str(fat), args.modem, str(mine), *FAT_FILES]).returncode:
+            raise SystemExit('FAIL: FAT reader')
+        env = dict(__import__('os').environ, MTOOLS_SKIP_CHECK='1')
+        for f in FAT_FILES:
+            subprocess.run(['mcopy', '-n', '-o', '-i', args.modem, '::/' + f, str(ref / Path(f).name)], check=True, env=env)
+            if (mine / Path(f).name).read_bytes() != (ref / Path(f).name).read_bytes():
+                raise SystemExit(f'FAIL: FAT reader: {f} differs from mcopy')
+        print(f'PASS: FAT reader matches mcopy for {len(FAT_FILES)} files')
     print(f'(tests {"sanitized" if san else "without sanitizers"})')
 
 
