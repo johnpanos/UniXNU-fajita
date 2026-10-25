@@ -536,3 +536,17 @@ gpu-env `NGPU_YCBCR_FILTER=exact` keeps Metal's) samples the converted image wit
 Same-boot A/B, exact then device, twice each: home 40.9 / 40.7 vs 43.0 / 44.7; App Library 28.1 / 29.0 vs 28.3 / 27.9.
 GPU busy on home fell from 94-96% to 61-64%, so home is no longer GPU-bound. corr-tour ycbcr16 vs held15 is within normal tour
 variance; home and lock screenshots are clean.
+
+### supportsFamily: memo (2026-10-25, translator 38a0567e, stack 59136df)
+
+The CPU profile after the YCbCr change: 46% of backboardd's running samples were in Metal's `MTLGetTextureLevelInfoForDeviceWithOptions`
+-> `supportsFamily:` -> `Device::supports_family` -> `families::audit`. Every texture's level layout re-ran the whole family audit,
+cloning every format row's answers, plus the realloc/memmove of its rows Vec. The answer is now kept per device and family. Running
+samples over the same run fell from 6689 to 3723.
+
+**fps.sh x3, fresh boot: home 45.1 / 45.3 / 45.0 plain, 44.8 / 45.3 / 46.4 60-frame; App Library 34.7 / 35.1 / 33.3.**
+
+Frame trace, median busy frame 21.9 ms = cpu_gap 7.7 + encode 2.9 + commit 9.6. The commit time is the async worker's translation:
+CoreAnimation's `commitAndWaitUntilSubmitted` waits for it. GPU 10.6 ms overlaps, plus the presenter's 3.6 ms. The render thread runs
+only about 27% of a core, and the rest is waiting. Next: `NGPU_SCHEDULED_EARLY=1` (A/B), so the wait ends once the commit is queued
+on the worker.
