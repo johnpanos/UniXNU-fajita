@@ -620,3 +620,13 @@ motion 51.8 / 54.3 / 53.6.**
   - Default boot: home 55.3 [54.3-56.2], App Library 49.6 [45.0-50.0], worker 96 us a draw.
   - No gain: the busy render threads already run on the A75s. The kernel config has no AMP scheduler, so no P-cluster
     registration was tried.
+
+### Render defaults flipped on (2026-10-25, stack with NativeMetal plugin defaults)
+
+ROUNDS=3 interleaved on one boot (home and App Library motion, median [min-max]):
+- off: 53.4 [53.2-55.6] / 48.8 [46.5-54.1]
+- `NGPU_ENCODE_BATCH=32`: 54.8 / 50.0
+- all (batch 32, `NMB_TCACHE=1`, `NGPU_LINEAR_ALIGNMENT=64`, `M2V_ALIAS_PADDED_TARGETS=1`): **54.8 [54.3-56.0] / 55.8 [55.8-56.3]**
+An 8-restart stress run was clean on the lock screen (one home diff of 4975 px, not kept; the other seven ~550), and tour all17 was
+clean (diffs are the clock and the App Library's search view). NativeAdrenoMetalPlugin.mm now sets the four at load (overwrite
+off): a gpu-env line still overrides each. The tcache garbage icon seen earlier came with the staleHeld bug, since fixed.
