@@ -402,3 +402,37 @@ GPU ms per presented frame, 450-850 swaps, about 20.5 ms in total:
    GMEM through the autotuner (TU_AUTOTUNE_ALGO=profiled|prefer_gmem, TU_AUTOTUNE_FLAGS=tune_small); a TU_DEBUG=perf run for UBWC
    demotions; normalize perf.py's SP busy by the 2 SPs.
 7. Shader next steps from the handoff above (XR fill NaN selects, texture prefetch, occupancy).
+
+## Current state (2026-10-24, GPU round 3, in progress)
+
+Measured on the stock first-boot Data (references rebased with home-page1.sh --rebase). The stock layout has two home pages and a
+heavier App Library than round 2's Data, so the baseline moved: **home ~34 plain / ~31 60-frame, App Library ~19** (fps.sh, fresh
+boot, x3). All variants are GPU-bound (gpu-ab: gpu busy 93-96%).
+
+| Change | Home plain / 60-frame | App Library | Note |
+| --- | --- | --- | --- |
+| translator f372253f + stack 448b7b2 (Turnip cs-BO recycle, frontend string guard) | 34.3 / 31.1, 34.1 / 31.4, 33.6 / 31.3 | 17.6, 19.7, 19.6 | new baseline |
+| NMB_TCACHE=1 (bridge thread-cache allocator) | 32.8 vs 32.3 (gpu-ab swipes) | | noise: GPU-bound |
+| fajita-gpu-llc=3 (LLCC GPU + GPUHTW slices) | 34.1 / 31.9, 34.1 / 31.3 | 19.6, 18.4 | no gain: GPU BOs are outer non-cacheable |
+| fajita-gpu-llc bit 2 (GPU MAIR idx0 outer WB) | broken | | backboardd crashed: CPU NC writes bypass the LLC; removed |
+| TU_CS_RECYCLE=0 | 33.5 / 30.9 | 17.3 | recycle is not a regression |
+| NGPU_COLOR_WRITES=exact + NGPU_EXTENDED_RANGE=exact | 31.8 / 30.6 | 16.1 | the round-2 shader policies help (ALU 66% -> 51%) |
+| NGPU_YCBCR_SEED=0 + NGPU_HEAP_HELD=0 (no held shadows) | 21.2 / 20.6 | 7.2 | what the held-state skip is already worth |
+
+Per-pass GPU split (passtrace.sh fps, stack 49d71e9; `.cache/fajita-work/pt-r3/split.txt`), 22.6 ms per presented frame: CA main
+composite ~7.8 ms (sysmem, no GMEM), copy-ins 9.1 ms (BGRA8 4.7/frame 5.0 ms, RGBA8 15.7/frame 2.6 ms, A8 22.5/frame 1.5 ms),
+presenter scale cs 3.65 ms, copy-backs 1.24 ms.
+
+Copy-ins (translator `M2V_SHADOW_LOG=PATH` in gpu-env: one line per copy in with key, host|fixed, bytes, extent, reason, why=):
+about 780 a second. By bytes: the 1125x2436 host surface "forgotten" (32 GB in 86 s, the stated generation unchanged), host
+1271x1823 and 1326x1326 "unstated" (11.7 and 7.5 GB), and hundreds of small "fixed" (non-IOSurface) textures "unstated" (small in
+bytes). "moved" (the CPU really wrote the surface): none. Fix attempts: surface generations stated at attachments and blits, private
+heap textures held (stack 4c8694a: no change); surface views state their parents (next build). `M2V_SHADOW_UPPER_BOUND=1` measures
+the prize (unsafe, measurement only).
+
+Tools added this round: translator `encode_bench` example (host per-draw CPU: 5.8 us/draw on Zen 5, ~34k instructions and ~40
+allocations a draw under callgrind); gpu-env A/B switches `TU_CS_RECYCLE=0`, `NGPU_COLOR_WRITES=exact`, `NGPU_EXTENDED_RANGE=exact`,
+`NGPU_HEAP_HELD=0`, `NMB_TCACHE=1`, `NGPU_TEXTURE_LOG=1`, `M2V_SHADOW_LOG`, `M2V_SHADOW_UPPER_BOUND`; `gpu-ab.sh FPS=1` (fps.sh per
+variant); `corr-tour.sh NAME` / `--diff A B` (Settings, App Library, lock, Notes, Calendar); perf.py per-SP ratios.
+
+Known: Notes shows a black screen 4 s after launch (before and after these changes); not investigated.
