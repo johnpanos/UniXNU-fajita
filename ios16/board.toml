@@ -72,6 +72,7 @@ archives = [
   { run = "build-fajita-touch.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },            # libFajitaTouch.a (fajita-touch=<stage>), NOTES-touch.md
   { run = "build-fajita-cpufreq.py", when = "XNU_BOOT_PROGRESS" },                  # libFajitaCpuFreq.a (fajita-cpufreq=<n>)
   { run = "build-fajita-pmic.py", when = "XNU_BOOT_PROGRESS" },                     # libFajitaPmic.a (fajita-pmic=<stage>): charger, keys, battery
+  { run = "build-fajita-wifi.py", when = "XNU_BOOT_PROGRESS" },                     # libFajitaWifi.a (fajita-wifi=<stage>, default off): WCN3990/modem bring-up, NOTES-wifi.md
   { run = "build-fajita-gpu.py", when = "XNU_NATIVE_LEGACY_DISPLAY" },              # libFajitaGpu.a (fajita-gpu=<stage>, Adreno 630), NOTES-gpu.md
 ]
 
@@ -171,7 +172,11 @@ board_args = [
   "offline-legacy-cpu-present=1",
   # The iPhone X screen, 1125x2436 at scale 3 (375x812 points), fitted onto the 1080x2340 panel (0.96, nearly edge to edge).
   "offline-legacy-unit-scale=3","fajita-display-logical=1125x2436","fajita-display-ppi=458","fajita-fb-wc=1","fajita-fb-src-cached=1","sheng-fb-diff=1",
-  "sheng-vsync=60",
+  "sheng-vsync=60",   # the software tick: only where fajita-hw-vsync is off
+  # Tear-free scan-out in hardware (NOTES-gpu-userland.md, vsync): the DPU's PINGPONG_0 rd_ptr interrupt paces the display (no timer), the
+  # panel's TE paces the pingpong (fajita-hw-vsync=2: Linux's command-mode tear check), and frames go to the screen by VIG0 flips at the
+  # frame boundary between three carve-out buffers, never into the buffer scanned (fajita-fb-flip=2: a swap retires at its copy's end).
+  "fajita-hw-vsync=2","fajita-fb-flip=2",
   "sheng-banner=0",
   # Touch edge zone of NativeHidInput (thousandths of the screen): HackiOS's iPhone X zone, 16/375 at the sides, 16/812 at the top,
   # 34/812 (the home bar strip) at the bottom. A contact that begins there is marked as coming in over the edge (0x800).

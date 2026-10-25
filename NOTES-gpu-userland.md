@@ -630,3 +630,43 @@ ROUNDS=3 interleaved on one boot (home and App Library motion, median [min-max])
 An 8-restart stress run was clean on the lock screen (one home diff of 4975 px, not kept; the other seven ~550), and tour all17 was
 clean (diffs are the clock and the App Library's search view). NativeAdrenoMetalPlugin.mm now sets the four at load (overwrite
 off): a gpu-env line still overrides each. The tcache garbage icon seen earlier came with the staleHeld bug, since fixed.
+
+## Vsync and tear-free scan-out in hardware (2026-10-25, board defaults fajita-hw-vsync=2 fajita-fb-flip=2)
+
+How a frame reached the panel before: CA swaps through NativeLegacyDisplay (sheng-fb-gpu=1). NativeGOPPresenter hands the frame to
+backboardd's GPU client, whose compute pass scaled it straight into the one ABL splash buffer at 0x9d400000 (1080x2340, stride 4320).
+The panel is a command-mode Samsung panel: PP0 autorefresh is 0x80000001 and INTF1 counts no frames. The DPU pushed VIG0's buffer to the
+panel by itself while the GPU rewrote that buffer, so frames tore. `sheng-vsync=60` was an IOTimerEventSource. ABL also left PP0's tear
+check off: SYNC_CONFIG_VSYNC 0x80088 runs the internal counter at 59.06 Hz, though the TE pin (gpio10, mdp_vsync, TLMM CFG 0x4) and
+MDP_VSYNC_SEL (0 = GPIO 0) are wired.
+
+Now:
+- **A, hardware vsync** (`fajita-hw-vsync=1`). The MDSS interrupt (GIC SPI 83 = INTID 115, level, armcpu_spi_attach) is fanned out
+  by MDP INTR (MDSS+0x1010/0x1014/0x1018), with PP0 rd_ptr at bit 12. The handler triggers an IOInterruptEventSource on the display
+  work loop, which sends native_legacy_vsync_notify with the IRQ's timestamp. The timer is not created. No vsync client registers
+  in this port (counted as "no-client"), so CA's pacing comes from swap completion.
+- **A2, TE pacing** (`fajita-hw-vsync=2`, `kcmd dpu te on|off`). Linux's command-mode tear check
+  (dpu_encoder_phys_cmd_tearcheck_config): hw_vsync_mode (bit 20), height 2 x vtotal, init/start at vdisplay, rd_ptr at vdisplay + 1,
+  thresholds 4/4, then TEAR_CHECK_EN. It restores itself if no rd_ptr arrives within 200 ms. The rd_ptr interval went from 16.93 ms
+  to 16.685 ms (59.93 Hz, the panel).
+- **B, flips** (`fajita-fb-flip`). Buffers at carve-out +0, +16 MiB and +26 MiB (triple buffering; NativeAdreno memory types
+  0x5343/0x5344/0x5345; hand-off ABI v2, NGPSwap.target/flags; NativeMetal carries the v2 wire header). The GPU writes a buffer that
+  is neither on screen nor about to be. On completion: VIG0 SSPP_SRC0_ADDR, then CTL0_FLUSH (VIG0 | CTL). The latch is seen in the
+  interrupt (CTL0 start, INTR2 bit 9 at MDSS+0x1008/0x100c/0x102c, with the rd_ptr check as fallback) as the VIG0 flush bit cleared,
+  and a thread_call takes the next step. Screenshots and the diagnostic export follow the buffer on screen.
+  - `=1`: a swap retires at its latch, so frame-done means on the panel.
+  - `=2` (default): a swap retires when its copy completes, and the flip still happens at the frame boundary.
+- **Results.** Over a full fps run plus a tour with `=2`: flips requested 8294, latched 8294, watchdog 0, refused 0; 2258 frames
+  queued behind a pending flip; **scanned-buffer writes 0**.
+  - `kcmd dpu tear-test 10 single|flip` (a moving bar redrawn each frame): flip ran 600 frames in 10 s, and the user watched
+    both: "its good!".
+  - The presenter's GPU copy is 3.61 ms median (p90 3.66) with flips, as before. The buffers' attributes are the same and nothing
+    does maintenance per flip.
+- **fps.** `=1` costs a lot: home motion 47.5, App Library 40.8. NativeLegacyDisplay offers one GPU swap at a time (its single
+  gpuRequest), so retiring at the latch holds the next frame back by up to a frame, and triple buffering can't help (nothing queues).
+  With `=2`: home motion 55.4 [51.5-57.8], App Library 48.3 [43.6-52.9]. That's one run, against 55.8 from the ROUNDS=3 render-defaults
+  A/B. Single App Library runs vary 45-56 by themselves (scrolls that reveal new rows, 43-50), so the gap is not proven. If it holds
+  on a ROUNDS=3 A/B, the likely cost is the flip's ordering: a frame waits for a free buffer when one is shown and one is pending
+  (2021 deliveries held).
+- **Next.** QSEED3 scaling at scanout (the presenter's scale pass goes, a plain copy instead), then direct scan-out of CA's surfaces
+  through an MDP SMMU context (SID 0x880), then two outstanding GPU swaps in the display so `=1` costs nothing.
