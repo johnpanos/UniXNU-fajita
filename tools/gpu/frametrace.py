@@ -26,6 +26,7 @@ import argparse, collections, json, statistics as st, sys
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument('trace', nargs='?')
 ap.add_argument('--passes')
+ap.add_argument('--mesa-log', help='with --passes: a Mesa log with IR3_SHADER_DEBUG disassembly ("Native code ... shader NAME with blake3 H"): names the draws\' shaders')
 ap.add_argument('--t0', type=int, default=0)
 ap.add_argument('--t1', type=int, default=1 << 62)
 ap.add_argument('--worst', type=float, default=7.0)
@@ -35,7 +36,23 @@ ap.add_argument('--json')
 a = ap.parse_args()
 
 
+def shader_names(path):
+    """blake3 prefix (16 hex) -> (stage, name, the stats line ir3 prints after the disassembly)."""
+    import re
+    names, cur = {}, None
+    for line in open(path, errors='replace'):
+        m = re.search(r'Native code.* for unnamed (\S+) shader (\S+) with blake3 ([0-9a-f]+)', line)
+        if m:
+            cur = m.group(3)[:16]
+            names[cur] = [m.group(1), m.group(2), '']
+            continue
+        if cur and not names[cur][2] and re.search(r'\d+ instrs?\b|instructions', line):
+            names[cur][2] = line.split('info:')[-1].strip()[:120]
+    return names
+
+
 def passes(path):
+    names = shader_names(a.mesa_log) if a.mesa_log else {}
     head, rows = '', []
     for line in open(path, errors='replace'):
         if line.startswith('#'):
@@ -52,13 +69,20 @@ def passes(path):
     print(head.strip())
     print('%d swaps over %.1f s (%.1f swaps/s); events %s, unpaired %s' % (swaps, window, swaps / window if window > 0 else 0,
                                                                            h.get('events', '?'), h.get('dropped', '?')))
-    nested = ('sysmem_clear', 'gmem_clear', 'gmem_load', 'gmem_store', 'sysmem_resolve', 'generic_clear', 'gmem_resolve')
+    nested = ('draw ', 'sysmem_clear', 'gmem_clear', 'gmem_load', 'gmem_store', 'sysmem_resolve', 'generic_clear', 'gmem_resolve')
     top = sum(r[2] for r in rows if not r[0].startswith(nested))
     print('%-46s %8s %9s %8s %8s %8s %7s %9s' % ('pass', 'n/frame', 'ms/frame', 'median', 'p95', 'max', 'share', 'draws'))
     for k, n, tot, med, p95, mx, dmed, dmax in rows:
         inner = k.startswith(nested)
         print('%-46s %8.2f %9.2f %8.3f %8.3f %8.2f %6s %9s' % (('  ' if inner else '') + k[:44], n / swaps, tot / swaps, med, p95, mx,
               '' if inner else '%5.1f%%' % (100 * tot / top if top else 0), '%d/%d' % (dmed, dmax) if k.startswith('rp ') else ''))
+    if names:
+        print('\ndraws by fragment shader (ms per presented frame):')
+        for k, n, tot, med, p95, mx, dmed, dmax in rows:
+            if k.startswith('draw '):
+                fs = k.split('fs=')[1].split()[0]; vs = k.split('vs=')[1]
+                f = names.get(fs, ['', '?', '']); v = names.get(vs, ['', '?', ''])
+                print('%7.2f ms  n/frame %6.2f  median %.3f  fs %s (%s)  vs %s  | %s' % (tot / swaps, n / swaps, med, f[1], fs, v[1], f[2]))
     print('total (top-level passes) %.2f ms per presented frame; nested steps (indented) are inside their render pass' % (top / swaps))
 
 
