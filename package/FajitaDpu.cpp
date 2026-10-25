@@ -107,6 +107,49 @@ void dpuIrq(void *) {
     }
 }
 
+// kcmd dpu te on|off: PINGPONG_0 paced by the panel's TE (gpio10, mdp_vsync; MDP_VSYNC_SEL 0 = GPIO 0) instead of its own counter, with
+// Linux's command-mode tear check (dpu_encoder_phys_cmd_tearcheck_config, dpu_hw_pp_enable_te): hw_vsync_mode, sync height twice vtotal,
+// init value and start position at vdisplay, rd_ptr at vdisplay + 1, thresholds 4/4, write count start + 5, then TEAR_CHECK_EN. ABL leaves
+// the tear check off and the pingpong on its own counter. Self-reverting in the kernel: if no rd_ptr interrupt comes within 200 ms of the
+// switch, every saved register is restored (a panel without TE would otherwise stop getting frames). On its own thread; the rd_ptr rate
+// over 2 s before and after is the result.
+char gTeResult[240] = "te: not run";
+constexpr uint32_t kTeRegs[] = {0x04, 0x08, 0x0c, 0x10, 0x18, 0x1c, 0x20, 0x00};   // TEAR_CHECK_EN last
+uint32_t gTeSaved[8]; bool gTeHave, gTeOn;
+void teRestore(volatile uint32_t *r) {for (unsigned i = 0; i < 8; ++i) wr(r, kPp + kTeRegs[i], gTeSaved[i]);}
+void teRun(void *arg, wait_result_t) {
+    volatile uint32_t *r = regs();
+    const bool on = arg != nullptr;
+    const uint32_t a = fajita_dpu_irq[1]; IOSleep(2000); const uint32_t b = fajita_dpu_irq[1];
+    bool reverted = false;
+    if (on) {
+        if (!gTeHave) {for (unsigned i = 0; i < 8; ++i) gTeSaved[i] = rd(r, kPp + kTeRegs[i]); gTeHave = true;}
+        const uint32_t vtotal = gTeSaved[1] & 0xffff, vdisplay = rd(r, kVig + 0x0c) >> 16;
+        const uint32_t start = vdisplay, threshStart = 4, threshContinue = 4;
+        wr(r, kPp + 0x00, 0);
+        wr(r, kPp + 0x04, (gTeSaved[0] & 0x7ffff) | (1u << 19) | (1u << 20));
+        wr(r, kPp + 0x08, vtotal * 2);
+        wr(r, kPp + 0x10, vdisplay);
+        wr(r, kPp + 0x20, vdisplay + 1);
+        wr(r, kPp + 0x1c, start);
+        wr(r, kPp + 0x18, (threshContinue << 16) | threshStart);
+        wr(r, kPp + 0x0c, start + threshStart + 1);
+        const uint32_t before = fajita_dpu_irq[1];
+        wr(r, kPp + 0x00, 1);
+        IOSleep(200);
+        if (fajita_dpu_irq[1] == before) {teRestore(r); reverted = true;}
+    } else if (gTeHave) {
+        teRestore(r);
+    }
+    const uint32_t c = fajita_dpu_irq[1]; IOSleep(2000); const uint32_t d = fajita_dpu_irq[1];
+    gTeOn = on && !reverted;
+    snprintf(gTeResult, sizeof gTeResult, "te %s: rd_ptr %u/2s before, %u/2s after%s | vsync %08x height %u init %u rd %u start %u en %u",
+             on ? "on" : "off", b - a, d - c, reverted ? ", no rd_ptr within 200 ms: restored" : "", rd(r, kPp + 0x04), rd(r, kPp + 0x08),
+             rd(r, kPp + 0x10), rd(r, kPp + 0x20), rd(r, kPp + 0x1c), rd(r, kPp + 0x00));
+    gBusy = false;
+    thread_terminate(current_thread());
+}
+
 struct TestArgs {uint32_t w, h, seconds;};
 TestArgs gArgs;
 
@@ -197,6 +240,18 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
         o.add("dpu: scale test %ux%u for %u s started\n", gArgs.w, gArgs.h, gArgs.seconds);
         return o.n;
     }
+    if (end - s >= 2 && !strncmp(s, "te", 2)) {
+        s += 2; while (s < end && *s == ' ') ++s;
+        const bool on = end - s >= 2 && !strncmp(s, "on", 2);
+        if (gBusy) {o.add("dpu: busy\n"); return o.n;}
+        if (!gIrqRegs) {o.add("dpu: te needs the DPU interrupt (fajita-hw-vsync=1)\n"); return o.n;}
+        gBusy = true;
+        thread_t t = nullptr;
+        if (kernel_thread_start(teRun, on ? (void *)1 : nullptr, &t) != KERN_SUCCESS) {gBusy = false; o.add("dpu: thread failed\n"); return o.n;}
+        thread_deallocate(t);
+        o.add("dpu: te %s started (result in kcmd dpu after 4 s)\n", on ? "on" : "off");
+        return o.n;
+    }
     if (s < end && *s == 'r') {
         ++s;
         uint32_t off = parse(s, end) & ~3u, n = parse(s, end);
@@ -227,7 +282,7 @@ size_t kcmdDpu(const char *args, size_t len, char *out, size_t cap) {
         o.add("display vsync: delivered %u sent %u no-client %u coalesced %u attach %d interval %u us\n", native_legacy_hw_vsync[0],
               native_legacy_hw_vsync[1], native_legacy_hw_vsync[2], native_legacy_hw_vsync[3], (int)native_legacy_hw_vsync[4] - 100,
               native_legacy_hw_vsync[5]);
-    o.add("%s\n", gResult);
+    o.add("%s\n%s\n", gResult, gTeResult);
     return o.n;
 }
 }  // namespace
@@ -255,5 +310,5 @@ extern "C" void fajita_dpu_poll(void) {
     if (done || !IOService::getPlatform()) return;
     done = true;
     if (fajita_usbdbg_register_kcmd)
-        fajita_usbdbg_register_kcmd("dpu", kcmdDpu, "DPU scan-out path: dpu | dpu q | dpu r OFF [N] | dpu scale-test [W H SECONDS]");
+        fajita_usbdbg_register_kcmd("dpu", kcmdDpu, "DPU scan-out path: dpu | dpu q | dpu r OFF [N] | dpu scale-test [W H SECONDS] | dpu te on|off");
 }
