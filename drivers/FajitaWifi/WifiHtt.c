@@ -159,6 +159,7 @@ static void rx_in_order(whtt *h, const uint8_t *m, uint32_t len)
     const uint32_t count = le16(m + 6);
     if (len < 8 + count * 12u) {++h->rx_bad; return;}
     if (h->rx_confused) return;
+    const int offload = (m[1] & 0x20) != 0;   // HTT_RX_IN_ORD_IND_INFO_OFFLOAD_MASK: no rx descriptor, a 7-byte header
     const uint8_t *d = m + 8;
     for (uint32_t i = 0; i < count; i++, d += 12) {
         const uint64_t pa = le64(d);
@@ -170,6 +171,22 @@ static void rx_in_order(whtt *h, const uint8_t *m, uint32_t len)
         if (!h->posted[idx]) {++h->rx_bad; h->rx_confused = 1; return;}
         h->posted[idx] = 0;
         uint8_t *b = h->pool + (size_t)idx * WHTT_RX_BUF;
+        if (offload) {   // ath10k_htt_rx_h_rx_offload: htt_rx_offload_msdu {msdu_len, peer_id, vdev_id, tid, fw_desc} + nwifi
+            ++h->rx_offload;
+            const uint32_t olen = le16(b);
+            if (olen && olen <= WHTT_RX_BUF - 7) {
+                uint8_t eth[WHTT_RX_BUF];
+                const int pad = h->cfg.nwifi_pad;
+                h->cfg.nwifi_pad = 0;   // the offloaded header is not padded
+                const uint32_t n = nwifi_to_eth(h, b + 7, olen, eth);
+                h->cfg.nwifi_pad = pad;
+                if (n) {++h->rx_frames; h->ops.rx(h->ops.ctx, eth, n);}
+            } else {
+                ++h->rx_bad;
+            }
+            repost(h, idx);
+            continue;
+        }
         const uint32_t attn = le32(b + RXD_ATTENTION);
         const uint32_t decap = (le32(b + RXD_MSDU_START_INFO1) >> 8) & 3u;
         if (!(attn & WA_RX_ATTENTION_FLAGS_MSDU_DONE)) {++h->rx_bad; h->rx_confused = 1; return;}   // ath10k: incomplete frame

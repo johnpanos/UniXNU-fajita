@@ -310,6 +310,23 @@ static void t_htt_rx(void)
     }
     send(h, &in);
     CHECK(g_nrx == 4 && g_rxl[1] == 34 && g_rxl[2] == 35 && g_rxl[3] == 36 && g_rxf[1][12] == 0x86);
+    // an offloaded indication (info bit 5): no rx descriptor, a 7-byte header {msdu_len, peer_id, vdev_id, tid, fw_desc} and an
+    // unpadded native-wifi frame (ath10k_htt_rx_h_rx_offload)
+    {
+        ind_begin(&in, 5);
+        in.msg[1] = 0x20;
+        const uint64_t pa = h->ring[g_tgt_ring];
+        g_tgt_ring = (g_tgt_ring + 1) & h->size_mask;
+        uint8_t *b = host(pa);
+        memset(b, 0, 64);   // no attention word: an offloaded buffer has none
+        const uint32_t m = nwifi(b + 7, 0x02, 0, MYMAC, BSSID, PEER, 0x0806, 28, 0);
+        w16(b, m); w16(b + 2, 5); b[4] = 0; b[5] = 0;
+        uint8_t *dd = in.msg + 8;
+        w64(dd, pa); w16(dd + 8, m + 7);
+        in.n = 1; w16(in.msg + 6, 1);
+        send(h, &in);
+        CHECK(g_nrx == 5 && g_rxl[4] == 14 + 28 && g_rxf[4][12] == 0x08 && g_rxf[4][13] == 0x06 && h->rx_offload == 1 && !h->rx_confused);
+    }
     // a header with no padding (feature present) is read the same when the flag is off
     whtt *h2 = new_h(128, 8, 0);
     ready(h2);

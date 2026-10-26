@@ -248,7 +248,9 @@ for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do
   grep -aqE "$done_re|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
 done
 evaluate
-session_end; trap - EXIT
+if [ -n "${WIFI_HOLD:-}" ]; then   # keep the session for live probing (it still ends itself when idle)
+  trap - EXIT; say "session $NAME held (WIFI_HOLD): scripts/fajita/test/session.sh end $NAME when done"
+else session_end; trap - EXIT; fi
 
 say "== summary"
 for s in "${want[@]}"; do printf '  %-9s %s\n' "$s" "${VERDICT[$s]:-?}" | tee -a "$REPORT"; done

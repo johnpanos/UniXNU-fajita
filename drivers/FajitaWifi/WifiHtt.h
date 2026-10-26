@@ -73,6 +73,7 @@ typedef struct whtt {
     uint16_t *free_ids; uint32_t nfree;
     uint8_t *busy;
     // counters
+    uint32_t rx_offload;          // MSDUs of offloaded in-order indications (no rx descriptor)
     uint32_t rx_ind, rx_frames, rx_drop_attn, rx_drop_decap, rx_drop_fmt, rx_drop_nondata, rx_bad;
     uint32_t tx_frames, tx_done, tx_full, tx_err, sec_ind, other_msgs, peer_map;
 } whtt;

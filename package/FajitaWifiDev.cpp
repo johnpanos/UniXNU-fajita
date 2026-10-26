@@ -205,7 +205,17 @@ void noteFrame(FrameNote *ring, unsigned &n, const uint8_t *eth, uint32_t len)
         if (f.ip_proto == 17 && len >= 14 + ihl + 4) f.udp_dport = uint16_t(eth[14 + ihl + 2] << 8 | eth[14 + ihl + 3]);
     }
 }
-void devRx(void *, const uint8_t *eth, uint32_t len) {noteFrame(gRxNotes, gRxNoteN, eth, len); fajita_net_input(eth, len);}   // poll thread, gLock held
+uint32_t gRxUnicast, gRxDhcp, gRxArp;
+void devRx(void *, const uint8_t *eth, uint32_t len)   // poll thread, gLock held
+{
+    if (!memcmp(eth, gDev.mac, 6)) ++gRxUnicast;
+    if (len >= 14 && eth[12] == 0x08 && eth[13] == 0x06) ++gRxArp;
+    FrameNote tmp[1]; unsigned k = 0;
+    noteFrame(tmp, k, eth, len);
+    if (tmp[0].udp_dport == 68) ++gRxDhcp;
+    if (!(eth[0] & 1) || tmp[0].udp_dport == 68 || gRxNoteN < 4) noteFrame(gRxNotes, gRxNoteN, eth, len);   // keep the interesting ones
+    fajita_net_input(eth, len);
+}
 uint32_t gTxOk, gTxErr;
 // en0's start routine (its own thread): one Ethernet frame to the AP
 int wifiSend(void *, const void *frame, size_t len)
@@ -345,11 +355,11 @@ extern "C" void fajita_wifi_dev_poll(void)
         if (gScans) scanRow();
         if (gConnects) {
             const wmlme &m = gDev.mlme;
-            row(11, "FW7 link %s reason %u akm %u pmf %u sae c%u/f%u/t%u st%u auth%u assoc%u eapol rx%u tx%u keys %u auth %d aid %u data rx%u tx%u/%u compl ok%u disc%u noack%u post%u x%u rxdrop a%u d%u f%u n%u%s",
+            row(11, "FW7 link %s reason %u akm %u pmf %u sae c%u/f%u/t%u st%u auth%u assoc%u eapol rx%u tx%u keys %u auth %d aid %u data rx%u tx%u/%u compl ok%u disc%u noack%u post%u x%u rxdrop a%u d%u f%u n%u bad%u%s off%u rx ucast%u dhcp%u arp%u%s",
                 wmlme_state_name(m.state), m.reason, m.akm, m.pmf, m.sae_commits, m.sae_confirms, m.sae_tokens, m.sae_status, m.auth_tx,
                 m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr,
                 gDev.tx_status[0], gDev.tx_status[1], gDev.tx_status[2], gDev.tx_status[3], gDev.tx_status[4],
-                gDev.htt.rx_drop_attn, gDev.htt.rx_drop_decap, gDev.htt.rx_drop_fmt, gDev.htt.rx_drop_nondata, gDev.tx_unprotected ? " UNPROT" : "");
+                gDev.htt.rx_drop_attn, gDev.htt.rx_drop_decap, gDev.htt.rx_drop_fmt, gDev.htt.rx_drop_nondata, gDev.htt.rx_bad, gDev.htt.rx_confused ? "(CONFUSED)" : "", gDev.htt.rx_offload, gRxUnicast, gRxDhcp, gRxArp, gDev.tx_unprotected ? " UNPROT" : "");
         }
     }
     IOLockUnlock(gLock);
