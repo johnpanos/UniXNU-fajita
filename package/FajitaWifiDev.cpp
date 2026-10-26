@@ -181,6 +181,13 @@ void scanRow()
         if (b) snprintf(best, sizeof best, "%s %02x:%02x:%02x:%02x:%02x:%02x %u MHz %d dBm%s", gReqSsid, b->bssid[0], b->bssid[1], b->bssid[2],
                         b->bssid[3], b->bssid[4], b->bssid[5], b->freq, b->rssi, b->rsn_ok ? " wpa2-psk" : " (rsn?)");
         else snprintf(best, sizeof best, "%s NOT SEEN", gReqSsid);
+        static unsigned rsnShown;
+        if (b && !b->rsn_ok && rsnShown != gScans && m.state == WMLME_SCAN_DONE) {   // once per scan: why the RSN element is not usable
+            rsnShown = gScans;
+            char hex[3 * WMLME_RSN_MAX + 1] = "";
+            for (unsigned k = 0; k < b->rsn_len; ++k) snprintf(hex + 3 * k, sizeof hex - 3 * k, " %02x", b->rsn[k]);
+            note("FW7 %s rsn (%u bytes):%s", gReqSsid, b->rsn_len, b->rsn_len ? hex : " none");
+        }
     }
     row(9, "FW7 scan #%u %s bss %u frames %u full %u: %s", gScans, wmlme_state_name(m.state), m.nbss, m.scan_frames, m.scan_full, best);
 }

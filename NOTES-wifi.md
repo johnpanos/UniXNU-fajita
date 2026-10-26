@@ -223,6 +223,29 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
 
 ## Current state (keep this updated; a restart starts here)
 
+**Opus round (branch `wifi-opus`, worktree `../UniXNU-fajita-wifi3`), 2026-10-25.**
+- **wlfw solved (on the phone).** The wlan PD was up all along: the modem announces 32 QMI services before wlfw, and
+  the router's remote-server table had 32 slots, so wlfw's NEW_SERVER (the 33rd) was dropped without an event (77dd018).
+  Candidates (a)(b)(c) were not needed. Table now 128, overflow still delivers the event. Result:
+  `FW5 wlfw enabled ind2 cap chip=30214 board=0 fw=20028032 msa2 assigned bdf bdwlan.bin 19152/19152 seg4 fw_ready1`
+  (msa_assign worked, BDF downloaded, FW_READY, wlan_cfg + wlan_mode). 46 services in all.
+- **Fixed-size table audit** (f74ac6c): every overflow counted and shown (GLINK err sites in FW3 `err N[site:count]`,
+  QRTR drop/flowfull/txqfull, SMP2P over, pd-mapper more/cut, TFTP busy, rmtfs full, MLME scan table 64 with
+  weakest-non-target eviction, msa_info > 2 regions refused).
+- **Stage 6, the device (fajita-wifi=6, on the phone):** `drivers/FajitaWifi/WifiDev.[ch]` (host-tested, `t_dev.c`)
+  + `package/FajitaWifiDev.cpp`. DMA arena = `FW_WLAN_DMA_PHYS` 0xf6000000 + 8 MiB, held with phys-reserve (in
+  wifi-test's PHYS_RESERVE), mapped **write-combine (Normal NC)**: a Device (InhibitCache) mapping panicked in bzero
+  (unaligned data abort). IOVA = PA. apps_smmu: SMR id 0x40 mask 1 -> a free bypass bank (the NativeDwc3 recipe;
+  phone: slot 8, bank 5). Deviation from the handoff's SMMU design: bypass, not a translating bank (proven recipe;
+  a translating bank limited to the arena is a later hardening).
+  First run: HTC READY, HTT+WMI connected, SERVICE_READY, INIT, READY, HTT setup, regdomain, channels, vdev in 36 ms;
+  **first scan saw 29 BSSes including KittyCorner (-60 dBm)**. Then: the MGMT_RX channel field is a channel number
+  (fixed: -> MHz), READY's MAC is zero (fixed: LAA 02:fa:6a:17:4e:03), KittyCorner's RSN parsed as not usable
+  (`kcmd wifidev bss` now dumps the RSN element), and **the modem raised its SMP2P fatal bit ~1 s into the scan**
+  (rows froze; `FW3 MODEM FATAL ... crash421 '...'` now logs the reason). Under investigation.
+- kcmd `wifidev [state|scan [SSID]|bss]`; rows FW6 (row 8, device), FW7 (row 9, scan), FW3 MODEM FATAL (row 10).
+- Test: `scripts/fajita/test/wifi-test.sh modem link servers wlfw scan` (via bg.sh; reuse FAJITA_OUT).
+
 Round 8 (lead): a USB network transport, so a future iOS network interface can be tested against this laptop. The
 interface itself, IONetworkingFamily, modem boot, SCM, memory assignment, the SMMU and WMI stay on hold.
 
