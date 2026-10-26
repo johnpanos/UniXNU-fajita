@@ -130,13 +130,22 @@ if [ -n "$PROBLEMS" ]; then
 fi
 # The pinned Mesa and translator sources, as the CI's "Pinned Mesa and translator" step makes them.
 MESA=$(python3 -c "import json;print(json.load(open('scripts/data/adreno-compiler-inputs.json'))['mesa']['commit'])")
+MPATCHES=$(python3 -c "import json;print(' '.join(json.load(open('scripts/data/adreno-compiler-inputs.json'))['patches']))")
+MPSUM=$(cat $MPATCHES | sha256sum | cut -c1-16)
 if [ ! -d .cache/mesa-work/.git ] || [ "$(git -C .cache/mesa-work rev-parse HEAD)" != "$MESA" ]; then
   stamp "Mesa $MESA + recorded patches"
   rm -rf .cache/mesa-work; git init -q .cache/mesa-work
   git -C .cache/mesa-work fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa "$MESA"
   git -C .cache/mesa-work checkout -q FETCH_HEAD
-  for p in $(python3 -c "import json;print(' '.join(json.load(open('scripts/data/adreno-compiler-inputs.json'))['patches']))"); do
-    git -C .cache/mesa-work apply "$PWD/$p"; done
+  for p in $MPATCHES; do git -C .cache/mesa-work apply "$PWD/$p"; done
+  echo "$MPSUM" > .cache/mesa-work.patches
+elif [ "$(cat .cache/mesa-work.patches 2>/dev/null)" != "$MPSUM" ]; then
+  # Same Mesa, other recorded patches (a stack pin that changed a patch): the tree goes back to the pinned commit and takes them again,
+  # instead of failing the patch-identity check with the old ones applied.
+  stamp "Mesa $MESA: recorded patches changed, re-applied"
+  git -C .cache/mesa-work checkout -q -- . && git -C .cache/mesa-work clean -fdq
+  for p in $MPATCHES; do git -C .cache/mesa-work apply "$PWD/$p"; done
+  echo "$MPSUM" > .cache/mesa-work.patches
 fi
 M2V=$(python3 -c "import json;print(json.load(open('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']['commit'])")
 if [ "$(git -C .cache/gpu-reference/metal2vulkan rev-parse HEAD 2>/dev/null)" != "$M2V" ]; then
