@@ -45,6 +45,17 @@
 #define FW_MDATA_REGION_SIZE 0x4000ull      // mdata_mem (metadata), alloc 0xa0000000..0xc0000000, 0x4000
 #define FW_WLAN_MSA_PHYS    0x8df00000ull   // wlan-msa@8df00000, 0x100000 (WLAN MSA, wlfw msa_info)
 #define FW_WLAN_MSA_SIZE    0x100000ull
+// The WLAN device's DMA arena (CE rings, rx/tx buffers, HTT, WMI host memory): ordinary RAM held off XNU's free lists with
+// phys-reserve (wifi-test.sh PHYS_RESERVE), mapped uncached; the target reaches it at IOVA = PA through the apps_smmu bypass
+// bank of SIDs 0x40/0x41 (iommus = <&apps_smmu 0x0040 0x1>).
+#define FW_WLAN_DMA_PHYS    0xf6000000ull
+#define FW_WLAN_DMA_SIZE    0x800000ull
+#define FW_WLAN_MEMBASE     0x18800000ull   // wifi@18800000, reg 0x800000 ("membase": CE registers, shadow write indices)
+#define FW_WLAN_MEMBASE_SIZE 0x800000ull
+#define FW_APPS_SMMU_PHYS   0x15000000ull   // apps_smmu, 0x80000
+#define FW_APPS_SMMU_SIZE   0x80000ull
+#define FW_WLAN_SMMU_SID    0x40u
+#define FW_WLAN_SMMU_MASK   0x1u
 #define FW_SMEM_PHYS        0x86000000ull   // smem@86000000, 0x200000
 #define FW_SMEM_SIZE        0x200000ull
 #define FW_RMTFS_PHYS       0xf5b01000ull   // fajita rmtfs-mem@f5b01000, 0x200000 (DT override of the SoC default)

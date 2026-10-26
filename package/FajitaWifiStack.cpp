@@ -26,7 +26,7 @@ extern "C" {
 #include "WifiRmtfs.h"
 #include "WifiFat.h"
 #include "WifiWlfw.h"
-extern char fajita_wifi_rows[8][160];
+extern char fajita_wifi_rows[12][160];
 void fajita_wifi_modem_poll(void) __attribute__((weak));
 extern volatile uint32_t fajita_wifi_state[8];
 int native_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *blocks, uint64_t *attr) __attribute__((weak));
@@ -37,6 +37,10 @@ int fajita_wifi_msa_assign(const wlfw_mem_region *regions, unsigned count) __att
 // ld64 does not take an undefined weak reference out of a static archive: this weak default (-78, ENOSYS) stands in
 // until the modem-boot side links its strong definition.
 __attribute__((weak)) int fajita_wifi_msa_assign(const wlfw_mem_region *, unsigned) {return -78;}
+// Stage 6+ (FajitaWifiDev.cpp): the device above FW_READY.
+int fajita_wifi_dev_start(void);
+void fajita_wifi_dev_poll(void);
+void fajita_wifi_dev_kcmd(void);
 }
 
 // Not in FajitaWifiBoard.h (kept separate from the modem-boot constants):
@@ -206,7 +210,7 @@ unsigned gHistShown, gStuck, gDropShown, gNamesShown;
 wrmtfs gRmtfs;
 uint32_t gPdmPort;
 wwlfw gWlfw;
-bool gWlfwOn, gEnableSent;
+bool gWlfwOn, gEnableSent, gDevStarted;
 uint8_t *gBoard;
 uint32_t gBoardLen;
 char gBoardName[24];
@@ -454,6 +458,13 @@ extern "C" void fajita_wifi_stack(unsigned stage)
         if (gWlfwOn) {
             wwlfw_poll(&gWlfw, nowMs());
             if (gWlfw.state == WWLFW_FW_READY && !gEnableSent) {gEnableSent = true; wwlfw_enable(&gWlfw, WLFW_MODE_MISSION);}
+            // stage 6: ath10k_snoc_hif_power_up after wlan_enable: the copy engines, HTC, WMI, HTT, the station vdev
+            if (stage >= 6 && gWlfw.state == WWLFW_ENABLED && !gDevStarted) {
+                gDevStarted = true;
+                fajita_wifi_dev_kcmd();
+                fajita_wifi_dev_start();
+            }
+            if (gDevStarted) fajita_wifi_dev_poll();
         }
         const uint64_t t = nowMs();
         if (t - last >= 1000) {

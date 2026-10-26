@@ -40,7 +40,7 @@ int fajita_wifi_msa_assign(const wlfw_mem_region *regions, unsigned count);
 void fajita_wifi_msa_release(void);
 typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out, size_t cap);
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help) __attribute__((weak));
-extern char fajita_wifi_rows[8][160];
+extern char fajita_wifi_rows[12][160];
 extern volatile uint32_t fajita_wifi_state[8];
 }
 

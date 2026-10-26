@@ -25,7 +25,7 @@ extern "C" {
 }
 
 extern "C" {
-char fajita_wifi_rows[8][160];
+char fajita_wifi_rows[12][160];
 volatile uint32_t fajita_wifi_state[8];   // [0] stage reached, [1] mapped ok, [2] pbl status, [3] last error
 extern volatile uint32_t armcpu_wdog[6] __attribute__((weak_import));
 // ios16/patches/xnu-8796/fajita-phys-reserve.patch: phys-reserve=<pa>.<size>,... keeps those pages off the free lists.

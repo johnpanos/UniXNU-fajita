@@ -41,7 +41,7 @@ CREDS=${WIFI_CREDS:-$HOME/.config/unixnu/wifi-kittycorner}
 HUB="python3 -I $TD/../../fajita-usbdbg-hub.py"
 HUBT=${WIFI_HUB_TIMEOUT:-20}            # short hub timeouts, per AGENTS
 # rmtfs (fajita DT 0xf5b01000+0x200000 with guard pages), wlan msa, mpss, mba (sdm845.dtsi reserved-memory)
-PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000}
+PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000,0xf6000000.0x800000}   # + the WLAN DMA arena (FW_WLAN_DMA_PHYS)
 ALL=(power lower qmp modem link servers wlfw scan assoc dhcp ping tput stability)
 declare -A DEPTH=( [power]=1 [lower]=1 [qmp]=1 [modem]=2 [link]=3 [servers]=4 [wlfw]=5 [scan]=6 [assoc]=7 [dhcp]=7 [ping]=7 [tput]=7 [stability]=7 )
 
@@ -193,7 +193,8 @@ evaluate() {
            local r; r=$(con_has 'FW5 '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)"
            case $r in *msa-assign?*) say "  layer: no fajita_wifi_msa_assign hook (the modem-boot side assigns the MSA)" ;;
                       *'failed in '*) say "  layer: wlfw step ${r#*failed in } (result/error in the row)" ;; esac ;;
-    scan)  check_from_log scan  "FW6 .*scan.*$ssid" "scan did not see $ssid" ;;
+    scan)  check_from_log scan  "FW7 scan #[0-9]+ .*: $ssid [0-9a-f:]+ [0-9]+ MHz -?[0-9]+ dBm" "scan did not see $ssid (FW6 rows: the device bring-up)"
+           r=$(con_has 'FW6 dev '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     assoc) check_from_log assoc 'FW7 .*(ptk|gtk|connect)' '4-way handshake / association did not complete' ;;
     dhcp)
       local o; o=$(ios ipconfig getifaddr en1 2>/dev/null || true)
@@ -224,7 +225,7 @@ say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
 # Wait for the deepest requested stage's pass row (the link and the services come up seconds after FW3/FW4 first log),
 # or a row that says it will not get there.
 declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers n[0-9]' [4]='FW4 pdr [1-9][0-9]*\(more[0-9]+ cut[0-9]+\) tftp busy[0-9]+ rrq[1-9]'
-                     [5]='FW5 wlfw (enabled|failed)' [6]='FW6 ' [7]='FW7 ' )
+                     [5]='FW5 wlfw (enabled|failed)' [6]='FW7 scan #[0-9]+ (scan-done|failed)|FW6 dev failed|FW6 .*FAILED' [7]='FW7 ' )
 done_re=${DONE_RE[$maxN]}
 for s in "${want[@]}"; do [ "$s" = lower ] && [ "$maxN" = 1 ] && done_re='FWR aoss '; done   # the survey's last row
 for s in "${want[@]}"; do [ "$s" = qmp ] && [ "$maxN" = 1 ] && done_re='FWQ done'; done        # after the survey
