@@ -61,6 +61,20 @@ long wsmem_free_space(wsmem *s, unsigned host);
 // Offset of p from the SMEM base (for logging and for computing physical addresses), or -1 if outside.
 long wsmem_offset(const wsmem *s, const volatile void *p);
 
+// ---- Read-only inspection (the fajita-wifi-ro survey; nothing below writes SMEM) ----
+typedef struct {
+    uint32_t offset, size, flags, cacheline;
+    uint16_t host0, host1;
+} wsmem_ptentry;
+// The partition table's entry count (0 without a "$TOC" ptable), and entry i (0 or a negative WSMEM_ERR).
+unsigned wsmem_ptable_count(const wsmem *s);
+int wsmem_ptable_entry(const wsmem *s, unsigned i, wsmem_ptentry *e);
+// Call fn for every item of the partition shared with `host` (WSMEM_GLOBAL_HOST: the global partition; with neither,
+// the legacy heap TOC): its number, offset from the SMEM base, usable size, and whether it is on the cached list. Returns
+// the number of items, or a negative WSMEM_ERR when a list is corrupt (fn has seen the items before it).
+typedef void (*wsmem_item_fn)(void *ctx, unsigned item, uint32_t offset, uint32_t size, int cached);
+int wsmem_items(const wsmem *s, unsigned host, wsmem_item_fn fn, void *ctx);
+
 // ---- SMP2P ----
 #define WSMP2P_MAGIC 0x504d5324u
 #define WSMP2P_MAX_ENTRY 16u
@@ -101,6 +115,18 @@ int wsmp2p_update(wsmp2p *p, int entry, uint32_t mask, uint32_t value);
 int wsmp2p_irq(wsmp2p *p);
 // The inbound entry `name`: its current value, and the bits changed since the last take (cleared). -2 if not present.
 int wsmp2p_take(wsmp2p *p, const char *name, uint32_t *value, uint32_t *changed);
+
+// A read-only decode of one SMP2P item (either direction), for the survey: no negotiation, no acks, no writes.
+typedef struct {
+    uint32_t magic, features, flags;
+    uint8_t version;
+    uint16_t local_pid, remote_pid, total, valid;
+    unsigned nentries;                       // min(valid, WSMP2P_MAX_ENTRY)
+    struct {char name[WSMP2P_NAME + 1]; uint32_t value;} entry[WSMP2P_MAX_ENTRY];
+} wsmp2p_view;
+// 0 on a well-formed item; WSMEM_ERR_INVAL if it is too small or misaligned; WSMEM_ERR_NOENT on a bad magic (v->magic
+// still says what was there); the entry table is decoded even when valid > total (clamped), which is reported as INVAL.
+int wsmp2p_peek(const volatile void *item, size_t size, wsmp2p_view *v);
 
 #ifdef __cplusplus
 }

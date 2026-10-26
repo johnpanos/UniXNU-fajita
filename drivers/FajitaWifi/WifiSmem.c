@@ -253,6 +253,76 @@ long wsmem_offset(const wsmem *s, const volatile void *p)
     return (long)(a - b);
 }
 
+// ---- Read-only inspection ----
+unsigned wsmem_ptable_count(const wsmem *s)
+{
+    if (!s->base || s->size < WSMEM_PTABLE_BYTES || ptable_ok(s) != WSMEM_OK) return 0;
+    return r32(s, ptable_off(s) + PT_NUM);
+}
+
+int wsmem_ptable_entry(const wsmem *s, unsigned i, wsmem_ptentry *e)
+{
+    if (i >= wsmem_ptable_count(s)) return WSMEM_ERR_INVAL;
+    const uint64_t a = ptable_off(s) + PT_ENTRY + (uint64_t)i * PT_ENTRY_BYTES;
+    e->offset = r32(s, a);
+    e->size = r32(s, a + 4);
+    e->flags = r32(s, a + 8);
+    e->host0 = r16(s, a + 12);
+    e->host1 = r16(s, a + 14);
+    e->cacheline = r32(s, a + 16);
+    return WSMEM_OK;
+}
+
+// The same walks as get_private / get_global, visiting every entry instead of stopping at one.
+static int items_private(const wsmem *s, const wsmem_part *p, wsmem_item_fn fn, void *ctx)
+{
+    const uint64_t ph = p->offset, end_part = ph + p->size;
+    const uint64_t end = ph + r32(s, ph + PH_FREE_UNCACHED);
+    if (end > end_part) return WSMEM_ERR_INVAL;
+    int n = 0;
+    for (uint64_t e = ph + WSMEM_PART_HDR_BYTES; e < end; ++n) {
+        if (e + WSMEM_PRIV_ENTRY_BYTES > end || r16(s, e) != WSMEM_CANARY) return WSMEM_ERR_INVAL;
+        const uint32_t esz = r32(s, e + 4);
+        const uint16_t pad_data = r16(s, e + 8), pad_hdr = r16(s, e + 10);
+        const uint64_t itemoff = e + WSMEM_PRIV_ENTRY_BYTES + pad_hdr;
+        if (esz > p->size || pad_data > esz || itemoff + esz > end_part) return WSMEM_ERR_INVAL;
+        if (fn) fn(ctx, r16(s, e + 2), (uint32_t)itemoff, esz - pad_data, 0);
+        e = itemoff + esz;
+    }
+    const uint64_t step = align_up(WSMEM_PRIV_ENTRY_BYTES, p->cacheline ? p->cacheline : 1);
+    if (step > p->size) return WSMEM_ERR_INVAL;
+    const uint64_t cend = ph + r32(s, ph + PH_FREE_CACHED);
+    if (cend > end_part || cend < ph) return WSMEM_ERR_INVAL;
+    for (uint64_t c = end_part - step; c > cend; ++n) {
+        if (r16(s, c) != WSMEM_CANARY) return WSMEM_ERR_INVAL;
+        const uint32_t esz = r32(s, c + 4);
+        const uint16_t pad_data = r16(s, c + 8);
+        if (esz > p->size || pad_data > esz || c < ph + esz) return WSMEM_ERR_INVAL;
+        if (fn) fn(ctx, r16(s, c + 2), (uint32_t)(c - esz), esz - pad_data, 1);
+        if (c < ph + esz + step) return WSMEM_ERR_INVAL;
+        c = c - esz - step;
+    }
+    return n;
+}
+
+int wsmem_items(const wsmem *s, unsigned host, wsmem_item_fn fn, void *ctx)
+{
+    if (!s->base) return WSMEM_ERR_NOTINIT;
+    if (host == WSMEM_GLOBAL_HOST && s->global.size) return items_private(s, &s->global, fn, ctx);
+    if (host < WSMEM_HOST_COUNT && s->part[host].size) return items_private(s, &s->part[host], fn, ctx);
+    if (host != WSMEM_GLOBAL_HOST || s->global.size || s->version != WSMEM_GLOBAL_HEAP_VERSION) return WSMEM_ERR_NOENT;
+    int n = 0;
+    for (unsigned item = 0; item < WSMEM_ITEM_COUNT; ++item) {
+        const uint64_t t = H_TOC + (uint64_t)item * 16;
+        if (!r32(s, t)) continue;
+        const uint32_t off = r32(s, t + 4), sz = r32(s, t + 8);
+        if ((uint64_t)off + sz > s->size) return WSMEM_ERR_INVAL;
+        if (fn) fn(ctx, item, off, sz, 0);
+        ++n;
+    }
+    return n;
+}
+
 // ---- SMP2P ----
 // struct smp2p_smem_item (packed): magic@0, version u8@4 | features:24, local_pid u16@8, remote_pid u16@10,
 // total_entries u16@12, valid_entries u16@14, flags u32@16, entries[16] {name[16], value u32}@20.
@@ -400,4 +470,34 @@ int wsmp2p_take(wsmp2p *p, const char *name, uint32_t *value, uint32_t *changed)
         return WSMEM_OK;
     }
     return WSMEM_ERR_NOENT;
+}
+
+int wsmp2p_peek(const volatile void *item, size_t size, wsmp2p_view *v)
+{
+    const volatile uint8_t *b = (const volatile uint8_t *)item;
+    for (unsigned i = 0; i < sizeof *v; ++i) ((uint8_t *)v)[i] = 0;
+    if (!b || size < SP_ENTRY || ((uintptr_t)b & 3)) return WSMEM_ERR_INVAL;
+    v->magic = p32(b, 0);
+    if (v->magic != WSMP2P_MAGIC) return WSMEM_ERR_NOENT;
+    const uint32_t w = p32(b, SP_VERSION);
+    v->version = (uint8_t)(w & 0xff);
+    v->features = w >> 8;
+    v->local_pid = p16(b, SP_LOCAL);
+    v->remote_pid = p16(b, SP_REMOTE);
+    v->total = p16(b, SP_TOTAL);
+    v->valid = p16(b, SP_VALID);
+    v->flags = p32(b, SP_FLAGS);
+    unsigned n = v->valid < WSMP2P_MAX_ENTRY ? v->valid : WSMP2P_MAX_ENTRY;
+    if (SP_ENTRY + (size_t)n * SP_ENTRY_BYTES > size) n = (unsigned)((size - SP_ENTRY) / SP_ENTRY_BYTES);
+    v->nentries = n;
+    for (unsigned i = 0; i < n; ++i) {
+        const unsigned e = SP_ENTRY + i * SP_ENTRY_BYTES;
+        for (unsigned k = 0; k < WSMP2P_NAME; k += 4) {
+            const uint32_t nw = p32(b, e + k);
+            for (unsigned j = 0; j < 4; ++j) v->entry[i].name[k + j] = (char)(nw >> (8 * j));
+        }
+        v->entry[i].name[WSMP2P_NAME] = 0;
+        v->entry[i].value = p32(b, e + WSMP2P_NAME);
+    }
+    return v->valid > v->total || n < v->valid ? WSMEM_ERR_INVAL : WSMEM_OK;
 }

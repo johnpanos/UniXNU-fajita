@@ -12,6 +12,7 @@ extern int tfails, tchecks;
 extern const char *t_modem_img;
 extern const char *t_efs_dir;
 extern const char *t_board2;   // argv[3]: board-2.bin
+extern const char *t_smem_img; // argv[4]: a SMEM snapshot from the phone (kcmd wifi snap; smem-snap.py)
 uint8_t *t_slurp(const char *path, size_t *len);
 // Test allocations, released together by t_tfree_all() (the kernel side never frees its ring state).
 void *t_talloc(size_t n);

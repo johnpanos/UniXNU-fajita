@@ -37,6 +37,9 @@ vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 // FajitaWifiStack.cpp: stages 3.. (SMEM/GLINK/QRTR, the AP services, ...) once the modem is up; never returns.
 void fajita_wifi_stack(unsigned stage) __attribute__((weak));
+// FajitaWifiLower.cpp: the read-only survey of SMEM/SMP2P, the cmd-db ARCs and AOSS QMP (fajita-wifi-ro=1, kcmd wifi).
+void fajita_wifi_lower(void) __attribute__((weak));
+void fajita_wifi_lower_kcmd(void) __attribute__((weak));
 }
 
 namespace {
@@ -138,6 +141,11 @@ void worker(void *, wait_result_t) {
     IOLog("fajita-wifi: %s\n", fajita_wifi_rows[0]);
     fajita_wifi_state[0] = gStage;
     if (gStage >= 1 && !stage1()) return;
+    // fajita-wifi-ro=1: the read-only lower-layer survey (FWR rows); kcmd wifi re-runs it at any time.
+    unsigned ro = 0;
+    PE_parse_boot_argn("fajita-wifi-ro", &ro, sizeof ro);
+    if (ro && fajita_wifi_lower) fajita_wifi_lower();
+    else if (fajita_wifi_lower_kcmd) fajita_wifi_lower_kcmd();
     const bool reserved = reserveCheck();
     if (gStage >= 2 && !reserved) {
         Out r(fajita_wifi_rows[2], sizeof fajita_wifi_rows[2]);

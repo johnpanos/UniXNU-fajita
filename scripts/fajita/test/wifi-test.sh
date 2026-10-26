@@ -11,6 +11,9 @@
 #
 # Stages (each maps to a fajita-wifi=<N> depth and a pass check):
 #   power     fajita-wifi=1  regulators/clocks mapped and read (FW1, RMB readable, modem not yet booted)
+#   lower     fajita-wifi=1  lower layers (read-only), fajita-wifi-ro=1: SMEM parsed live (header, ptable, APPS
+#                            partitions, SMP2P items), cmd-db cx/mx/mss ARCs + RPMh read, AOSS QMP link state (FWR rows);
+#                            then smem-snap.py pulls the SMEM snapshot and the host tests parse it
 #   modem     fajita-wifi=2  MSS remoteproc up (MBA auth, mpss segments, AUTH_COMPLETE, SMP2P ready)
 #   link      fajita-wifi=3  SMEM + GLINK + QRTR; the modem announces its QMI servers
 #   servers   fajita-wifi=4  AP-side pd-mapper / tqftpserv / rmtfs answer the modem
@@ -34,8 +37,8 @@ HUB="python3 -I $TD/../fajita-usbdbg-hub.py"
 HUBT=${WIFI_HUB_TIMEOUT:-20}            # short hub timeouts, per AGENTS
 # rmtfs (fajita DT 0xf5b01000+0x200000 with guard pages), wlan msa, mpss, mba (sdm845.dtsi reserved-memory)
 PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000}
-ALL=(power modem link servers wlfw scan assoc dhcp ping tput stability)
-declare -A DEPTH=( [power]=1 [modem]=2 [link]=3 [servers]=4 [wlfw]=5 [scan]=6 [assoc]=7 [dhcp]=7 [ping]=7 [tput]=7 [stability]=7 )
+ALL=(power lower modem link servers wlfw scan assoc dhcp ping tput stability)
+declare -A DEPTH=( [power]=1 [lower]=1 [modem]=2 [link]=3 [servers]=4 [wlfw]=5 [scan]=6 [assoc]=7 [dhcp]=7 [ping]=7 [tput]=7 [stability]=7 )
 
 want=("$@"); [ ${#want[@]} -eq 0 ] && want=(power)
 [ "${want[0]:-}" = all ] && want=("${ALL[@]}")
@@ -62,6 +65,7 @@ build() {
   local args=(fajita-wifi=$maxN fajita-wifi-dump=1 native-ufs-partread=1   # partread: rmtfs reads the EFS partitions (read-only)
               "phys-reserve=$PHYS_RESERVE")                                 # the modem carve-outs, off XNU's free lists
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
+  for s in "${want[@]}"; do [ "$s" = lower ] && args+=(fajita-wifi-ro=1); done   # the read-only survey (FWR rows)
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
   FAJITA_OUT=$OUT FAJITA_AUTORESET=${WIFI_AUTORESET:-900} "$TD/../build.sh" --test --skip-plugin "${args[@]}" \
@@ -127,6 +131,22 @@ evaluate() {
   for s in "${want[@]}"; do case $s in
     power) check_from_log power 'FW1 .*rmb pbl' 'stage 1 power/regs did not report'
            local r; r=$(con_has 'FW1 res'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
+    lower)
+      local ok=1 r
+      for re in 'FWR smem @[0-9a-f]+ init 0 .*\(v12\)' 'FWR part apps-modem .* = [0-9]+$' 'FWR part apps-global .* = [0-9]+$' \
+                'FWR rpmh cx.lvl lookup 0' 'FWR rpmh mx.lvl lookup 0' 'FWR rpmh mss.lvl lookup 0' 'FWR aoss .*magic [0-9a-f]+\(ok\)'; do
+        [ -n "$(con_has "$re")" ] || { ok=0; say "  missing /$re/"; }
+      done
+      grep -aE 'FWR ' "$CON" 2>/dev/null | sed 's/^.*fajita-wifi: //' | awk '!seen[$0]++' | head -60 | while read -r r; do say "  $r"; done
+      # The SMEM snapshot for the host tests (read-only on the phone), then the parser on it.
+      if python3 -I "$TD/smem-snap.py" > "$RES/smem-snap.txt" 2>&1; then
+        say "  $(tail -1 "$RES/smem-snap.txt")"
+        if python3 -I "$ROOT/scripts/check-fajita-wifi-host.py" --out "$ROOT/.cache/wifi-host" > "$RES/host.txt" 2>&1; then
+          say "  host tests on the snapshot: $(grep -a 'real smem' "$RES/host.txt" | tail -1)"
+        else ok=0; say "  host tests FAILED on the snapshot (see $RES/host.txt)"; fi
+      else ok=0; say "  smem-snap failed: $(tail -1 "$RES/smem-snap.txt")"; fi
+      if [ "$ok" = 1 ]; then verdict lower PASS "SMEM/SMP2P, cmd-db ARCs and AOSS QMP read"
+      else verdict lower FAIL "lower layers incomplete (see above)"; fi ;;
     modem) check_from_log modem 'FW2 .*auth[1-9].*ready' 'MSS did not reach AUTH_COMPLETE + ready' ;;
     link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers ([0-9a-f]+,)*45(,|$| )' \
              'no GLINK/QRTR link with wlfw (0x45) announced'
@@ -170,8 +190,10 @@ say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
 # or a row that says it will not get there.
 declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers [0-9a-f]' [4]='FW4 pdr [1-9][0-9]* tftp rrq[1-9]'
                      [5]='FW5 wlfw (enabled|failed)' [6]='FW6 ' [7]='FW7 ' )
+done_re=${DONE_RE[$maxN]}
+for s in "${want[@]}"; do [ "$s" = lower ] && [ "$maxN" = 1 ] && done_re='FWR aoss '; done   # the survey's last row
 for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do
-  grep -aqE "${DONE_RE[$maxN]}|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
+  grep -aqE "$done_re|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
 done
 evaluate
 session_end; trap - EXIT

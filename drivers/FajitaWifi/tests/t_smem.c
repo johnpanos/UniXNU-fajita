@@ -166,9 +166,116 @@ static void t_smp2p(void)
     free(mem);
 }
 
+// ---- read-only inspection ----
+typedef struct {unsigned n; unsigned item[64]; uint32_t off[64], size[64]; int cached[64];} t_items;
+static void collect(void *ctx, unsigned item, uint32_t off, uint32_t size, int cached)
+{
+    t_items *t = ctx;
+    if (t->n < 64) {t->item[t->n] = item; t->off[t->n] = off; t->size[t->n] = size; t->cached[t->n] = cached;}
+    ++t->n;
+}
+
+static void t_smem_inspect(void)
+{
+    uint8_t *mem = aligned_alloc(4096, T_SMEM_SIZE);
+    t_smem_image(mem, 0);
+    wsmem ap, mss_s;
+    CHECK(wsmem_init(&ap, mem, T_SMEM_SIZE, 0) == 0 && wsmem_init(&mss_s, mem, T_SMEM_SIZE, 1) == 0);
+    CHECK(wsmem_ptable_count(&ap) == 2);
+    wsmem_ptentry e;
+    CHECK(wsmem_ptable_entry(&ap, 1, &e) == 0 && e.offset == 0x50000 && e.size == 0x20000 && e.host0 == 0 && e.host1 == 1
+          && e.cacheline == 0x80);
+    CHECK(wsmem_ptable_entry(&ap, 2, &e) == WSMEM_ERR_INVAL);
+    // Two uncached items and one cached one in APPS<->MODEM, one in global.
+    CHECK(wsmem_alloc(&ap, 1, 478, 30) == 0 && wsmem_alloc(&ap, 1, 435, 340) == 0 && wsmem_alloc(&ap, 7, 100, 8) == 0);
+    const size_t end = 0x50000 + 0x20000, ce = end - 0x80;
+    put16(mem, ce, WSMEM_CANARY); put16(mem, ce + 2, 428); put32(mem, ce + 4, 344); put16(mem, ce + 8, 4);
+    put32(mem, 0x50000 + 16, (uint32_t)(ce - 344 - 0x50000));
+    t_items t = {0};
+    CHECK(wsmem_items(&ap, 1, collect, &t) == 3 && t.n == 3);
+    CHECK(t.item[0] == 478 && t.size[0] == 30 && !t.cached[0] && t.item[1] == 435 && t.size[1] == 340);
+    CHECK(t.item[2] == 428 && t.size[2] == 340 && t.cached[2] && t.off[2] == ce - 344);
+    for (unsigned i = 0; i < 3; ++i) {   // the walk agrees with wsmem_get
+        size_t sz = 0; int err = 0;
+        volatile uint8_t *it = wsmem_get(&ap, 1, t.item[i], &sz, &err);
+        CHECK(it && wsmem_offset(&ap, it) == (long)t.off[i] && sz == t.size[i]);
+    }
+    t_items g = {0};
+    CHECK(wsmem_items(&ap, WSMEM_GLOBAL_HOST, collect, &g) == 1 && g.item[0] == 100);
+    CHECK(wsmem_items(&ap, 3, collect, &g) == WSMEM_ERR_NOENT);   // no APPS<->3 partition (global is asked for by name)
+    // SMP2P peek: the AP's outbound item after init + one entry, unchanged by the peek.
+    wsmp2p p;
+    CHECK(wsmp2p_init(&p, &ap, 0, 1, 435, 428, 0, 0) == 0 && wsmp2p_add_entry(&p, "master-kernel") == 0);
+    wsmp2p_update(&p, 0, 1, 1);
+    uint8_t *before = malloc(T_SMEM_SIZE);
+    memcpy(before, mem, T_SMEM_SIZE);
+    size_t sz = 0; int err = 0;
+    volatile uint8_t *it = wsmem_get(&ap, 1, 435, &sz, &err);
+    wsmp2p_view v;
+    CHECK(wsmp2p_peek(it, sz, &v) == 0 && v.magic == WSMP2P_MAGIC && v.version == 1 && v.features == 1 && v.local_pid == 0
+          && v.remote_pid == 1 && v.total == 16 && v.valid == 1 && v.nentries == 1);
+    CHECK(!strcmp(v.entry[0].name, "master-kernel") && v.entry[0].value == 1);
+    t_items t2 = {0};
+    wsmem_items(&ap, 1, collect, &t2);
+    wsmem_ptable_count(&ap);
+    CHECK(!memcmp(before, mem, T_SMEM_SIZE));   // inspection never writes
+    // The modem's inbound item (cached, all zero): a bad magic, reported as such.
+    it = wsmem_get(&ap, 1, 428, &sz, &err);
+    CHECK(wsmp2p_peek(it, sz, &v) == WSMEM_ERR_NOENT && v.magic == 0);
+    CHECK(wsmp2p_peek(it, 8, &v) == WSMEM_ERR_INVAL);
+    // valid > total is decoded but flagged.
+    it = wsmem_get(&ap, 1, 435, &sz, &err);
+    put16(mem, (size_t)wsmem_offset(&ap, it) + 12, 0);
+    CHECK(wsmp2p_peek(it, sz, &v) == WSMEM_ERR_INVAL && v.nentries == 1);
+    // A broken canary stops the walk with an error after the items before it.
+    put16(mem, t.off[1] - 16, 0x1234);
+    t_items t3 = {0};
+    CHECK(wsmem_items(&ap, 1, collect, &t3) == WSMEM_ERR_INVAL && t3.n == 1);
+    free(before);
+    free(mem);
+}
+
+// The real thing: a SMEM snapshot pulled from the phone (scripts/fajita/test/smem-snap.py; .cache only, never committed).
+// Only the parts the AP may read are in it (header, ptable, the APPS and global partitions); the rest is zero.
+static void t_smem_real(void)
+{
+    if (!t_smem_img) {printf("skip t_smem_real (no SMEM snapshot)\n"); return;}
+    size_t len = 0;
+    uint8_t *raw = t_slurp(t_smem_img, &len);
+    CHECK(raw && len == T_SMEM_SIZE);
+    if (!raw || len != T_SMEM_SIZE) {free(raw); return;}
+    uint8_t *mem = aligned_alloc(4096, len);
+    memcpy(mem, raw, len);
+    wsmem s;
+    const int r = wsmem_init(&s, mem, len, WSMEM_HOST_APPS);
+    printf("  real smem: init %d version %u items %u parts %u global %x+%x\n", r, s.version, s.item_count, s.nparts,
+           s.global.offset, s.global.size);
+    CHECK(r == 0 && s.version == WSMEM_GLOBAL_PART_VERSION && s.global.size);
+    CHECK(s.part[WSMEM_HOST_MODEM].size != 0);   // APPS<->MODEM exists before the modem boots (SBL makes it)
+    for (unsigned h = 0; h < WSMEM_HOST_COUNT; ++h) {
+        if (!s.part[h].size) continue;
+        t_items t = {0};
+        const int n = wsmem_items(&s, h, collect, &t);
+        CHECK(n >= 0);
+        for (unsigned i = 0; i < t.n && i < 64; ++i) {
+            size_t sz = 0; int err = 0;
+            volatile uint8_t *it = wsmem_get(&s, h, t.item[i], &sz, &err);
+            // A duplicate item number would make get return the first; real SMEM has none.
+            CHECK(it && wsmem_offset(&s, it) == (long)t.off[i] && sz == t.size[i]);
+        }
+    }
+    t_items g = {0};
+    CHECK(wsmem_items(&s, WSMEM_GLOBAL_HOST, collect, &g) >= 0);
+    CHECK(!memcmp(raw, mem, len));
+    free(mem);
+    free(raw);
+}
+
 void t_smem(void)
 {
     RUN(t_smem_partitioned);
     RUN(t_smem_heap);
     RUN(t_smp2p);
+    RUN(t_smem_inspect);
+    RUN(t_smem_real);
 }

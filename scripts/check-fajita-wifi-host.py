@@ -25,6 +25,7 @@ STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiT
 STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c', 'tests/wsim.c', 'tests/wfw.c', 'tests/t_ce.c']
 LIB_FOR_STACK = ['WifiQmi.c', 'WifiQrtr.c', 'WifiFat.c', 'WifiMdt.c', 'WifiBoard.c']
 DEFAULT_EFS = ROOT / '.cache/efs-backup'
+DEFAULT_SMEM = ROOT / '.cache/smem-snapshot/smem.bin'      # scripts/fajita/test/smem-snap.py (read-only, from the phone)
 DEFAULT_MODEM = ROOT / '.cache/fw-modem-part/modem_b.img'   # ufspart.py backup --passes 1 --out .cache/fw-modem-part modem_b
 FAT_FILES = ['image/mba.mbn', 'image/modem.mdt', 'image/modem.b20', 'image/modem.b28', 'image/wlanmdsp.mbn', 'image/bdwlan.102',
              'image/modemr.jsn']
@@ -49,6 +50,8 @@ def main():
     parser.add_argument('--modem', default=str(DEFAULT_MODEM) if DEFAULT_MODEM.is_file() else None,
                         help='a dumped modem_a/modem_b partition: the FAT reader is checked against mtools (mcopy)')
     parser.add_argument('--efs', help='the verified EFS backup (ufspart.py backup), default .cache/efs-backup')
+    parser.add_argument('--smem', default=str(DEFAULT_SMEM) if DEFAULT_SMEM.is_file() else None,
+                        help='a SMEM snapshot from the phone (smem-snap.py): the parser runs on the real image')
     args = parser.parse_args()
     out = Path(args.out or tempfile.mkdtemp(prefix='fajita-wifi-host-'))
     out.mkdir(parents=True, exist_ok=True)
@@ -68,7 +71,7 @@ def main():
     subprocess.run([args.cc, '-std=c11', '-g', '-O1', '-Wall', '-Wextra', '-Werror', *san,
                     *[str(WIFI / x) for x in STACK_LIBS + LIB_FOR_STACK + STACK_TESTS], '-o', str(stack)], check=True)
     efs = args.efs if args.efs else (str(DEFAULT_EFS) if DEFAULT_EFS.is_dir() else '')
-    if subprocess.run([str(stack), args.modem or '', efs, args.board or '']).returncode:
+    if subprocess.run([str(stack), args.modem or '', efs, args.board or '', args.smem or '']).returncode:
         raise SystemExit('FAIL: fajita Wi-Fi stack host tests')
     if args.modem and shutil.which('mcopy'):
         fat = out / 'test_fat'
