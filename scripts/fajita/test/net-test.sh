@@ -78,8 +78,8 @@ stage_usbnet() {
     FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 2>&1 | tee "$RES/build.txt" \
       || { verdict usbnet FAIL "build failed (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; return; }
   fi
-  FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { verdict usbnet FAIL "session start failed"; return; }
-  NAME=$(cat "$W/session.current"); con=$W/logs/$NAME/usb-console.txt
+  local out; out=$(FAJITA_OUT=$OUT "$TD/session.sh" start 2>&1) || { verdict usbnet FAIL "session start failed"; return; }
+  NAME=$(grep -om1 'session-[0-9]\{6\}' <<<"$out" | head -1); con=$W/logs/$NAME/usb-console.txt   # own session, not the shared session.current
   say "session $NAME (console $con)"
   transport "${FAJITA_USBDBG_HUB:-${XDG_RUNTIME_DIR:-/tmp}/fjdbg-hub.sock}" usbnet
   grep -a 'usbnet: ' "$con" 2>/dev/null | tail -8 | while read -r r; do say "  log: $r"; done
@@ -100,8 +100,8 @@ stage_ios() {
     FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 fajita-net=usb 2>&1 | tee "$RES/build.txt" \
       || { verdict ios FAIL "build failed (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; return; }
   fi
-  FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { verdict ios FAIL "session start failed"; return; }
-  NAME=$(cat "$W/session.current"); con=$W/logs/$NAME/usb-console.txt
+  local out; out=$(FAJITA_OUT=$OUT "$TD/session.sh" start 2>&1) || { verdict ios FAIL "session start failed"; return; }
+  NAME=$(grep -om1 'session-[0-9]\{6\}' <<<"$out" | head -1); con=$W/logs/$NAME/usb-console.txt   # own session, not the shared session.current
   say "session $NAME (console $con)"
   local sock=${FAJITA_USBDBG_HUB:-${XDG_RUNTIME_DIR:-/tmp}/fjdbg-hub.sock}
   python3 -I "$NETPY" --sock "$sock" bridge -v --seconds 150 --pcap "$RES/ios.pcap" > "$RES/ios-bridge.txt" 2>&1 &

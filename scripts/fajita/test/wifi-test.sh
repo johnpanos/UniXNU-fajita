@@ -90,7 +90,7 @@ session_start() {
   say "session: boot fajita-wifi=$maxN"
   local out rc=0
   out=$(FAJITA_OUT=$OUT "$TD/session.sh" start 2>&1) || rc=$?
-  NAME=$(cat "$W/session.current")
+  NAME=$(grep -om1 'session-[0-9]\{6\}' <<<"$out" | head -1)   # this run's own session (session.current is shared by every worktree)
   if [ $rc -ne 0 ]; then
     # a dead boot shows up here, not as a stall: the console of that session says where it stopped (panic? reset?)
     say "FAIL boot: ${out##*$'\n'}"

@@ -420,6 +420,78 @@ static int bootArgOn(const char *name)
   return 0;
 }
 
+// fajita-ssh=1 (NOTES-devmode.md): the SSH dev mode. A supervisor process (its own session, holding FJDBG_SSH_LOCK so a relaunched
+// agent does not start a second one) runs the add-on's start script (package/ssh/ssh-start: host keys, authorized_keys, then dropbear
+// in the foreground) and restarts it when it exits, waiting 2 s, doubling up to 60 s while it keeps dying within 30 s of its start.
+// Its output goes to FJDBG_SSH_LOG. The debug channel never waits on it.
+#define FJDBG_SSH_SHELL "/private/var/ngpu/ssh/bin/bash"
+#define FJDBG_SSH_START "/private/var/ngpu/ssh/libexec/ssh-start"
+#define FJDBG_SSH_STATE "/private/var/ssh"
+#define FJDBG_SSH_LOCK FJDBG_SSH_STATE "/supervisor.lock"
+#define FJDBG_SSH_LOG FJDBG_SSH_STATE "/ssh.log"
+static void sshLog(const char *msg)
+{
+  int fd = open(FJDBG_SSH_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
+  if (fd < 0)
+    return;
+  char line[256];
+  int n = snprintf(line, sizeof line, "%ld fjdbg-ssh: %s\n", (long)time(NULL), msg);
+  if (n > 0)
+    (void)!write(fd, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
+  close(fd);
+}
+
+static void startSshSupervisor(void)
+{
+  if (access(FJDBG_SSH_START, R_OK) != 0 || access(FJDBG_SSH_SHELL, X_OK) != 0)
+    return;   // a build without the SSH add-on
+  pid_t sup = fork();
+  if (sup != 0)
+    return;   // the agent goes on (a failed fork just means no SSH)
+  setsid();
+  if (gDev >= 0)
+    close(gDev);
+  mkdir(FJDBG_SSH_STATE, 0700);
+  int lock = open(FJDBG_SSH_LOCK, O_RDWR | O_CREAT, 0600);
+  if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0)
+    _exit(0);   // another supervisor is running
+  signal(SIGPIPE, SIG_IGN);
+  int delay = 2;
+  for (unsigned runs = 1;; runs++) {
+    int log = open(FJDBG_SSH_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (log >= 0) {
+      posix_spawn_file_actions_adddup2(&fa, log, STDOUT_FILENO);
+      posix_spawn_file_actions_adddup2(&fa, log, STDERR_FILENO);
+    }
+    posix_spawn_file_actions_addclose(&fa, lock);
+    char *const args[] = {(char *)"bash", (char *)FJDBG_SSH_START, NULL};
+    char *const env[] = {(char *)"PATH=/private/var/ngpu/ssh/bin:/usr/sbin:/usr/bin:/sbin:/bin", (char *)"HOME=/private/var/root",
+                         NULL};
+    pid_t pid;
+    time_t t0 = time(NULL);
+    int rc = posix_spawn(&pid, FJDBG_SSH_SHELL, &fa, NULL, args, env);
+    posix_spawn_file_actions_destroy(&fa);
+    if (log >= 0)
+      close(log);
+    char msg[160];
+    int status = 0;
+    if (rc == 0) {
+      snprintf(msg, sizeof msg, "run %u: ssh-start pid %d", runs, (int)pid);
+      sshLog(msg);
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+      snprintf(msg, sizeof msg, "run %u: exited (status 0x%x) after %ld s", runs, status, (long)(time(NULL) - t0));
+    } else
+      snprintf(msg, sizeof msg, "run %u: cannot spawn %s: %s", runs, FJDBG_SSH_SHELL, strerror(rc));
+    sshLog(msg);
+    delay = time(NULL) - t0 >= 30 ? 2 : (delay * 2 > 60 ? 60 : delay * 2);
+    sleep((unsigned)delay);
+  }
+}
+
 int main(int argc, char **argv)
 {
   (void)argc;
@@ -438,6 +510,8 @@ int main(int argc, char **argv)
   }
   refuseWifiServices();
 agent:
+  if (bootArgOn("fajita-ssh"))
+    startSshSupervisor();
   for (int tries = 0; gDev < 0 && tries < 600; tries++) {
     gDev = open(FJDBG_DEV, O_RDWR);
     if (gDev < 0)
