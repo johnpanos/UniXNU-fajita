@@ -2,6 +2,42 @@
 
 ## Current state (keep this updated; a restart starts here)
 
+Round 6 (lead): 1 = validate the lower layers on the phone, read only; 2 = the WPA2-PSK supplicant core, host only.
+Modem boot, SCM, memory assignment, the SMMU, ath10k WMI and the iOS network interface stay on hold.
+
+**1, lower layers read-only (done 2026-10-25, on the phone, PASS twice).** `fajita-wifi=1 fajita-wifi-ro=1` runs
+`package/FajitaWifiLower.cpp` after FW1; `kcmd wifi ro|rows|snap` re-runs it, prints its rows, or copies the
+AP-readable SMEM ranges to RAM for `scripts/fajita/test/smem-snap.py` (readv + CRC32 -> `.cache/smem-snapshot/smem.bin`,
+mode 400, never committed). wifi-test.sh stage `lower` (`wifi-test.sh power lower`) checks the FWR rows, pulls the
+snapshot and runs the host tests on it (`t_smem_real`). Nothing is written: SMEM and AOSS are mapped read-only, and the
+only RPMh traffic is a READ request on an idle apps TCS (no vote). Only the SMEM header, the ptable and the partitions
+whose hosts include APPS or GLOBAL are read (the others may be XPU-protected from the AP). Results (identical both runs):
+- SMEM @0x86000000: initialized 1, SBL version word 0x000c0000 = **v12 (global partition)**, as WifiSmem expects. The SIII
+  info says size 0x200000, base 0x86000000 and **615 items** (above the legacy 512; global items 602..614 exist).
+- ptable: 15 entries, **cacheline 0x20** (the synthetic tests used 0x80), flags 3. Two entries have hosts 0xffff/0xffff
+  (the header 0+0x1000 and the ptable 0x1ff000+0x1000; skipped). APPS pairs: modem 0xb9000+0x7c000, adsp 0x1af000+0x30000,
+  cdsp 0x18f000+0x20000, slpi 0x15f000+0x30000, spss(8) 0x14f000+0x4000; global 0x1000+0x88000. The rest: adsp-slpi,
+  tz(7)-spss, tz-modem, modem-spss, modem-cdsp, modem-adsp, modem-slpi.
+- Every APPS private partition is **empty** (free-uncached 0x20, free-cached = size; APPS<->MODEM 507872 B free). The
+  global partition holds 14 uncached items (469, 473, 602, 404, 403, 81, 137, 136, 604, 474, 402, 603, 614, 612), some
+  with data padding (usable sizes not a multiple of 8). Item walk == wsmem_get for each.
+- SMP2P: all eight items of the four APPS pairs (mpss 435/428, lpass 443/429, slpi 481/430, cdsp 94/432) are absent:
+  no remote processor is up and nothing on the AP has allocated its out item. Expected before the modem boots.
+- cmd-db: cx.lvl @0x30000 levels {0 16 48 64 128 192 256 384}, mx.lvl @0x30010 {0 16 16 256 384}, mss.lvl @0x30060
+  {0 16 48 64 128 192 256 384}. RPMh READ: cx 6, mx 3, mss 0 (indices into those tables: cx 256 = NOM, mx 256 = NOM,
+  mss off). Whether a READ returns the aggregate or only the apps DRV's vote is not confirmed.
+- AOSS QMP @0x0c300000: magic 0x4d41494c ok, version 1, features 0; **ucore (AOSS) link up (0xffff), its link ack and
+  both channels down; mcore (APSS) link and channel down**; mbox ucore 0xc0+0x68, mcore 0x128+0x2d8, nothing pending.
+  AOSS is waiting for the AP's link-up handshake (qmp_open: mcore link up, kick, wait ucore ack, then the channels);
+  UEFI never used QMP. So the modem's `load_state` message needs that handshake first.
+- **Parser: no bug found on real data.** WifiSmem's init, walks and lookups agree with the snapshot. New host tests pin
+  the real shape without the blob (`t_smem_phone_layout`: cacheline 0x20, 0xffff entries, SIII 615, items > 512 in
+  global, a non-APPS partition with a bad header that must not be validated) and run what stage 3 will allocate (478,
+  479, the 435 SMP2P out item, a cached 480) on that layout and on a copy of the real snapshot (`t_smem_real`).
+- Also fixed on the way: the kernel did not link with `fajita-wifi` code since stage 5 (`_fajita_wifi_msa_assign`, an
+  undefined weak reference from a static archive, which ld64 does not leave unresolved); a weak default returning -78
+  now stands in, and FW5 still reports `msa-assign?` until the modem-boot side links its definition.
+
 Round 5 (lead): A = an iOS Ethernet interface proven over USB (IOEthernetController subclass, frames tunnelled over the
 fjdbg channel to a host bridge), B = the apps_smmu read-only survey. Modem boot, SCM and ath10k WMI are the user's.
 
@@ -86,7 +122,7 @@ scan; WMI-TLV start scan XORs WMI_SCAN_FILTER_PROBE_REQ.
 
 | Layer | Code | Host test | Status |
 | --- | --- | --- | --- |
-| 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
+| 1 SMEM + SMP2P | `WifiSmem.[ch]` (+ read-only inspection), survey `package/FajitaWifiLower.cpp` | `tests/t_smem.c` (synthetic SMEM, both ends; the phone's layout; the real snapshot) | done, validated read-only on the phone |
 | 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
 | 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | `WifiRouter`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` + kernel glue `package/FajitaWifiStack.cpp` | `tests/t_qrtr.c` (simulated modem router; real .jsn, real wlanmdsp.mbn via FAT, real EFS backup) | done |
 | 4 wlfw client | `WifiWlfw.[ch]`, `WifiSnoc.[ch]` (snoc CE tables); stage 5 in FajitaWifiStack.cpp | `tests/t_wlfw.c` (fixture server, every request decoded; real bdwlan.102 == board-2.bin id 0x102) | done |
