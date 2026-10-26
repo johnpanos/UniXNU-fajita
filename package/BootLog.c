@@ -106,6 +106,11 @@ extern volatile int native_gpu_addon2_stage __attribute__((weak_import));
 extern volatile int native_gpu_addon2_status __attribute__((weak_import));
 extern volatile int native_gpu_addon3_stage __attribute__((weak_import));
 extern volatile int native_gpu_addon3_status __attribute__((weak_import));
+extern volatile int fajita_appos_stage __attribute__((weak_import));   // BootCryptexMount.c
+extern volatile int fajita_appos_status __attribute__((weak_import));
+extern volatile int fajita_appos_mode __attribute__((weak_import));
+extern volatile int fajita_appos_os_link __attribute__((weak_import));
+extern char fajita_appos_device[64] __attribute__((weak_import));
 extern volatile uint64_t native_data_persist_present __attribute__((weak_import));
 extern volatile int native_staged_apps_stage __attribute__((weak_import));
 extern volatile int32_t native_buttons_stats[10] __attribute__((weak_import));
@@ -365,6 +370,13 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              native_gpu_addon_written, native_gpu_addon_same, native_gpu_addon_failed, native_gpu_addon_error, native_gpu_addon_stage,
              native_gpu_addon_status, native_gpu_addon2_stage, native_gpu_addon2_status, &native_gpu_addon3_stage ? native_gpu_addon3_stage : 0,
              &native_gpu_addon3_status ? native_gpu_addon3_status : 0);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  // The App cryptex mount (BootCryptexMount.c, fajita-appos=<mode>): stage (8 = App mounted and checked, 9 = and the OS link), errno, device.
+  if (&fajita_appos_stage && fajita_appos_mode) {
+    char row[96];
+    snprintf(row, sizeof row, "C appos mode=%d st=%d rc=%d dev=%.24s oslink=%d", fajita_appos_mode, fajita_appos_stage, fajita_appos_status,
+             fajita_appos_device[0] ? fajita_appos_device : "-", fajita_appos_os_link);
     at = put(out, at, cap, row, sizeof row);
   }
   // NativeDwc3 USB device-mode probe (drivers/NativeDwc3, native-dwc3-probe=1): stage (5 = done), status (0 ok), the probe
