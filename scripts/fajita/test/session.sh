@@ -19,7 +19,7 @@ case $1 in run|push|pull|call) touch $ACT;; esac
 case $1 in
 start)
   O=${FAJITA_OUT:-$TD/../../../.cache/fajita-out}; P=${2:-$O/payload.img}; B=${3:-$O/boot.img}; [ -f "$P" ] || { echo "no payload $P"; exit 1; }
-  NAME=session-$(date +%H%M%S); echo $NAME > $CUR
+  NAME=session-$(date +%H%M%S)   # session.current is written once this run holds the phone (below), not while it queues
   CYCLE_WAIT=${CYCLE_WAIT:-2000} nohup $TD/cycle.sh $NAME $P $B > $S/logs-$NAME.out 2>&1 &
   echo "$NAME: waiting for the phone lock and boot (log: $S/logs/$NAME/)"
   # Fail fast: the run ended (RESULT) or the phone fell back to fastboot before the kernel logged "XNU booting" = a dead boot.
@@ -29,6 +29,7 @@ start)
     fi
     sleep 2
   done
+  echo $NAME > $CUR   # the session on the phone now; worktrees share it, so scripts take their own NAME from this command's output
   t0=$(date +%s)
   touch $ACT
   # idle guard: nobody should hold the phone without using it; reset the run after SESSION_IDLE s with no command
