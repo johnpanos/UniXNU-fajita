@@ -189,6 +189,16 @@ shutdown path (seen after usb-enum12: nine `/tmp/rb` stuck, phone left in pmOS).
 `echo b > /proc/sysrq-trigger` over the telnet shell resets at once and lands in fastboot;
 `cycle.sh` could fall back to it.
 
+## NET channel (7): Ethernet frames to the laptop (usb-net=1)
+
+One Ethernet frame (14..1536 bytes, no FCS) per fjdbg frame, both ways; default off. Kernel API (NativeDwc3.cpp; declare
+weak): `fajita_usbnet_send(frame, len)` (0 queued, -1 off/unconfigured, -2 length, -3 TX ring full: dropped; never
+blocks; NET leaves 4 KiB of the TX ring free), `fajita_usbnet_register_rx(fn, ctx)` (fn runs on the poll thread, the
+frame is valid only for the call), `fajita_usbnet_link_up()`. Core and test hook: `drivers/NativeDwc3/UsbNet.h`,
+`kcmd usbnet [state] | echo on|off | dhcp [IP] | show`. Host: the hub's `net` op turns a socket connection into the
+frame stream in qemu format (u32 BE length + frame); `scripts/fajita/test/usbnet-host.py bridge` relays it to passt,
+`usbnet-host.py echo` is the transport test; `scripts/fajita/test/net-test.sh sim|usbnet`. Details: NOTES-wifi.md round 8.
+
 ## Screenshots over USB (no pmOS)
 
 Op `shot` (u32 scale: 2 = half resolution, the default; 1 = full 1080x2340) replies with the frame

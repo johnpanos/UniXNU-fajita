@@ -6,14 +6,21 @@
       requests on a Unix socket. Reopens the tty when the phone resets and comes back. Ends on SIGTERM.
   fajita-usbdbg-hub.py call [--sock PATH] OP [ARGS...]
       one request through the hub:  read32 ADDR [COUNT] | write32 ADDR VALUE... | kcmd TEXT... | run CMD... |
-      readp ADDR LEN | readv ADDR LEN | hello | state | wait-up [SECONDS] | screenshot FILE.png [--scale N] | reset [MODE]
+      readp ADDR LEN | readv ADDR LEN | hello | state | wait-up [SECONDS] | screenshot FILE.png [--scale N] | reset [MODE] |
+      net-stats
       read32 prints `ADDR: VALUE` lines; kcmd prints the kernel's text; run prints the command's output.
+
+NET channel (7, the phone needs usb-net=1): a client sends the request line {"op": "net"}, reads one JSON reply line, and
+the connection then carries Ethernet frames both ways in the qemu stream format (u32 big-endian length, then the frame),
+the format passt speaks. One NET client at a time; frames from the phone while none is attached are counted and dropped.
+scripts/fajita/test/usbnet-host.py is that client (bridge to passt, or the echo test).
 
 The wire protocol is scripts/fajita-usbdbg.py's (imported from beside this file), so the framing and op codes stay in
 one place. Python stdlib only."""
 import argparse
 import importlib.util
 import json
+import queue
 import os
 import re
 import signal
@@ -81,6 +88,9 @@ class Hub:
         self.shell_event = threading.Condition()
         self.up_since = None
         self.shots = fj.ShotCollector()
+        self.net_lock = threading.Lock()
+        self.net_queue = None   # the attached NET client's outgoing queue (phone -> client), or None
+        self.net_stats = dict(to_client=0, to_phone=0, dropped_no_client=0, dropped_full=0, dropped_no_link=0, sessions=0)
 
     def note(self, text):
         self.log.write(('\n[hub %s] %s\n' % (time.strftime('%H:%M:%S'), text)).encode())
@@ -97,10 +107,85 @@ class Hub:
             del self.shell[:-(32 << 20)]   # room for a pull of up to ~16 MiB (hex on the wire)
             self.shell_event.notify_all()
 
+    def on_net(self, frame):
+        # the Link reader thread: never block it (log and replies share it); a slow client loses frames, like a full NIC ring
+        with self.net_lock:
+            q = self.net_queue
+            if q is None:
+                self.net_stats['dropped_no_client'] += 1
+                return
+            try:
+                q.put_nowait(struct.pack('>I', len(frame)) + frame)
+                self.net_stats['to_client'] += 1
+            except queue.Full:
+                self.net_stats['dropped_full'] += 1
+
+    def net_session(self, c, f):
+        """Serve one NET client on connection c (f: its buffered file, the request line already read)."""
+        with self.net_lock:
+            busy = self.net_queue is not None
+            if not busy:
+                q = self.net_queue = queue.Queue(maxsize=1024)
+                self.net_stats['sessions'] += 1
+        if busy:
+            f.write((json.dumps({'ok': False, 'out': 'net: another client is attached\n'}) + '\n').encode())
+            f.flush()
+            return
+        f.write((json.dumps({'ok': True, 'out': 'net attached\n'}) + '\n').encode())
+        f.flush()
+        self.note('net client attached')
+
+        def writer():
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                try:
+                    c.sendall(item)
+                except OSError:
+                    return
+        wt = threading.Thread(target=writer, daemon=True)
+        wt.start()
+        why = 'closed'
+        try:
+            while True:
+                hdr = f.read(4)
+                if len(hdr) < 4:
+                    break
+                n = struct.unpack('>I', hdr)[0]
+                if n < 14 or n > fj.MAX_DATA:
+                    why = 'bad frame length %d' % n
+                    break
+                frame = f.read(n)
+                if len(frame) < n:
+                    break
+                link = self.link
+                if link is None:
+                    self.net_stats['dropped_no_link'] += 1
+                    continue
+                try:
+                    link.send_frame(fj.CH_NET, frame)
+                    self.net_stats['to_phone'] += 1
+                except OSError:
+                    self.net_stats['dropped_no_link'] += 1
+        except OSError as e:
+            why = str(e)
+        finally:
+            with self.net_lock:
+                self.net_queue = None
+            q.put(None)
+            wt.join(timeout=2)
+            self.note('net client detached (%s): %s' % (why, self.net_stats_text().strip()))
+
+    def net_stats_text(self):
+        with self.net_lock:
+            st = dict(self.net_stats, attached=int(self.net_queue is not None))
+        return ' '.join('%s=%d' % kv for kv in st.items()) + '\n'
+
     def connect_loop(self, exec_cmd=None):
         if exec_cmd:   # tests: a program over stdin/stdout (tests/UsbDbgSim) instead of the gadget's tty
             self.link = fj.Link(fj.ExecTransport(exec_cmd.split()), on_text=self.on_text, on_log=self.on_log,
-                                on_shell=self.on_shell, on_file=self.shots.on_file)
+                                on_shell=self.on_shell, on_file=self.shots.on_file, on_net=self.on_net)
             self.up_since = time.time()
             return
         while True:
@@ -115,7 +200,7 @@ class Hub:
                 if tty and os.path.exists(tty):
                     try:
                         link = fj.Link(fj.TtyTransport(tty), on_text=self.on_text, on_log=self.on_log, on_shell=self.on_shell,
-                                       on_file=self.shots.on_file)
+                                       on_file=self.shots.on_file, on_net=self.on_net)
                         self.link = link
                         self.link_node = (tty, os.stat(tty).st_ino, os.stat(tty).st_ctime_ns)
                         self.up_since = time.time()
@@ -165,6 +250,8 @@ class Hub:
                     return {'ok': True, 'out': 'up %.0f s\n' % (time.time() - self.up_since)}
                 time.sleep(0.5)
             return {'ok': False, 'out': 'timeout\n'}
+        if op == 'net-stats':
+            return {'ok': True, 'out': self.net_stats_text()}
         if op == 'hello':
             st, data = self.request('hello')
             return {'ok': st == 0, 'out': 'status %d features %#x %s\n' % (st, struct.unpack_from('<I', data, 4)[0] if len(data) >= 8 else 0, data[8:].decode(errors='replace'))}
@@ -361,6 +448,9 @@ def serve(args):
         try:
             f = c.makefile('rwb')
             req = json.loads(f.readline())
+            if req.get('op') == 'net':   # the connection becomes a frame stream until the client closes it
+                hub.net_session(c, f)
+                return
             try:
                 rep = hub.handle(req)
             except Exception as e:  # noqa: BLE001 - report every failure to the caller

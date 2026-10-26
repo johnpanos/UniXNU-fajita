@@ -40,7 +40,7 @@ from pathlib import Path
 FRAME_START, FRAME_END, FRAME_ESC, KDP_START = 0xFC, 0xFB, 0xFE, 0xFA
 ESCAPED = {KDP_START, FRAME_END, FRAME_START, FRAME_ESC, 0x0A}
 PROTO_VERSION, MAX_DATA = 1, 1536
-CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP, CH_SHELL, CH_FILE = range(7)
+CH_CTRL, CH_LOG, CH_CMD, CH_RSP, CH_KDP, CH_SHELL, CH_FILE, CH_NET = range(8)   # NET: one Ethernet frame per frame (usb-net=1)
 OPS = dict(hello=0x0001, state=0x0002, read_virt=0x0010, write_virt=0x0011, read_phys=0x0012, write_phys=0x0013,
            read32=0x0014, write32=0x0015, log_from=0x0020, kcmd=0x0030, panic=0x0040, reset=0x0041, wdog=0x0042,
            shot=0x0050)
@@ -190,7 +190,7 @@ class ExecTransport:
 
 # ---- Link: reader thread + request/reply ------------------------------------------
 class Link:
-    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None, on_shell=None, on_file=None):
+    def __init__(self, transport, on_text=None, on_log=None, on_kdp=None, on_shell=None, on_file=None, on_net=None):
         self.t = transport
         self.demux = Demux()
         self.replies = queue.Queue()
@@ -199,6 +199,7 @@ class Link:
         self.on_kdp = on_kdp or (lambda kind, pkt: None)
         self.on_shell = on_shell or (lambda b: None)
         self.on_file = on_file or (lambda shot_id, offset, data: None)
+        self.on_net = on_net or (lambda frame: None)
         self.seq = 0
         self.lock = threading.Lock()
         self.stop = False
@@ -226,6 +227,8 @@ class Link:
                     elif ch == CH_FILE and len(data) >= 8:
                         sid, off = struct.unpack_from('<II', data)
                         self.on_file(sid, off, data[8:])
+                    elif ch == CH_NET:
+                        self.on_net(data)
 
     def send_frame(self, channel, data):
         with self.lock:
