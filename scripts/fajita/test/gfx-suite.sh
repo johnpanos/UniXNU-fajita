@@ -7,6 +7,7 @@
 # Scenes (default all): home applib settings calendar maps web-hn web-wiki web-apple web-heavy (web-*: Wi-Fi up). Apps with real
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
+# WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -71,6 +72,29 @@ python3 -I -c "
 import json,sys; json.dump(dict(run='$RUN', board='$(git -C $BOARD rev-parse --short HEAD)', kernel='$(sha256sum $KM | cut -c1-12)',
   env=[l for l in open('$ENVF').read().split('\n') if l], backboardd='${BBPID:-}', scenes='$SCENES'), open('$O/meta.json','w'))"
 LOG0=$(wc -l < $LOGF 2>/dev/null || echo 0)
+
+# 2b. The same start every run (boot-to-boot noise): a warm-up (WARMUP=1, default: home swipes and the App Library once, not
+# measured), then a settle check: up to SETTLE_MAX (90) s until no process but the render server uses over SETTLE_CPU (25) % of a
+# core over 3 s and the hottest tsens is under SETTLE_TEMP (65) C. The start state (temperature, GPU level, the busiest processes, the
+# CPU clocks) goes to start.txt and the report's header; a run that never settled says so.
+if [ "${WARMUP:-1}" = 1 ]; then
+  $TD/home-page1.sh >/dev/null 2>&1
+  for d in left right left right; do T=10 $H kcmd touch swipe $d >/dev/null 2>&1; sleep 1.2; done
+  $TD/home-page1.sh --applib >/dev/null 2>&1; $TD/home-page1.sh >/dev/null 2>&1
+fi
+settled=0; t0=$(date +%s)
+while [ $(( $(date +%s) - t0 )) -lt ${SETTLE_MAX:-90} ]; do
+  cpu=$(T=20 $SS run $NGPU cpu 3 2>/dev/null); gov=$(T=10 $H kcmd gpu gov 2>/dev/null | head -1)
+  busy=$(echo "$cpu" | awk '/%  [0-9]+ /{n=$4; if(n!="backboardd" && n!~/^ngpu-metal/ && $2+0>m){m=$2+0; w=n}} END{printf "%d %s", m, w}')
+  temp=$(echo "$gov" | grep -o "max [0-9.]* C" | grep -o "[0-9]*" | head -1)
+  echo "[$(date +%T)] settle: busiest other process ${busy:-?}% | ${temp:-?} C | $gov" >> $O/start.txt
+  [ "${busy%% *}" -lt ${SETTLE_CPU:-25} ] && [ "${temp:-99}" -lt ${SETTLE_TEMP:-65} ] && { settled=1; break; }
+done
+echo "$cpu" | sed -n 1,10p >> $O/start.txt
+log "start: $([ $settled = 1 ] && echo settled || echo "NOT settled after ${SETTLE_MAX:-90} s") | $(tail -1 $O/start.txt | cut -c1-60) | $(grep settle: $O/start.txt | tail -1 | cut -d'|' -f1-2 | cut -c12-)"
+python3 -I -c "
+import json; m=json.load(open('$O/meta.json')); m['settled']=$settled
+m['start']=[l for l in open('$O/start.txt') if 'settle:' in l][-1].split('settle: ')[-1].strip()[:140]; json.dump(m,open('$O/meta.json','w'))" 2>/dev/null
 
 # 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
 scene() {   # scene NAME CPU-PROCS STEP...
