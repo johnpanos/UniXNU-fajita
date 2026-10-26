@@ -36,7 +36,7 @@ TD=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$TD/../../.." && pwd)
 W=${FAJITA_WORK:-$ROOT/.cache/fajita-work}
 OUT=${FAJITA_OUT:-$ROOT/.cache/fajita-out-wifi}
 CREDS=${WIFI_CREDS:-$HOME/.config/unixnu/wifi-kittycorner}
-HUB="python3 -I $TD/../fajita-usbdbg-hub.py"
+HUB="python3 -I $TD/../../fajita-usbdbg-hub.py"
 HUBT=${WIFI_HUB_TIMEOUT:-20}            # short hub timeouts, per AGENTS
 # rmtfs (fajita DT 0xf5b01000+0x200000 with guard pages), wlan msa, mpss, mba (sdm845.dtsi reserved-memory)
 PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000}

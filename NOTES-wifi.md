@@ -2,6 +2,30 @@
 
 ## Current state (keep this updated; a restart starts here)
 
+Round 7 (lead): the AOSS QMP link-up, AP side only (no load_state or other message). Modem boot, SCM, memory
+assignment, the SMMU, WMI and the network interface stay on hold.
+
+**AOSS QMP link-up (done 2026-10-25, on the phone, PASS twice).** `drivers/FajitaWifi/WifiQmp.[ch]` is qcom_aoss.c
+`qmp_open` step for step: check magic/version/mcore mailbox size; write UCORE_LINK_STATE into UCORE_LINK_STATE_ACK; MCORE
+link = UP (0xffff), kick, wait MCORE_LINK_ACK == UP; MCORE channel = UP, kick, wait UCORE_CH == UP; UCORE_CH_ACK = UP,
+kick, wait MCORE_CH_ACK == UP; 1 s per wait (HZ); a timeout closes the channel (once opened) and the link, then kicks,
+like qmp_open's error path. Kick = `writel(BIT(0), 0x17990000 + 0xc)` (apss_shared chan 0). No mailbox word is ever
+written. The AOSS doorbell interrupt (SPI 389) is not used: the waits poll every 50 us. Kernel side: `fajita-wifi-qmp=1`
+(default off; with `fajita-wifi=1`) runs it once from the fajita-wifi worker after FW1/the survey (FajitaWifiLower.cpp,
+writable maps of the message RAM and the apss_shared page only for this), with one `FWQ <n> <step> rc val us` row per
+step, `FWQ done` and an `FWQ state` row of both ends; `kcmd wifi qmp` re-reads and prints the state plus the last
+link-up's rows. Host tests `tests/t_qmp.c` (in `test_stack`): a simulated AOSS starting in the phone's round 6 state,
+reacting only to kicks after 0..39 polls: the exact write/kick sequence, no write outside the four AP-owned/ack words,
+mailboxes untouched, a second open on an up link; dead AOSS / no link ack / no channel / no channel ack each time out at
+the right step and close correctly; bad magic, version or mailbox size 0 touch nothing. wifi-test.sh stage `qmp`
+(`wifi-test.sh lower qmp`). On the phone (two boots, identical): before, AP link/ch down, AOSS link up and everything
+else down (the state is fresh on every boot: a reset brings it back down); steps 0-7 rc 0, link ack after 77-78 us,
+AOSS channel 3 us, channel ack 3 us, 3 kicks; after: **`FWQ state ap link up/ack up ch up/ack up | aoss link up/ack up
+ch up/ack up ... mbox 128+2d8 => UP`**, and `kcmd wifi qmp` reports the same. The mcore mailbox (0x128, 0x2d8 bytes) is
+where the later `load_state` message goes (qmp_send: 64-byte payload at +4, length at +0, kick, wait for length 0).
+Also fixed: wifi-test.sh's hub path pointed at scripts/fajita/fajita-usbdbg-hub.py (absent), so its kcmd/iOS probes
+never answered; it is scripts/fajita-usbdbg-hub.py.
+
 Round 6 (lead): 1 = validate the lower layers on the phone, read only; 2 = the WPA2-PSK supplicant core, host only.
 Modem boot, SCM, memory assignment, the SMMU, ath10k WMI and the iOS network interface stay on hold.
 
@@ -342,6 +366,7 @@ Nothing has written these partitions; rmtfs stays read-only until a write path i
 | `drivers/FajitaWifi/WifiMdt.[ch]` | mbn/ELF32 parse, metadata (ELF hdr + hash seg), segment relocation into the carveout | yes, against real mba/modem/wlanmdsp |
 | `drivers/FajitaWifi/WifiQmi.[ch]` | QMI header + TLV encode/decode; wlfw requests + response parsers; servreg-locator and rmtfs servers | yes (encode + decode round-trips) |
 | `drivers/FajitaWifi/WifiQrtr.[ch]` | QRTR v1 header + control packets; GLINK native command framing | yes |
+| `drivers/FajitaWifi/WifiQmp.[ch]` | AOSS QMP link-up, AP side (qcom_aoss qmp_open), no messages | yes, `tests/t_qmp.c` (simulated AOSS); on the phone (`fajita-wifi-qmp=1`) |
 | `drivers/FajitaWifi/WifiBoard.[ch]` | ath10k board-2.bin selection by QMI board id | yes, matches qmi-board-id=102 |
 | `drivers/FajitaWifi/tests/test_wifi.c` | the host tests | `scripts/check-fajita-wifi-host.py` |
 | `package/FajitaWifiBoard.h` | hardware addresses/registers with sources (MSS, GCC, AOSS, SCM, SMEM, GLINK, SMP2P, CE) | — |
