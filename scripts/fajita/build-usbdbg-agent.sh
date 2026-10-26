@@ -38,5 +38,12 @@ clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -
 codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjsurface \
   --entitlements "$BOARD/package/usb-debug-tools/fjsurface-entitlements.plist" "$T/fjsurface"
 cp "$T/fjsurface" "$(dirname "$OUT")/fjsurface"
+# ngpu-metal (package/gpu-tools, also in the plugin's tools build): Metal discovery and the `cpu` sampler (per process, per core and
+# per thread with run states) the gfx suite runs; push with session.sh push to a new name under /private/var/ngpu/sbin
+clang++ -std=c++17 -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -Werror -fobjc-arc -x objective-c++ \
+  "$BOARD/package/gpu-tools/ngpu-metal.mm" -framework Foundation -framework Metal -o "$T/ngpu-metal"
+codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.ngpu-metal \
+  --entitlements "$BOARD/package/gpu-tools/ngpu-probe-entitlements.plist" "$T/ngpu-metal"
+cp "$T/ngpu-metal" "$(dirname "$OUT")/ngpu-metal"
 codesign -dvvv "$OUT" 2>&1 | grep -E 'CDHash|Identifier' || true
 echo "built $OUT"

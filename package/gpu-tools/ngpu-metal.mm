@@ -3,7 +3,8 @@
 // sandbox). With the NativeAdrenoMetal plugin installed and this process listed in NativeAdrenoMetal.clients, Metal's own discovery
 // (IOAcceleratorES -> MetalPluginName -> the plugin) returns the native device: metal2vulkan on Turnip on the Adreno 630.
 //   ngpu-metal [fill]   discovery, then a shared buffer filled by a blit command buffer and read back
-//   ngpu-metal cpu SECONDS [NAME...]   per-process CPU time over SECONDS (and the threads of each NAME)
+//   ngpu-metal cpu SECONDS [NAME...]   per-process CPU time over SECONDS, per-core load, and the threads of each NAME with how often
+//                                      each ran or waited (sampled every NGPU_CPU_SAMPLE_MS, default 20); the window's start in mach us
 //   ngpu-metal spin THREADS SECONDS [QOS]   per-thread rate of a dependent integer chain per 100 ms slice (core types, placement)
 // One line per step; the exit status is the first failed step (0 = all passed).
 #import <Foundation/Foundation.h>
@@ -33,6 +34,8 @@ struct ProcThreadInfo {
 };
 enum { kProcTaskInfo = 4, kProcThreadInfo = 5, kProcListThreads = 6 };
 #include <mach/mach_time.h>
+#include <mach/mach.h>
+#include <mach/processor_info.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -196,9 +199,48 @@ int main(int argc, char **argv) {
             for (int a = 3; a < argc && named < 64; ++a)
                 for (int i = 0; i < n && named < 64; ++i)
                     if (!strcmp(before[i].name, argv[a])) {tpid[named] = before[i].pid; tn[named] = threads(before[i].pid, tid0[named], tname[named], tns0[named], 512); ++named;}
-            const double t1 = nowMs();
-            usleep((useconds_t)(atof(argv[2]) * 1e6));
+            // Per-core load: host_processor_info's tick counts (user, system, idle, nice) before and after the window.
+            auto coreTicks = [](std::vector<uint32_t> &out) -> unsigned {
+                natural_t count = 0; processor_info_array_t info = nullptr; mach_msg_type_number_t words = 0;
+                if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &words) != KERN_SUCCESS) return 0;
+                out.assign(info, info + words);
+                vm_deallocate(mach_task_self(), (vm_address_t)info, words * sizeof(integer_t));
+                return count;
+            };
+            std::vector<uint32_t> cpu0, cpu1;
+            const unsigned cores = coreTicks(cpu0);
+            // Thread states of the named processes, sampled every NGPU_CPU_SAMPLE_MS (default 20) ms while the window runs: how often
+            // each thread was running (TH_STATE_RUNNING 1) against waiting (3, 4), and its current priority. One sample costs a
+            // proc_pidinfo per thread, so it is limited to the named processes.
+            struct Seen {uint64_t id; unsigned run, wait, other; int pri;};
+            static Seen seen[64][512]; static int seenN[64];
+            const double sampleMs = getenv("NGPU_CPU_SAMPLE_MS") ? atof(getenv("NGPU_CPU_SAMPLE_MS")) : 20;
+            unsigned samples = 0;
+            const double t1 = nowMs(), windowMs = atof(argv[2]) * 1e3;
+            while (nowMs() - t1 < windowMs) {
+                if (named && sampleMs > 0) {
+                    ++samples;
+                    for (int p = 0; p < named; ++p) {
+                        static uint64_t list[512];
+                        const int bytes = proc_pidinfo(tpid[p], kProcListThreads, 0, list, sizeof list);
+                        const int k = bytes > 0 ? bytes / (int)sizeof(uint64_t) : 0;
+                        for (int i = 0; i < k && i < 512; ++i) {
+                            ProcThreadInfo th = {};
+                            if (proc_pidinfo(tpid[p], kProcThreadInfo, list[i], &th, sizeof th) != (int)sizeof th) continue;
+                            int j = 0;
+                            while (j < seenN[p] && seen[p][j].id != list[i]) ++j;
+                            if (j == seenN[p]) {if (j >= 512) continue; seen[p][j] = {list[i], 0, 0, 0, 0}; ++seenN[p];}
+                            if (th.runState == 1) ++seen[p][j].run; else if (th.runState == 3 || th.runState == 4) ++seen[p][j].wait; else ++seen[p][j].other;
+                            seen[p][j].pri = th.curpri;
+                        }
+                    }
+                }
+                const double left = windowMs - (nowMs() - t1);
+                const double step = named && sampleMs > 0 ? sampleMs : left;
+                if (left > 0) usleep((useconds_t)((step < left ? step : left) * 1e3));
+            }
             const double ms = nowMs() - t1;
+            coreTicks(cpu1);
             static Proc delta[4096];
             int m = 0;
             for (int i = 0; i < n; ++i) {
@@ -206,7 +248,18 @@ int main(int argc, char **argv) {
                 if (now > before[i].ns) {delta[m] = before[i]; delta[m].ns = now - before[i].ns; ++m;}
             }
             std::sort(delta, delta + m, [](const Proc &a, const Proc &b) {return a.ns > b.ns;});
-            printf("cpu over %.0f ms (ms, %% of one core):\n", ms);
+            printf("cpu over %.0f ms from %.0f us (ms, %% of one core):\n", ms, t1 * 1e3);
+            if (cores && cpu1.size() == cpu0.size()) {
+                printf("cores:");
+                for (unsigned c = 0; c < cores; ++c) {
+                    const uint32_t *a = &cpu0[c * CPU_STATE_MAX], *b = &cpu1[c * CPU_STATE_MAX];
+                    const double user = b[CPU_STATE_USER] - a[CPU_STATE_USER], sys = b[CPU_STATE_SYSTEM] - a[CPU_STATE_SYSTEM],
+                                 idle = b[CPU_STATE_IDLE] - a[CPU_STATE_IDLE], nice = b[CPU_STATE_NICE] - a[CPU_STATE_NICE];
+                    const double all = user + sys + idle + nice;
+                    printf(" %u:%.0f/%.0f", c, all ? 100 * (user + nice) / all : 0, all ? 100 * sys / all : 0);
+                }
+                printf(" (user/system %% per core)\n");
+            }
             for (int i = 0; i < m && i < 25; ++i) printf("%8.1f %5.1f%%  %d %s\n", delta[i].ns / 1e6, delta[i].ns / 1e4 / ms, delta[i].pid, delta[i].name);
             for (int p = 0; p < named; ++p) {
                 static uint64_t ids[512], ns[512]; static char names[512][64];
@@ -219,8 +272,14 @@ int main(int argc, char **argv) {
                     if (ns[i] > was) rows[r++] = {ns[i] - was, names[i], ids[i]};
                 }
                 std::sort(rows, rows + r, [](const T &a, const T &b) {return a.ns > b.ns;});
-                printf("threads of %d:\n", tpid[p]);
-                for (int i = 0; i < r && i < 12; ++i) printf("%8.1f %5.1f%%  0x%llx %s\n", rows[i].ns / 1e6, rows[i].ns / 1e4 / ms, (unsigned long long)rows[i].id, rows[i].name);
+                printf("threads of %d (%u state samples: running/waiting %% of samples, priority):\n", tpid[p], samples);
+                for (int i = 0; i < r && i < 12; ++i) {
+                    const Seen *sn = nullptr;
+                    for (int j = 0; j < seenN[p]; ++j) if (seen[p][j].id == rows[i].id) {sn = &seen[p][j]; break;}
+                    const unsigned all = sn ? sn->run + sn->wait + sn->other : 0;
+                    printf("%8.1f %5.1f%%  0x%llx %s | run %.0f%% wait %.0f%% pri %d\n", rows[i].ns / 1e6, rows[i].ns / 1e4 / ms, (unsigned long long)rows[i].id,
+                           rows[i].name[0] ? rows[i].name : "-", all ? 100.0 * sn->run / all : 0, all ? 100.0 * sn->wait / all : 0, sn ? sn->pri : -1);
+                }
             }
             return 0;
         }

@@ -76,6 +76,9 @@ char fajita_gpu_text[8192];                  // the log, newest last
 volatile uint32_t fajita_gpu_text_len = 0;
 }
 
+// The governor timeline (govThread): one GovSample per 20 ms tick, see there.
+struct GovSample {uint64_t us; uint32_t always, busy; uint16_t level, cap; int16_t temp; uint16_t bus;};
+extern "C" {volatile GovSample fajita_gpu_gov_ring[4096]; volatile uint32_t fajita_gpu_gov_n;}
 namespace {
 
 // ---- log ------------------------------------------------------------------------------------------------------------
@@ -831,13 +834,20 @@ void govSetBus(unsigned mbps) {
     if (!fajita_bus_set || mbps == gGov.bus) return;
     if (fajita_bus_set(mbps)) ++gGov.busErrors; else gGov.bus = mbps;
 }
+// The governor timeline (scripts/fajita/test/gfx-scene.py): one sample per 20 ms tick, a ring of 4096 (82 s): the tick's mach time in us,
+// RBBM always-count and busy cycles over the tick (busy % and the real GPU clock), the DCVS level and cap, and the hottest tsens (deci-C,
+// read once a second). Entry n-1 is at (n-1) % 4096 of fajita_gpu_gov_ring; fajita_gpu_gov_n counts ticks.
+// (fajita_gpu_gov_ring and GovSample are declared above the namespace: extern "C" globals for the host)
 void govThread(void *, wait_result_t)
 {
     const unsigned top = gPerf.gpu_count - 1, low = 1;
     gGov.level = top; gGov.cap = top; gGov.bus = 7216; gGov.lastActiveUs = nowUs();
     gpuWr(0x0507 + 1, 6);   // RBBM_PERFCTR_RBBM_SEL_1 = PERF_RBBM_STATUS_MASKED (kcmd gpu perf selects the same)
+    gpuWr(0x0507 + 0, 0);   // RBBM_PERFCTR_RBBM_SEL_0 = PERF_RBBM_ALWAYS_COUNT (kcmd gpu perf selects the same)
     auto busy = [] {return uint64_t(gpuRd(0x041c + 3)) << 32 | gpuRd(0x041c + 2);};
+    auto always = [] {return uint64_t(gpuRd(0x041c + 1)) << 32 | gpuRd(0x041c + 0);};
     gGov.busyLast = busy();
+    uint64_t alwaysLast = always();
     gGov.framesLast = &native_gop_gpu_offers ? native_gop_gpu_offers : 0;
     for (;;) {
         IOSleep(20);
@@ -845,6 +855,16 @@ void govThread(void *, wait_result_t)
         ++gGov.ticks;
         const uint64_t now = nowUs(), b = busy(), f = &native_gop_gpu_offers ? native_gop_gpu_offers : 0;
         const bool active = b != gGov.busyLast || f != gGov.framesLast;
+        {
+            const uint64_t al = always();
+            const uint32_t k = fajita_gpu_gov_n;
+            volatile GovSample &e = fajita_gpu_gov_ring[k % 4096];
+            e.us = now; e.always = uint32_t(al - alwaysLast); e.busy = uint32_t(b - gGov.busyLast);
+            e.level = uint16_t(gGov.level); e.cap = uint16_t(gGov.cap); e.temp = int16_t(gGov.maxTempDeci); e.bus = uint16_t(gGov.bus);
+            __asm__ volatile("dmb ish" ::: "memory");
+            fajita_gpu_gov_n = k + 1;
+            alwaysLast = al;
+        }
         gGov.busyLast = b; gGov.framesLast = f;
         if (!(gGov.ticks % 50)) {
             uint32_t zone = 0;
@@ -916,7 +936,7 @@ size_t appendf(char *out, size_t cap, size_t at, const char *fmt, ...)
 
 
 
-// ---- kcmd gpu perf [MS]: a6xx performance counters around a window (fdperf's direct MMIO selection; a6xx.xml / a6xx_perfcntrs.xml) ----
+// ---- kcmd gpu perf [MS] | perf begin | perf end: a6xx performance counters around a window (fdperf's direct MMIO selection; a6xx.xml / a6xx_perfcntrs.xml) ----
 // CP counter 0 stays PERF_CP_ALWAYS_COUNT (hw_init). Each entry: select register, countable, counter (LO; HI follows).
 struct PerfSel {const char *name; uint32_t sel, countable, lo;};
 const PerfSel kPerf[] = {
@@ -937,11 +957,31 @@ const PerfSel kPerf[] = {
     {"uche_vbif_lat_n", 0x0e1c + 2, 3, 0x0476 + 2 * 2},   // PERF_UCHE_VBIF_LATENCY_SAMPLES
     {"uche_stall_arb", 0x0e1c + 3, 1, 0x0476 + 2 * 3},    // PERF_UCHE_STALL_CYCLES_ARBITER
 };
+// perf begin / perf end: the same counters around a window the caller times (a gfx-suite scene), without blocking the debug channel.
+uint64_t gPerfBegin[sizeof kPerf / sizeof *kPerf], gPerfBeginUs;
 size_t perfCmd(const char *args, char *out, size_t cap)
 {
     if (!gGxOn || !A630GxOn(&gIo)) return appendf(out, cap, 0, "gx off\n");
     unsigned ms = 1000;
     while (*args == ' ') ++args;
+    auto rd64 = [](uint32_t lo) {uint32_t h0 = gpuRd(lo + 1), l = gpuRd(lo), h1 = gpuRd(lo + 1); if (h0 != h1) l = gpuRd(lo); return uint64_t(h1) << 32 | l;};
+    if (!strncmp(args, "begin", 5)) {
+        for (unsigned i = 0; i < sizeof kPerf / sizeof *kPerf; ++i) gpuWr(kPerf[i].sel, kPerf[i].countable);
+        __asm__ volatile("dsb sy" ::: "memory");
+        IODelay(10);
+        for (unsigned i = 0; i < sizeof kPerf / sizeof *kPerf; ++i) gPerfBegin[i] = rd64(kPerf[i].lo);
+        gPerfBeginUs = nowUs();
+        return appendf(out, cap, 0, "perf begun at %llu us\n", (unsigned long long)gPerfBeginUs);
+    }
+    if (!strncmp(args, "end", 3)) {
+        if (!gPerfBeginUs) return appendf(out, cap, 0, "perf: no begin\n");
+        uint64_t b[sizeof kPerf / sizeof *kPerf];
+        for (unsigned i = 0; i < sizeof kPerf / sizeof *kPerf; ++i) b[i] = rd64(kPerf[i].lo);
+        const uint64_t t1 = nowUs();
+        size_t w = appendf(out, cap, 0, "window %llu us\n", (unsigned long long)(t1 - gPerfBeginUs));
+        for (unsigned i = 0; i < sizeof kPerf / sizeof *kPerf; ++i) w = appendf(out, cap, w, "%s %llu\n", kPerf[i].name, (unsigned long long)(b[i] - gPerfBegin[i]));
+        return w;
+    }
     if (*args >= '0' && *args <= '9') {ms = 0; while (*args >= '0' && *args <= '9') ms = ms * 10 + unsigned(*args++ - '0');}
     if (ms > 5000) ms = 5000;
     const unsigned n = sizeof kPerf / sizeof *kPerf;
@@ -949,7 +989,6 @@ size_t perfCmd(const char *args, char *out, size_t cap)
     for (unsigned i = 0; i < n; ++i) gpuWr(kPerf[i].sel, kPerf[i].countable);
     __asm__ volatile("dsb sy" ::: "memory");
     IODelay(10);
-    auto rd64 = [](uint32_t lo) {uint32_t h0 = gpuRd(lo + 1), l = gpuRd(lo), h1 = gpuRd(lo + 1); if (h0 != h1) l = gpuRd(lo); return uint64_t(h1) << 32 | l;};
     for (unsigned i = 0; i < n; ++i) a[i] = rd64(kPerf[i].lo);
     const uint64_t t0 = nowUs();
     IOSleep(ms);
@@ -1147,7 +1186,7 @@ extern "C" void fajita_gpu_probe(void)
     if (!gProbed) {
         gProbed = 1;
         gLogLock = IOSimpleLockAlloc();
-        if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("gpu", kcmd, "Adreno 630 bring-up: gpu [N|log|regs]");
+        if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("gpu", kcmd, "Adreno 630 bring-up: gpu [N|log|regs|perf [MS|begin|end]|gov|raw]");
     }
     const unsigned target = bootArg("fajita-gpu", 0);
     if (!target || fajita_gpu_stage || fajita_gpu_running || fajita_gpu_failed) return;

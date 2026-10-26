@@ -5,6 +5,7 @@
 #   moved): home gesture, then swipe right until the screen stops changing (the Today view, left of page 1), then one swipe left.
 #   --rebase: go there that way and save the references for the current Data: home-base.png (page 1) and applib-base.png (the App
 #   Library: swipe left from page 1 until the screen stops changing). Run it once per boot of new Data, before fps.sh.
+#   --applib: go on to the App Library (fps.sh, gfx-suite.sh).
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; mkdir -p "$W"; S=$W; H=$TD/hc
 shot() { T=30 $H screenshot "$1" >/dev/null 2>&1; }
 # pixels over 8 that differ below the status bar and above the dock (the dock is on every page)
@@ -30,6 +31,16 @@ toPage1() {
   [ -f $S/home-base.png ] && ispage1 $S/.edge.png && return 0
   $H kcmd touch swipe left >/dev/null; sleep 2
 }
+# --applib: to page 1, then left until the App Library's search field ("App Library" over the blurred wallpaper) matches applib-base.png's
+# (only the field: the folders below it reorder as the App Library's categories change with use). Exit 1 if it is not reached.
+if [ "$1" = --applib ]; then
+  onpage1 || toPage1
+  for i in 1 2 3 4 5; do
+    $H kcmd touch swipe left >/dev/null; sleep 2; shot $S/.applib-check.png
+    n=$(python3 -I $TD/scrdiff.py $S/applib-base.png $S/.applib-check.png 30 88 510 155 | awk '{print $4}'); [ "${n:-99999}" -lt 3000 ] && exit 0
+  done
+  echo "!! home-page1: the App Library was not reached (see $S/.applib-check.png against $S/applib-base.png)" >&2; exit 1
+fi
 if [ "$1" = --rebase ]; then
   toPage1 || { echo "!! home-page1: the Today view edge was not found" >&2; exit 1; }
   shot $S/home-base.png && echo "saved $S/home-base.png"

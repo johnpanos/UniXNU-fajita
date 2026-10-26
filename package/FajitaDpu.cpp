@@ -33,6 +33,13 @@ volatile uint64_t fajita_dpu_irq_stamp;   // mach time of the last PP0 rd_ptr
 // Flips: [0] requested, [1] latched, [2] refused (one pending, no interrupt, or an address outside the buffers), [3] writes the GPU was
 // told to make into the buffer on screen (the tear counter: 0 with flips; see fajita_dpu_scanned).
 volatile uint32_t fajita_dpu_flips[4];
+// The present timeline (scripts/fajita/test/gfx-scene.py): the mach time of every latched flip, i.e. the frame start from which the panel
+// shows a new frame, in a ring of 2048 (34 s at 60 Hz); fajita_dpu_latch_n counts every latch (entry n-1 is at (n-1) % 2048). Read over
+// readv after a scene: frame times, missed vsyncs and stalls as the panel saw them. fajita_dpu_vsync_ring: the same for every PP0 rd_ptr.
+volatile uint64_t fajita_dpu_latch_ring[2048];
+volatile uint32_t fajita_dpu_latch_n;
+volatile uint64_t fajita_dpu_vsync_ring[2048];
+volatile uint32_t fajita_dpu_vsync_n;
 extern volatile uint32_t native_legacy_hw_vsync[8] __attribute__((weak));   // NativeLegacyDisplay's hardware vsync counters
 extern volatile uint32_t native_gop_flip_stats[8] __attribute__((weak));     // NativeGOPPresenter's flip bookkeeping
 }
@@ -105,6 +112,12 @@ struct Flip {uint64_t phys; void (*latched)(void *); void *context; volatile boo
 Flip gFlip;
 volatile bool gTearTest;   // kcmd dpu tear-test owns the scan-out: other flips are refused
 uint64_t gScanned = 0;   // the buffer VIG0 reads (0 until the first flip: the firmware's)
+void noteLatch(uint64_t now) {
+    const uint32_t n = fajita_dpu_latch_n;
+    fajita_dpu_latch_ring[n % 2048] = now;
+    __asm__ volatile("dmb ish" ::: "memory");
+    fajita_dpu_latch_n = n + 1;
+}
 void dpuIrq(void *) {
     volatile uint32_t *r = gIrqRegs;
     if (!r) return;
@@ -117,6 +130,7 @@ void dpuIrq(void *) {
             gFlip.pending = false;
             gScanned = gFlip.phys;
             fajita_dpu_flips[1] = fajita_dpu_flips[1] + 1;
+            noteLatch(mach_absolute_time());
             if (gFlip.latched) gFlip.latched(gFlip.context);
         }
     }
@@ -129,10 +143,14 @@ void dpuIrq(void *) {
         const uint64_t now = mach_absolute_time();
         fajita_dpu_irq_stamp = now;
         fajita_dpu_irq[1] = fajita_dpu_irq[1] + 1;
+        fajita_dpu_vsync_ring[fajita_dpu_vsync_n % 2048] = now;
+        __asm__ volatile("dmb ish" ::: "memory");
+        fajita_dpu_vsync_n = fajita_dpu_vsync_n + 1;
         if (gFlip.pending && !(rd(r, kCtl + 0x18) & 1u)) {
             gFlip.pending = false;
             gScanned = gFlip.phys;
             fajita_dpu_flips[1] = fajita_dpu_flips[1] + 1;
+            noteLatch(now);
             if (gFlip.latched) gFlip.latched(gFlip.context);
         }
         if (gVsync) gVsync(gVsyncContext, now);

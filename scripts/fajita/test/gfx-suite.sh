@@ -1,0 +1,137 @@
+#!/bin/bash
+# gfx-suite.sh RUN [SCENE...]: the graphics suite on the held session (session.sh start, or wifi-test.sh with WIFI_HOLD=1 for the web
+# scenes): each scene's motion measured frame by frame on the panel's timeline (gfx-scene.py), its GPU, CPU and clocks, a screenshot
+# at its rest points, and the stability counters; one report: $FAJITA_WORK/gfx/RUN/report.txt (+ report.tsv, metrics.json).
+#   gfx-suite.sh ab RUN ENV_A ENV_B [ROUNDS]   A/B two gpu-env files in this boot (backboardd restarted per variant, as gpu-ab.sh),
+#                                              ROUNDS times interleaved; RUN-a1, RUN-b1, ... and the comparison in RUN-ab.txt
+# Scenes (default all): home applib settings calendar maps web-hn web-wiki web-apple web-heavy (web-*: Wi-Fi up). Apps with real
+# content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
+# Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
+# REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
+# rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
+# Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
+# fjbundle (--open) from $FAJITA_OUT/tools (scripts/fajita/build-usbdbg-agent.sh $FAJITA_OUT/tools/fjdbg-agent builds them).
+set -uo pipefail
+TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
+W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}; OUTD=${FAJITA_OUT:-$BOARD/.cache/fajita-out}
+SS=$TD/session.sh; H=$TD/hc
+export KM=${KM:-$OUTD/unixnu/fajita-ios16/kernel/kernel.macho}
+usage() { sed -n 2,13p "$0"; exit 2; }
+[ $# -ge 1 ] || usage
+
+if [ "$1" = ab ]; then
+  [ $# -ge 4 ] || usage
+  R=$2 A=$3 B=$4 N=${5:-1}
+  for i in $(seq 1 $N); do
+    ENV=$A $0 $R-a$i || echo "gfx-suite: !! $R-a$i failed"
+    ENV=$B $0 $R-b$i || echo "gfx-suite: !! $R-b$i failed"
+  done
+  for i in $(seq 1 $N); do python3 -I $BOARD/tools/gpu/gfx-report.py --compare $W/gfx/$R-a$i $W/gfx/$R-b$i; done | tee $W/gfx/$R-ab.txt
+  exit 0
+fi
+
+RUN=$1; shift
+O=$W/gfx/$RUN; mkdir -p $O; rm -f $O/*.json $O/*.png
+SCENES=${*:-home applib settings calendar maps web-hn web-wiki web-apple web-heavy}
+LOGF=$W/logs/$(cat $W/session.current 2>/dev/null)/usb-console.txt
+$TD/gpu-status.sh >/dev/null; [ $? -eq 2 ] && { echo "gfx-suite: no run holds the phone (session.sh start)"; exit 1; }
+[ -f "$KM" ] || { echo "gfx-suite: no kernel $KM (KM=)"; exit 1; }
+log() { echo "[$(date +%T)] $*" | tee -a $O/suite.log; }
+: > $O/suite.log
+
+# 1. Tools on the phone, under names that change with their contents.
+push_tool() {   # push_tool NAME -> prints the phone path
+  local f=$OUTD/tools/$1 h; [ -f "$f" ] || f=$BOARD/.cache/fajita-inputs/$1
+  [ -f "$f" ] || { echo "gfx-suite: no $1 (scripts/fajita/build-usbdbg-agent.sh $OUTD/tools/fjdbg-agent)" >&2; return 1; }
+  h=$(sha1sum "$f" | cut -c1-8); local p=/private/var/ngpu/sbin/$1-$h
+  T=120 $SS push "$f" $p >/dev/null 2>&1; echo $p
+}
+NGPU=$(push_tool ngpu-metal) || exit 1
+FJB=$(push_tool fjbundle) || exit 1
+T=20 $SS run $NGPU cpu 0.2 backboardd 2>&1 | grep -q "cpu over" || { echo "gfx-suite: !! $NGPU cpu does not run"; exit 1; }
+log "tools: $NGPU $FJB"
+
+# 2. The render settings: ENV (+ the frame trace), backboardd restarted once so it reads them (gpu-ab.sh's way).
+ENVF=$O/gpu-env; : > $ENVF
+[ -n "${ENV:-}" ] && grep -v '^\s*#' "$ENV" | grep . >> $ENVF
+[ "${TRACE:-1}" = 1 ] && echo NGPU_FRAME_TRACE=1 >> $ENVF
+if [ "${NORESTART:-0}" != 1 ]; then
+  T=30 $SS pull /private/var/ngpu/gpu-env $O/gpu-env.before >/dev/null 2>&1
+  T=60 $SS push $ENVF /private/var/ngpu/gpu-env 644 >/dev/null 2>&1
+  T=30 $SS pull /private/var/ngpu/gpu-env $O/gpu-env.check >/dev/null 2>&1; cmp -s $ENVF $O/gpu-env.check || { echo "gfx-suite: gpu-env push failed"; exit 1; }
+  T=30 $SS run /usr/sbin/ngpu-metal killall backboardd >/dev/null 2>&1
+  up=0; for i in $(seq 1 20); do sleep 3; T=15 $SS run /usr/sbin/ngpu-metal ps 2>/dev/null | grep -q backboardd && { up=1; break; }; done
+  [ $up = 1 ] || { echo "gfx-suite: !! backboardd did not come back"; exit 1; }
+  sleep ${SETTLE_S:-25}
+  $TD/safari-page.sh $O/.wake.png wake >/dev/null 2>&1; rm -f $O/.wake.png
+fi
+BBPID=$(T=15 $SS run /usr/sbin/ngpu-metal ps 2>/dev/null | awk '$2=="backboardd"{print $1}' | head -1)
+log "env: $(tr '\n' ' ' < $ENVF) | backboardd pid ${BBPID:-?}"
+python3 -I -c "
+import json,sys; json.dump(dict(run='$RUN', board='$(git -C $BOARD rev-parse --short HEAD)', kernel='$(sha256sum $KM | cut -c1-12)',
+  env=[l for l in open('$ENVF').read().split('\n') if l], backboardd='${BBPID:-}', scenes='$SCENES'), open('$O/meta.json','w'))"
+LOG0=$(wc -l < $LOGF 2>/dev/null || echo 0)
+
+# 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
+scene() {   # scene NAME CPU-PROCS STEP...
+  local name=$1 procs=$2; shift 2
+  python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "$@" 2>&1 | tee -a $O/suite.log
+}
+home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1; }
+open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
+SCROLL="xy,540,1900,540,900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,900,540,1900:60"
+WEB="xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40"
+run_scene() {   # run_scene SCENE SUFFIX
+  local s=$1 n=$1$2
+  case $s in
+    home)     home || { log "!! $n: not on home page 1"; return; }
+              scene $n backboardd,SpringBoard left right left right left:60 right:60 left:60 right:60 shot,page1 ;;
+    applib)   $TD/home-page1.sh --applib >/dev/null 2>&1 || { log "!! $n: App Library not reached"; return; }
+              scene $n backboardd,SpringBoard $SCROLL $SCROLL wait,1 shot,top; home ;;
+    settings) home; STAY=1 $TD/settings-scroll.sh gfx-settings 0 >/dev/null 2>&1 || { log "!! $n: Settings did not open"; home; return; }
+              scene $n backboardd,Preferences $SCROLL wait,1 shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
+    calendar) home; scene $n backboardd,MobileCal open,calshow:// wait,3 $SCROLL wait,1 shot,rest left:30 right:30 up; home ;;
+    maps)     home; scene $n backboardd,Maps open,'maps://?ll=37.7749,-122.4194&z=13' wait,5 xy,300,1500,800,900:40 xy,800,900,300,1500:40 \
+                xy,540,1600,540,800:40 xy,540,800,540,1600:40 up; home ;;
+    web-hn)   home; open_url https://news.ycombinator.com/ 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
+    web-wiki) open_url https://en.wikipedia.org/wiki/Main_Page 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
+    web-apple) open_url https://www.apple.com/ 10; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
+    web-heavy) open_url ${HEAVY_URL:-https://www.theverge.com/} 12
+              scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU anim,4 $WEB wait,1 up; home ;;
+    *) log "!! unknown scene $s" ;;
+  esac
+}
+for r in $(seq 1 ${REPEAT:-1}); do
+  sfx=""; [ $r -gt 1 ] && sfx=-r$r
+  for s in $SCENES; do log "scene $s$sfx"; run_scene $s "$sfx"; done
+done
+home
+
+# 4. Frame traces (one file per Metal process that started with the trace on), stability from the run's log.
+mkdir -p $O/frametrace; rm -f $O/frametrace/*.csv
+if [ "${TRACE:-1}" = 1 ]; then
+  FTD=/private/var/mobile/Library/Caches/com.apple.backboardd/m2v/frametrace
+  for f in $(T=20 $SS run $FJB --ls $FTD 2>/dev/null | grep -o "backboardd-${BBPID:-x}\.csv"); do
+    T=200 $SS pull $FTD/$f $O/frametrace/$f >/dev/null 2>&1 && log "frame trace $f: $(wc -l < $O/frametrace/$f) lines"
+  done
+fi
+python3 -I - "$LOGF" "$LOG0" $O/stability.json <<'EOF'
+import json, re, sys
+log, start, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+lines = open(log, errors='replace').read().splitlines()[start:]
+crash = [l.split(']:', 1)[-1].strip()[:80] for l in lines if 'CRASH p' in l]
+by = {}
+for c in crash:
+    m = re.search(r'CRASH p\d+ (\S+)', c)
+    by[m.group(1) if m else '?'] = by.get(m.group(1) if m else '?', 0) + 1
+json.dump({'crashes': sum(by.values()), 'backboardd_crashes': by.get('backboardd', 0),
+           'swap_wait_timeouts': sum('swap_wait_gated' in l for l in lines),
+           'gpu_faults': sum(bool(re.search(r'SMMU.*fault|hwfault [1-9a-f]|GPU (hang|fault)|fajita-gpu: .*FAIL', l)) for l in lines),
+           'panics': sum('panic' in l.lower() for l in lines), 'log_lines': len(lines),
+           'crash_by_process': ['%s x%d' % kv for kv in sorted(by.items(), key=lambda kv: -kv[1])]}, open(out, 'w'))
+EOF
+[ -f $O/gpu-env.before ] && T=60 $SS push $O/gpu-env.before /private/var/ngpu/gpu-env 644 >/dev/null 2>&1   # the trace stays on in this backboardd only
+if [ "${REBASE:-0}" = 1 ]; then mkdir -p $W/gfx/refs; cp $O/*.png $W/gfx/refs/ 2>/dev/null; log "references saved to $W/gfx/refs"; fi
+python3 -I $BOARD/tools/gpu/gfx-report.py $O
+[ "${REPEAT:-1}" -gt 1 ] && python3 -I $BOARD/tools/gpu/gfx-report.py --noise $O
+exit 0
