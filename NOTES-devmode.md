@@ -43,12 +43,23 @@ Apple's wifid. With `fajita-ssh=1` the agent (either path) forks an SSH supervis
 startSshSupervisor): its own session, a lock (`/private/var/ssh/supervisor.lock`) so a relaunched agent does not start a second
 one, runs `bash ssh-start`, restarts it 2 s after it exits (doubling to 60 s while it keeps dying within 30 s).
 
+## Verified (2026-10-26, one-shot --test boot, 192.168.0.84)
+
+ssh with the user's ed25519 key; login shell bash on /dev/ttys000, TERM xterm-256color, ctrl-c interrupts `sleep` (rc 130), toybox vi
+edits a file; scp up and down (SFTP mode and legacy `scp -O`) and sftp put/get of 3 MB, sha256 equal; `-L 18080:127.0.0.1:8080` to a
+phone-side `nc -L httpd`, and `-R` to a host port; a pushed binary (fjnet) runs. Known gaps: toybox on iOS has no ps/pgrep/awk/stty
+(iOS's own /bin/ps is on PATH); toybox `mkdir -p` fails on the read-only system parents (`/private`), so create the last component only.
+
 ## Security choices
 
 - Key-only. Password and PAM auth are compiled out (`DROPBEAR_SVR_PASSWORD_AUTH 0`) and `-s -g` are passed as well; iOS's
   `/etc/passwd` still carries the stock root/mobile hash, which therefore can never log in.
-- Single-user dropbear (`DROPBEAR_SVR_MULTIUSER 0`): only root, the account it runs as, can log in. Darwin has no `setresgid`, so
-  there is no privilege separation (as on macOS builds of dropbear).
+- Root only: dropbear runs as root with `-G wheel` (gid 0), so only root can log in, and only root gets a login shell
+  (dropbear-fajita.patch: iOS has no `/bin/sh`, root's shell is the add-on's bash). Dropbear's non-multiuser mode refuses to start
+  on a kernel that implements getgroups(), and Darwin has no `setresgid`, so it is a multi-user build without privilege separation
+  (as dropbear builds on macOS); Unix-socket stream forwarding is compiled out for that reason. TCP forwarding (-L, -R) works.
+- The authorized_keys permission walk stops at `/private/var/ssh` (root 0700): `/private/var` is group-writable on this Data
+  volume, which dropbear would otherwise refuse (dropbear-fajita.patch, `DROPBEAR_AUTHKEYS_TRUSTED_DIR`).
 - authorized_keys: the builder's `~/.ssh/*.pub` (or `FAJITA_SSH_KEYS`) are baked into the add-on as public keys; a private key in the
   list stops the build. Keys added on the phone go in `/private/var/ssh/authorized_keys.local`.
 - Host keys are generated on the phone at first start and never leave it. The host side uses `HostKeyAlias=fajita`, so the key is
