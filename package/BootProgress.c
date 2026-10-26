@@ -206,6 +206,8 @@ extern volatile uint64_t native_legacy_frame_color_counts[8][4] __attribute__((w
 extern volatile uint64_t native_legacy_frame_color_other[8] __attribute__((weak_import));
 extern volatile uint32_t native_legacy_transfer_calls __attribute__((weak_import));
 extern volatile uint32_t native_legacy_retirement_calls __attribute__((weak_import));
+extern volatile uint32_t native_legacy_retire_lost __attribute__((weak_import));
+extern volatile uint32_t native_legacy_retire_lost_why __attribute__((weak_import));
 extern volatile uint32_t native_legacy_guard_slot __attribute__((weak_import));
 extern volatile uint32_t native_legacy_prepare_calls __attribute__((weak_import));
 extern volatile uint32_t native_legacy_prepare_reason __attribute__((weak_import));
@@ -423,10 +425,14 @@ static void draw(unsigned now) {
     snprintf(b,sizeof(b),"DISPLAY stage=%u PM=%u calls=%u callbacks=%u guard=%u owned=%u",
       native_legacy_stage,native_legacy_pm_stage,native_legacy_pm_calls,native_legacy_pm_callbacks,
       native_legacy_guard_slot,boot_progress_display_owned);line(31,b,0xffffff00);
-    snprintf(b,sizeof(b),"SWAP calls=%u accepted=%u reason=%u COPY calls=%u status=%08x bytes=%llu retired=%u",
+    int swapAt=snprintf(b,sizeof(b),"SWAP calls=%u accepted=%u reason=%u COPY calls=%u status=%08x bytes=%llu retired=%u",
       native_legacy_swap_validation_calls,native_legacy_swap_validation_result,native_legacy_swap_validation_reason,
       native_legacy_transfer_calls,(unsigned)native_legacy_transfer_status,native_legacy_transfer_bytes,
-      native_legacy_retirement_calls);line(32,b,0xffffff00);
+      native_legacy_retirement_calls);
+    if(&native_legacy_retire_lost && native_legacy_retire_lost) {   // frames whose client went away before they retired
+      if(swapAt>0 && (size_t)swapAt<sizeof(b))snprintf(b+swapAt,sizeof(b)-(size_t)swapAt," lost=%u/%u",native_legacy_retire_lost,native_legacy_retire_lost_why);
+    }
+    line(32,b,0xffffff00);
     if(&native_legacy_swap_rejected_count && native_legacy_swap_rejected_count) {
       snprintf(b,sizeof(b),"REJ acc=%u rej=%u r=%u s0=%llx cls=%.24s s1=%llx s2=%llx s3=%llx",
         native_legacy_swap_accepted_count,native_legacy_swap_rejected_count,native_legacy_rej_reason,

@@ -38,6 +38,8 @@ extern "C" bool native_legacy_prepare_scanout(void);
 extern "C" void native_legacy_transfer_observed(IOReturn,const void *,uint64_t);
 extern "C" void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes);
 extern "C" void native_legacy_retirement_observed(IOService *);
+// A finished frame whose request was no longer pending (why: 1 another head or none, 2 a current swap in the slot, 3 the links did not match).
+extern "C" void native_legacy_retire_lost_observed(unsigned why,const void *request);
 // GPU hand-off (boot-arg sheng-fb-gpu=1): the frame is offered to the privileged GPU client instead of being copied; the swap retires when the
 // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
 extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
@@ -541,7 +543,24 @@ public:
             // waiters. This reports memory scanout completion, not a panel
             // vblank or hardware fence. Producer completion must precede
             // submission; this does not implement asynchronous GPU sync.
-            if(!activateOnlyPendingSwap(request))return;
+            if(!activateOnlyPendingSwap(request)) {
+                // The request is no longer the family's pending head: its client went away while the frame was on its way (the render
+                // server crashed during a GPU copy and the family discarded its swaps), or another current swap holds the slot. Returning
+                // with the latch set wedged the queue for good (user-hn-freeze, 2026-10-26: backboardd died at 141 s, the restarted one's
+                // swaps were validated but never copied, swap_wait_gated timed out every 5 s). The request is not touched (it may be
+                // freed); drop it, count it, and take the next pending swap.
+                const void *current=nullptr,*head=nullptr;
+                memcpy(&current,reinterpret_cast<const unsigned char *>(this)+4872,8);   // the current-swap slot and the pending head (activateOnlyPendingSwap)
+                memcpy(&head,reinterpret_cast<const unsigned char *>(this)+4880,8);
+                const unsigned why=head==request?3:current?2:1;
+                native_legacy_retire_lost_observed(why,request);
+                if(why==1)removeValidated(request);   // gone; a head that is still there keeps its validation for the retry
+                transferred=false;
+                // Another head (or none): take it now. The same head still refused (2, 3) would be copied and refused again at once, so
+                // it waits for the family's next kick instead of spinning here.
+                if(why==1)kickSwapQueue();
+                return;
+            }
             removeValidated(request);
             IOMobileFramebufferLegacy::completeCurrentSwap();
             native_legacy_retirement_observed(this);

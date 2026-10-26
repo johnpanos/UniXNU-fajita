@@ -281,6 +281,13 @@ __attribute__((noinline)) void native_legacy_retirement_observed(IOService *disp
     native_legacy_retired_generation=completed;native_legacy_presented_generation=presented;native_legacy_retired_frames=frames;
     native_legacy_retirement_calls=native_legacy_retirement_calls+1;
 }
+// Frames whose request was gone when they finished (NativeLegacyDisplay finishTransfer): dropped, not retired, and the queue moves on.
+volatile uint32_t native_legacy_retire_lost,native_legacy_retire_lost_why;
+void native_legacy_retire_lost_observed(unsigned why,const void *request) {
+    native_legacy_retire_lost=native_legacy_retire_lost+1;native_legacy_retire_lost_why=why;
+    if(native_legacy_retire_lost==1 || !(native_legacy_retire_lost%64))
+        IOLog("NativeLegacyDisplay: finished frame %p no longer pending (why %u, %u so far): dropped, next swap taken\n",request,why,native_legacy_retire_lost);
+}
 // The original "IOMFB Debug Info" property (NATIVE_LEGACY_DEBUG_INFO_KEY) serializes through the command gate, which the original stop
 // releases and clears: serializing a display without its gate faults (20H392: ldr x8, [x0] at IOMobileGraphicsFamily+0x2a60c, x0
 // the cleared gate). NativeLegacyDisplay removes the property before every original stop; this is the probe's own guard.

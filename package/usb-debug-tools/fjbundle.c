@@ -5,6 +5,8 @@
 //   start an on-demand job; --watch samples the process table every 20 ms meanwhile for an executable path containing SUBSTR (an
 //   on-demand job may exit again before ps sees it).
 // fjbundle --rm PATH...: unlink files, then rmdir directories (iOS here has no rm), each with its result.
+// fjbundle --kill SIG NAME|PID: send SIG (a number) to a process, by pid or by the last path component of its executable (the
+//   first match), e.g. --kill 9 backboardd for the compositor-restart test; prints the pid.
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle: probe CFBundle's view of a framework, as WebKit's XPC service entry does it (CFBundleGetBundleWithIdentifier then
 // CFBundleGetFunctionPointerForName). Usage: fjbundle FRAMEWORK-BINARY-PATH BUNDLE-ID [SYMBOL]
@@ -21,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <unistd.h>
+#include <signal.h>
 #include <mach/mach.h>
 // servers/bootstrap.h is not in the CI SDK
 extern mach_port_t bootstrap_port;
@@ -51,6 +54,21 @@ static int find_process(const char *what) {
 extern int __getdirentries64(int, void *, size_t, off_t *);
 
 int main(int argc, char **argv) {
+  if (argc == 4 && !strcmp(argv[1], "--kill")) {
+    int sig = atoi(argv[2]), pid = atoi(argv[3]);
+    if (!pid) {
+      static int pids[4096]; char path[1024], want[1100];
+      snprintf(want, sizeof want, "/%s", argv[3]);
+      int n = proc_listallpids(pids, sizeof pids);
+      for (int i = 0; i < n && i < 4096 && !pid; i++)
+        if (pids[i] > 0 && proc_pidpath(pids[i], path, sizeof path) > 0 && strlen(path) >= strlen(want) &&
+            !strcmp(path + strlen(path) - strlen(want), want)) pid = pids[i];
+    }
+    if (pid <= 1) { printf("%s: no such process\n", argv[3]); return 1; }
+    int r = kill(pid, sig);
+    printf("kill %d %d: %s\n", sig, pid, r ? strerror(errno) : "sent");
+    return r ? 1 : 0;
+  }
   if (argc >= 3 && !strcmp(argv[1], "--rm")) {
     int bad = 0;
     for (int i = 2; i < argc; i++) {

@@ -116,6 +116,8 @@ native_legacy_rej_state
 native_legacy_rej_surface
 native_legacy_rej_surfaces
 native_legacy_retirement_calls
+native_legacy_retire_lost
+native_legacy_retire_lost_why
 native_legacy_stage
 native_legacy_state_words
 native_legacy_swap_accepted_count

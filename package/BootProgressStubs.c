@@ -122,6 +122,8 @@ __attribute__((weak)) char native_legacy_rej_state[4096] __attribute__((aligned(
 __attribute__((weak)) char native_legacy_rej_surface[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_legacy_rej_surfaces[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_legacy_retirement_calls[4096] __attribute__((aligned(16)));
+__attribute__((weak)) char native_legacy_retire_lost[4096] __attribute__((aligned(16)));
+__attribute__((weak)) char native_legacy_retire_lost_why[4096] __attribute__((aligned(16)));
 __attribute__((weak)) char native_legacy_stage[4096] __attribute__((aligned(16)));
 __attribute__((weak)) unsigned native_legacy_state_words(char * p0, unsigned p1) { (void)p0; (void)p1; return 0; }
 __attribute__((weak)) char native_legacy_swap_accepted_count[4096] __attribute__((aligned(16)));
