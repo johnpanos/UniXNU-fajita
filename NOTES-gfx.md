@@ -140,3 +140,43 @@ web-heavy      fps 38.0/52.4 (32%) | p99 77.2/50.0 (43%) | low1 2.2/18.0 (156%) 
   (over 96: an icon, text or a block missing or moved), not a blur's rounding (the App Library backdrop differs by up to 95 between
   runs). Seen by eye: Maps shows no map tiles (only the beige base), and theverge.com shows a black rectangle where a media element
   is. Both still need to be checked as data or rendering.
+
+## Phase 2 log (burn-down)
+
+Method: every change against a baseline from the same branch, judged on the pooled ALL row and the per-scene >16.7 / >33 counts
+(a scene's 0.1% low is its one or two worst frames). Boot-to-boot noise is large, so a change is A/B'd in one boot where it can be
+toggled (gpu-env, `gfx-suite.sh ab`), else across boots with REPEAT=2.
+
+Baseline b0: ios16-port dd2cc5b (stack 43c46a6), full suite REPEAT=2, warm-up and settle check: ALL 8458 frames, 53.2 fps, 1% low 13.0,
+0.1% low 7.1, 818 frames over one vsync, 125 over two.
+
+### Where a steady frame's time goes (frame trace, home, steady motion)
+
+    CA frame N:   created ... commit (encode 2 ms) ... committed (+7.8 ms: the encode worker translates and submits) ... GPU 9.5 ms
+    offer N  -> presenter commits its copy at once; the copy waits on the GPU for frame N's own work (in order), runs 3.6 ms
+             -> waitUntilCompleted returns -> (was: 1.4-6.5 ms more, see below) -> COMPLETE_SWAP (1 ms) -> retire -> flip latches at the
+                next frame start
+The display hands the presenter one swap at a time, so the next offer waits for this retire. The render server's loop (prep ~7 ms,
+encode 2, the commit wait for translation ~7.8) is ~16.8 ms, and the retire lands ~2 ms before a vsync: little slack, at a phase that
+drifts (retire-to-vsync spread over 0-16 ms), so a little jitter turns into a missed vsync.
+
+### Measured
+
+| change | how measured | result |
+| --- | --- | --- |
+| scanout presenter: real-time thread (NGPU_PRESENT_RT, stack b08101a) | gpu-env A/B, one boot | no change (its post-copy lag was not preemption) |
+| presenter: release the flipped frame's command buffer later | frame trace | no change in the lag |
+| frontend: a finished command buffer's `status`/`error`/wait do not drain the encode worker (stack 484b83f) | Q lines, before/after boots | presenter copy-complete -> swap-complete 1.4-6.5 ms median (p90 to 9.8) -> 0.01 ms; pooled >16.7 305 -> 278 on 5 scenes x2 (small) |
+| GMEM (TU_DEBUG=nocb) vs sysmem | gpu-env A/B | mixed, within noise; CA GPU time 9.6 -> 8.9 ms home, 10.5 -> 11.9 App Library |
+| NGPU_SCHEDULED_EARLY=1 | gpu-env A/B | worse: home >16.7 42 -> 73, Settings 24 -> 64; kept off |
+| CA_FORCE_TIMER=1 (CADeviceUseVBL) | hw vsync counters | no vsync client registers either way; CA keeps its own display timer |
+| 59.94 Hz IOMFBDisplayRefresh (fajita-refresh-us) | pending a same-build A/B | CA's swap period median 16.65 ms with or without it |
+| job ring back-pressure (43c46a6's retry) | kernel counters per scene | 0 refused submissions in every scene (8 of 8 outstanding reached without a refusal): not a bottleneck |
+
+### Background CPU (a CPU bottleneck beside the scenes)
+
+gfx-suite's CPU windows show daemons busy during scenes, at random between passes, and they explain much of the noise:
+healthappd 59-139% and healthd 22-59% (b0's applib-r2 at 37 fps against 48.6 on the first pass), coreduetd 91-94% through whole home
+scenes on two boots, mobileassetd 63-98% and kbd 40-50% when the App Library first opens, mediaserverd 58-97% on www.apple.com (its
+video, decoded on the CPU), CalendarWidgetExtension 25-72%, ReportCrash after an app crash, Spotlight 37-54% in Maps. The suite now
+samples any background process over 40% after a scene (proc-sample.sh: thread stacks, symbolized against the shared cache).
