@@ -37,7 +37,8 @@ if [ "$1" = --applib ]; then
   onpage1 || toPage1
   for i in 1 2 3 4 5; do
     $H kcmd touch swipe left >/dev/null; sleep 2; shot $S/.applib-check.png
-    n=$(python3 -I $TD/scrdiff.py $S/applib-base.png $S/.applib-check.png 30 88 510 155 | awk '{print $4}'); [ "${n:-99999}" -lt 3000 ] && exit 0
+    # the field's shape, not its colours: over a black backdrop (a rendering fault the scene's own screenshots report) it is still the App Library
+    python3 -I $TD/pagematch.py --edges $S/applib-base.png $S/.applib-check.png 30 88 510 155 >/dev/null && exit 0
   done
   echo "!! home-page1: the App Library was not reached (see $S/.applib-check.png against $S/applib-base.png)" >&2; exit 1
 fi
