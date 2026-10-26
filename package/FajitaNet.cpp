@@ -54,6 +54,7 @@ void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len
 void fajita_net_set_mac(const uint8_t mac[6]);
 // FajitaWifiIOKit.cpp (fajita-wifi-iokit=1): the IOKit view of en0 that configd needs (IO80211Controller + IO80211Interface)
 int fajita_wifi_iokit_publish(const char *bsd_name, unsigned unit, const uint8_t mac[6]);
+void fajita_wifi_iokit_early(void);
 // [0] ifnet attached, [1] frames in, [2] frames out, [3] dropped in, [4] dropped out, [5] backend errors
 volatile uint32_t fajita_net_state[8];
 }
@@ -241,6 +242,7 @@ bool attach()
 void worker(void *, wait_result_t)
 {
     thread_set_thread_name(current_thread(), "fajita-net-init");
+    fajita_wifi_iokit_early();   // fajita-wifi-iokit=1: configd's IONetworkStack, before any interface
     char mode[8] = {};
     PE_parse_boot_argn("fajita-net", mode, sizeof mode);
     if (!strcmp(mode, "usb")) {

@@ -14,6 +14,8 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
@@ -22,6 +24,7 @@
 
 extern "C" {
 int fajita_wifi_iokit_publish(const char *bsd_name, unsigned unit, const uint8_t mac[6]);
+void fajita_wifi_iokit_early(void);
 volatile uint32_t fajita_wifi_iokit_state[4];   // [0] published, [1] controller registered, [2] interface registered, [3] error
 }
 
@@ -45,7 +48,36 @@ class IO80211Interface : public IOEthernetInterface {
 };
 OSDefineMetaClassAndStructors(IO80211Interface, IOEthernetInterface)
 
+// configd's InterfaceNamer names and records interfaces only once it has opened the "IONetworkStack" service (ifnamer.c:
+// stackCallback, quietCallback "No network stack object"); it sends its naming commands with IOConnectSetCFProperties
+// ({IONetworkStackUserCommand, IORegistryEntryID, IOInterfaceUnit}). Our en0 is already named, so a command for it is accepted
+// as is (and logged); there is nothing else to name here.
+class IONetworkStack : public IOService {
+    OSDeclareDefaultStructors(IONetworkStack)
+};
+OSDefineMetaClassAndStructors(IONetworkStack, IOService)
+
+class IONetworkStackUserClient : public IOUserClient {
+    OSDeclareDefaultStructors(IONetworkStackUserClient)
+public:
+    IOReturn setProperties(OSObject *properties) override
+    {
+        OSDictionary *d = OSDynamicCast(OSDictionary, properties);
+        OSNumber *cmd = d ? OSDynamicCast(OSNumber, d->getObject("IONetworkStackUserCommand")) : nullptr;
+        OSNumber *unit = d ? OSDynamicCast(OSNumber, d->getObject("IOInterfaceUnit")) : nullptr;
+        OSData *id = d ? OSDynamicCast(OSData, d->getObject("IORegistryEntryID")) : nullptr;
+        uint64_t entry = 0;
+        if (id && id->getLength() == 8) memcpy(&entry, id->getBytesNoCopy(), 8);
+        IOLog("fajita-wifi: FW8 IONetworkStack command %u entry 0x%llx unit %u\n", cmd ? cmd->unsigned32BitValue() : 0xffffffffu,
+              entry, unit ? unit->unsigned32BitValue() : 0xffffffffu);
+        return kIOReturnSuccess;
+    }
+    IOReturn clientClose() override {terminate(); return kIOReturnSuccess;}
+};
+OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient)
+
 namespace {
+IONetworkStack *gStack;
 IO80211Controller *gController;
 IO80211Interface *gInterface;
 
@@ -61,6 +93,19 @@ void setString(IOService *s, const char *key, const char *v)
 }
 }  // namespace
 
+// The IONetworkStack, as early as possible (FajitaNet's start, before the Wi-Fi link): configd waits for it at boot.
+extern "C" void fajita_wifi_iokit_early(void)
+{
+    unsigned on = 0;
+    if (gStack || !PE_parse_boot_argn("fajita-wifi-iokit", &on, sizeof on) || !on) return;
+    IOService *platform = IOService::getPlatform();
+    if (!platform) return;
+    gStack = OSTypeAlloc(IONetworkStack);
+    if (!gStack || !gStack->init()) return;
+    setString(gStack, "IOUserClientClass", "IONetworkStackUserClient");
+    if (gStack->attach(platform)) {gStack->registerService(); IOLog("fajita-wifi: FW8 iokit: IONetworkStack registered\n");}
+}
+
 // Called once en0 is attached (FajitaNet.cpp, fajita-net=wifi) with its BSD name, unit and MAC. 0 when both objects are registered.
 extern "C" int fajita_wifi_iokit_publish(const char *bsd_name, unsigned unit, const uint8_t mac[6])
 {
@@ -69,6 +114,7 @@ extern "C" int fajita_wifi_iokit_publish(const char *bsd_name, unsigned unit, co
     if (gInterface) return 0;
     IOService *platform = IOService::getPlatform();
     if (!platform) {fajita_wifi_iokit_state[3] = 1; return -2;}
+    fajita_wifi_iokit_early();
     gController = OSTypeAlloc(IO80211Controller);
     if (!gController || !gController->init()) {fajita_wifi_iokit_state[3] = 2; return -3;}
     OSData *addr = OSData::withBytes(mac, 6);
