@@ -112,6 +112,11 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
   announcement (wlfw) without a trace, and Wi-Fi bring-up chased the wrong causes for hours.
 - The same goes for unknown messages, parse failures and refused requests: count them per kind and show the counts.
 
+**A safety-classifier stop ends that piece.**
+- If a safety classifier stops your work, don't retry it, reword it, or come at the same result another way. Stop that piece, leave no partial file,
+  and record what was established and the open question in the area's NOTES file under "STOPPED (safety classifier)". Report it to the lead,
+  who takes it to the user. Other work that is not part of the stopped piece goes on as usual.
+
 **Never commit blobs.**
 - Apple material (IPSW contents, kernelcaches, the SDK, frameworks, trust caches, screenshots of the iOS UI) and Qualcomm firmware
   stay in `.cache/`.
