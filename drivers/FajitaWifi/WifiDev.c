@@ -93,7 +93,7 @@ static void htt_rx(void *ctx, const uint8_t *eth, uint32_t len)
     ++d->rx_eth;
     if (d->ops.rx) d->ops.rx(d->ops.ctx, eth, len);
 }
-static void htt_tx_done(void *ctx, unsigned status) {(void)ctx; (void)status;}
+static void htt_tx_done(void *ctx, unsigned status) {wdev *d = (wdev *)ctx; ++d->tx_status[status < 4 ? status : 4];}
 static void htt_sec_ind(void *ctx, unsigned peer, unsigned flags) {(void)ctx; (void)peer; (void)flags;}
 
 static int mlme_eapol_tx(void *ctx, const uint8_t dst[6], const uint8_t *eapol, uint32_t len)
@@ -247,5 +247,5 @@ int wdev_connect(wdev *d, const char *ssid, const char *pass)
 int wdev_tx(wdev *d, const uint8_t *eth, uint32_t len)
 {
     if (d->state != WDEV_RUNNING || d->mlme.state != WMLME_CONNECTED) return WHTT_ERR_BUSY;
-    return whtt_tx(&d->htt, d->mlme.vdev_id, d->mlme.target.bssid, eth, len, 1);
+    return whtt_tx(&d->htt, d->mlme.vdev_id, d->mlme.target.bssid, eth, len, !d->tx_unprotected);
 }

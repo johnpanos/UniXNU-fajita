@@ -189,13 +189,30 @@ void ioWr(void *, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t
 void ioBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory");}
 uint32_t devNow(void *) {return static_cast<uint32_t>(nowMs64());}
 void devRandom(void *, uint8_t *out, uint32_t n) {read_random(out, n);}
-void devRx(void *, const uint8_t *eth, uint32_t len) {fajita_net_input(eth, len);}   // poll thread, gLock held: a ring push
+// the last frames each way (dst, src, ethertype, length; for kcmd wifidev frames)
+struct FrameNote {uint8_t dst[6], src[6]; uint16_t type; uint16_t len; uint8_t ip_proto; uint16_t udp_dport;};
+FrameNote gRxNotes[8], gTxNotes[8];
+unsigned gRxNoteN, gTxNoteN;
+void noteFrame(FrameNote *ring, unsigned &n, const uint8_t *eth, uint32_t len)
+{
+    FrameNote &f = ring[n++ % 8];
+    memcpy(f.dst, eth, 6); memcpy(f.src, eth + 6, 6);
+    f.type = uint16_t(eth[12] << 8 | eth[13]); f.len = uint16_t(len);
+    f.ip_proto = 0; f.udp_dport = 0;
+    if (f.type == 0x0800 && len >= 14 + 20) {
+        f.ip_proto = eth[14 + 9];
+        const unsigned ihl = (eth[14] & 15u) * 4u;
+        if (f.ip_proto == 17 && len >= 14 + ihl + 4) f.udp_dport = uint16_t(eth[14 + ihl + 2] << 8 | eth[14 + ihl + 3]);
+    }
+}
+void devRx(void *, const uint8_t *eth, uint32_t len) {noteFrame(gRxNotes, gRxNoteN, eth, len); fajita_net_input(eth, len);}   // poll thread, gLock held
 uint32_t gTxOk, gTxErr;
 // en0's start routine (its own thread): one Ethernet frame to the AP
 int wifiSend(void *, const void *frame, size_t len)
 {
     if (!gLock) return -1;
     IOLockLock(gLock);
+    if (len >= 14) noteFrame(gTxNotes, gTxNoteN, static_cast<const uint8_t *>(frame), static_cast<uint32_t>(len));
     const int r = wdev_tx(&gDev, static_cast<const uint8_t *>(frame), static_cast<uint32_t>(len));
     IOLockUnlock(gLock);
     if (r) ++gTxErr; else ++gTxOk;
@@ -274,6 +291,7 @@ extern "C" int fajita_wifi_dev_start(void)
     note("FW6 start rc %d ce intr %08x", r, wce_intr_summary(&gDev.ce));
     if (r) {row(8, "FW6 wdev_start FAILED rc %d", r); return -4;}
     PE_parse_boot_argn("fajita-wifi", &gStage, sizeof gStage);
+    {unsigned prot = 1; PE_parse_boot_argn("fajita-wifi-txprot", &prot, sizeof prot); gDev.tx_unprotected = !prot;}
     {   // fajita-wifi-ssid: scan for it as soon as the device runs
         char ssid[33] = {0};
         if (PE_parse_boot_arg_str("fajita-wifi-ssid", ssid, sizeof ssid) && ssid[0]) {strlcpy(gReqSsid, ssid, sizeof gReqSsid); gReqScan = 1;}
@@ -327,9 +345,11 @@ extern "C" void fajita_wifi_dev_poll(void)
         if (gScans) scanRow();
         if (gConnects) {
             const wmlme &m = gDev.mlme;
-            row(11, "FW7 link %s reason %u akm %u pmf %u sae commit%u confirm%u token%u status%u auth%u assoc%u eapol rx%u tx%u keys %u authorized %d aid %u data rx%u tx%u/%u",
+            row(11, "FW7 link %s reason %u akm %u pmf %u sae c%u/f%u/t%u st%u auth%u assoc%u eapol rx%u tx%u keys %u auth %d aid %u data rx%u tx%u/%u compl ok%u disc%u noack%u post%u x%u rxdrop a%u d%u f%u n%u%s",
                 wmlme_state_name(m.state), m.reason, m.akm, m.pmf, m.sae_commits, m.sae_confirms, m.sae_tokens, m.sae_status, m.auth_tx,
-                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr);
+                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr,
+                gDev.tx_status[0], gDev.tx_status[1], gDev.tx_status[2], gDev.tx_status[3], gDev.tx_status[4],
+                gDev.htt.rx_drop_attn, gDev.htt.rx_drop_decap, gDev.htt.rx_drop_fmt, gDev.htt.rx_drop_nondata, gDev.tx_unprotected ? " UNPROT" : "");
         }
     }
     IOLockUnlock(gLock);
@@ -355,6 +375,23 @@ size_t kcmdDev(const char *args, size_t, char *out, size_t cap)
         gConnects = 0; gConnectAt = 0;
         if (gStage < 7) gStage = 7;
         n = snprintf(out, cap, "wifidev: connect to '%s' requested (passphrase from /private/var/ngpu/wifi.psk)\n", gReqSsid);
+    } else if (!strncmp(a, "txprot", 6)) {
+        a += 6;
+        while (*a == ' ') ++a;
+        if (*a == '0' || *a == '1') gDev.tx_unprotected = *a == '0';
+        n = snprintf(out, cap, "wifidev: data frames %s the protected bit\n", gDev.tx_unprotected ? "WITHOUT" : "with");
+    } else if (!strncmp(a, "frames", 6)) {
+        for (int dir = 0; dir < 2; ++dir) {
+            const FrameNote *ring = dir ? gTxNotes : gRxNotes;
+            const unsigned cnt = dir ? gTxNoteN : gRxNoteN;
+            n += snprintf(out + n, cap - n, "%s %u:\n", dir ? "tx" : "rx", cnt);
+            for (unsigned i = cnt > 8 ? cnt - 8 : 0; i < cnt && n + 100 < cap; ++i) {
+                const FrameNote &f = ring[i % 8];
+                n += snprintf(out + n, cap - n, "  %02x:%02x:%02x:%02x:%02x:%02x <- %02x:%02x:%02x:%02x:%02x:%02x type %04x len %u proto %u udp %u\n",
+                              f.dst[0], f.dst[1], f.dst[2], f.dst[3], f.dst[4], f.dst[5], f.src[0], f.src[1], f.src[2], f.src[3], f.src[4],
+                              f.src[5], f.type, f.len, f.ip_proto, f.udp_dport);
+            }
+        }
     } else if (!strncmp(a, "bss", 3)) {
         const wmlme &m = gDev.mlme;
         n = snprintf(out, cap, "wifidev: %u BSS (scan #%u, %s)\n", m.nbss, gScans, wmlme_state_name(m.state));
@@ -387,5 +424,5 @@ extern "C" void fajita_wifi_dev_kcmd(void)
     if (done || !fajita_usbdbg_register_kcmd) return;
     done = true;
     if (!gLock) gLock = IOLockAlloc();
-    fajita_usbdbg_register_kcmd("wifidev", kcmdDev, "WCN3990 device: wifidev [state] | scan [SSID] | connect | bss");
+    fajita_usbdbg_register_kcmd("wifidev", kcmdDev, "WCN3990 device: wifidev [state] | scan [SSID] | connect | bss | frames | txprot 0|1");
 }

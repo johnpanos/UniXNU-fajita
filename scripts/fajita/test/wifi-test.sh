@@ -209,6 +209,8 @@ evaluate() {
       say "  $(grep -a 'fajita-net' "$CON" | tail -1)"
       o=$($HUB call --timeout 40 run $FJN dhcp en0 2>&1); say "  fjnet dhcp en0: $(echo "$o" | tr '\n' ' ' | cut -c1-200)"
       WIFI_IP=$(echo "$o" | sed -n 's/^lease \([0-9.]*\) gw .*/\1/p'); WIFI_GW=$(echo "$o" | sed -n 's/^lease .* gw \([0-9.]*\)$/\1/p')
+      $HUB call --timeout 20 kcmd "wifidev frames" 2>/dev/null | head -20 | while read -r r; do say "  frames: $r"; done
+      say "  $(grep -a 'FW7 link' "$CON" | tail -1 | sed 's/^.*fajita-wifi: //')"
       if [ -n "$WIFI_IP" ]; then verdict dhcp PASS "lease $WIFI_IP gw ${WIFI_GW:-?} over Wi-Fi"
       else verdict dhcp FAIL "no DHCP lease on en0 over Wi-Fi"; fi ;;
     ping)
