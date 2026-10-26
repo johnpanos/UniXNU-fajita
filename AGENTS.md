@@ -41,6 +41,7 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `perf.py`, `passes.py`, `ts.py` | GPU counters, per-pass timing, timestamps |
 | `rows.py` | the Metal frontend's telemetry rows |
 | `to-fastboot.sh` | get the phone back to fastboot |
+| `user-boot.sh [--no-build]` | boot a stay-up Wi-Fi build for someone to use by hand, recording the USB console the whole time (bg.sh job user-console) |
 | `bright-probe.py STAGE LEVEL` | DSI brightness probe |
 | `scripts/fajita/build-usbdbg-agent.sh` | rebuild the phone's USB debug agent (package/usb-debug-tools/fjdbg-agent.c) on Linux into .cache/fajita-inputs |
 | `bg.sh start NAME [--max S] CMD...` / `status` / `wait NAME [S]` / `kill` | run anything long (builds, fps.sh, session start, leakwatch) in the background: returns at once, `wait` polls at most 90 s, flags STALLED output, kills at --max |
