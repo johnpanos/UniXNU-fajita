@@ -8,6 +8,8 @@
 // fjbundle --kill SIG NAME|PID: send SIG (a number) to a process, by pid or by the last path component of its executable (the
 //   first match), e.g. --kill 9 backboardd for the compositor-restart test; prints the pid.
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
+// fjbundle --open URL: open URL the way SpringBoard does (LaunchServices' LSApplicationWorkspace openSensitiveURL:withOptions:, then
+//   openURL: if that is refused), e.g. --open https://news.ycombinator.com/ brings Safari to the front on that page; prints the result.
 // fjbundle: probe CFBundle's view of a framework, as WebKit's XPC service entry does it (CFBundleGetBundleWithIdentifier then
 // CFBundleGetFunctionPointerForName). Usage: fjbundle FRAMEWORK-BINARY-PATH BUNDLE-ID [SYMBOL]
 //   session.sh push .cache/fajita-inputs/fjbundle /private/var/ngpu/sbin/fjbundle
@@ -164,6 +166,28 @@ int main(int argc, char **argv) {
     }
     printf("synchronize: %d\n", CFPreferencesAppSynchronize(app));
     return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--open")) {
+    // No headers for the private class: reach it through the Objective-C runtime. A CFURL is toll-free bridged to NSURL.
+    if (!dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_NOW)) {
+      printf("dlopen MobileCoreServices: %s\n", dlerror()); return 1;
+    }
+    void *(*getClass)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
+    void *(*sel)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
+    void *send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    void *ws = getClass && sel && send ? getClass("LSApplicationWorkspace") : NULL;
+    if (!ws) { printf("no LSApplicationWorkspace\n"); return 1; }
+    ws = ((void *(*)(void *, void *))send)(ws, sel("defaultWorkspace"));
+    CFStringRef s = CFStringCreateWithCString(NULL, argv[2], kCFStringEncodingUTF8);
+    CFURLRef url = s ? CFURLCreateWithString(NULL, s, NULL) : NULL;
+    if (!ws || !url) { printf("workspace %p url %p\n", ws, (void *)url); return 1; }
+    int ok = (int)((signed char (*)(void *, void *, const void *, void *))send)(ws, sel("openSensitiveURL:withOptions:"), url, NULL);
+    printf("openSensitiveURL:withOptions:(%s) = %d\n", argv[2], ok);
+    if (!ok) {
+      ok = (int)((signed char (*)(void *, void *, const void *))send)(ws, sel("openURL:"), url);
+      printf("openURL:(%s) = %d\n", argv[2], ok);
+    }
+    return ok ? 0 : 1;
   }
   if (argc < 3) { fprintf(stderr, "usage: fjbundle FRAMEWORK-BINARY BUNDLE-ID [SYMBOL]\n"); return 2; }
   void *h = dlopen(argv[1], RTLD_NOW);

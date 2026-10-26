@@ -30,7 +30,7 @@ cp "$T/fjnet" "$(dirname "$OUT")/fjnet"
 clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -Werror \
   -framework CoreFoundation "$BOARD/package/usb-debug-tools/fjbundle.c" -o "$T/fjbundle"
 codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjbundle \
-  --entitlements "$BOARD/package/usb-debug-tools/fjdbg-agent-entitlements.plist" "$T/fjbundle"
+  --entitlements "$BOARD/package/usb-debug-tools/fjbundle-entitlements.plist" "$T/fjbundle"
 cp "$T/fjbundle" "$(dirname "$OUT")/fjbundle"
 # fjsurface: every process's IOSurfaces (size, format, purgeable state, pixel census, raw dump); push with session.sh push
 clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -Werror \

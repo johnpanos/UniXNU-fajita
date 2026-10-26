@@ -874,3 +874,16 @@ prints the SI/HC rows; `tools/gpu/surface-png.py` turns a raw dump into a PNG. T
 NativeBridgeMetalFrontend.mm `probeSurface`): the last large surface imports with format, size, seed and purgeable state; `NGPU_SURFACE_PROBE=1`
 in gpu-env adds the pixel census. `fjbundle --prefs` now synchronizes per key (with one synchronize at the end, only the first of several
 `=d` removals reached the plist).
+
+### 9.x Images on web pages (checked 2026-10-26, closed)
+
+On a default build (28a381d, Wi-Fi all PASS, App cryptex mounted), Safari draws pages with their images: news.ycombinator.com (the Y
+logo), en.wikipedia.org (the featured-article photo, the logo) and www.apple.com (the product photo). The missing images seen before
+the App cryptex mount are gone; nothing else was needed. Pages are opened with `fjbundle --open URL` (LaunchServices: openURL:
+succeeds, openSensitiveURL:withOptions: is refused even with com.apple.springboard.opensensitiveurl), e.g.
+`session.sh push .cache/fajita-inputs/fjbundle /private/var/ngpu/sbin/fjbopen1` then `session.sh run '/private/var/ngpu/sbin/fjbopen1
+--open https://news.ycombinator.com/'`, then `session.sh call screenshot ABS.png` (wake the screen first: safari-page.sh ... wake).
+
+Open: com.apple.Safari.History (now running from the App cryptex) aborted 4 times in that session: sig6 from an uncaught Objective-C
+exception thrown on a dispatch queue in SafariCore (+0x5b930 / +0x5bd5c -> libdispatch -> libobjc +0x1aafc -> libc++abi -> abort).
+Safari keeps working (history lookups fail). Likely the history store's path or container; not investigated yet.
