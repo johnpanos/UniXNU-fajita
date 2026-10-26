@@ -2,7 +2,7 @@
 # gfx-arms-build.sh ARM...: build the gfx A/B arms as Wi-Fi --test images (the web scenes need the network), each into its own
 # .cache/fajita-out-gfx-ARM, so every arm boots with `WIFI_NO_BUILD=1 FAJITA_OUT=<that dir> wifi-test.sh ...` and nothing is rebuilt
 # between the runs. The kernel and payload are this tree's; the plugin is copied (--skip-plugin) from PLUGIN_BASE (default
-# .cache/fajita-out, build.sh's last plugin of ios16/gpu-plugin.ref) or, for the m2v arm, PLUGIN_M2V (default .cache/fajita-out-m2v).
+# .cache/fajita-out, build.sh's last plugin of ios16/gpu-plugin.ref; PLUGIN_BASE=build builds it in the arm's directory) or, for the m2v arm, PLUGIN_M2V (default .cache/fajita-out-m2v).
 # Arms (boot args on top of the Wi-Fi ones wifi-test.sh uses, and fajita-ssh=1 for the dev-mode pulls):
 #   b0     fajita-frame-info=0                            (the baseline: frame info off, as ios16-port)
 #   fi1    fajita-frame-info=1                            (frame info, the completed generation as the frame's id)
@@ -31,9 +31,13 @@ for arm in "$@"; do
     *) echo "gfx-arms-build: unknown arm $arm"; exit 2 ;;
   esac
   out=$BOARD/.cache/fajita-out-gfx-$arm; mkdir -p "$out"
-  [ -f "$plugin" ] || { echo "gfx-arms-build: no plugin $plugin"; exit 1; }
-  cp "$plugin" "$out/metal.ngpu"
-  echo "== $arm: ${extra[*]} (plugin $(sha1sum "$plugin" | cut -c1-8) from $plugin)"
+  if [ "${PLUGIN_BASE:-}" = build ] && [ $arm != m2v ]; then   # build this tree's plugin in the arm's own directory (a clean build)
+    rm -f "$out/metal.ngpu"; echo "== $arm: ${extra[*]} (plugin built here)"
+  else
+    [ -f "$plugin" ] || { echo "gfx-arms-build: no plugin $plugin"; exit 1; }
+    cp "$plugin" "$out/metal.ngpu"
+    echo "== $arm: ${extra[*]} (plugin $(sha1sum "$plugin" | cut -c1-8) from $plugin)"
+  fi
   FAJITA_OUT=$out FAJITA_AUTORESET=${WIFI_AUTORESET:-900} "$TD/../build.sh" --test --skip-plugin "${wifi[@]}" "${extra[@]}" > "$out/arm-build.txt" 2>&1 \
     || { echo "$arm: BUILD FAILED ($out/arm-build.txt)"; tail -4 "$out/arm-build.txt"; rc=1; continue; }
   grep -a '^\[' "$out/arm-build.txt" | tail -1
