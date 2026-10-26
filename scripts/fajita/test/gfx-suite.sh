@@ -8,6 +8,7 @@
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
 # DIAG=1 (measure with a diagnostic in gpu-env anyway, the report marked DIAG), WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
+# CAWATCH=1 (the render server's display timer per scene, fjsurface --watch-ca, instead of the CPU windows: tools/gpu/ca-timer.py),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -17,7 +18,7 @@ TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
 W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}; OUTD=${FAJITA_OUT:-$BOARD/.cache/fajita-out}
 SS=$TD/session.sh; H=$TD/hc
 export KM=${KM:-$OUTD/unixnu/fajita-ios16/kernel/kernel.macho}
-usage() { sed -n 2,13p "$0"; exit 2; }
+usage() { sed -n 2,14p "$0"; exit 2; }
 [ $# -ge 1 ] || usage
 
 if [ "$1" = ab ]; then
@@ -49,6 +50,7 @@ push_tool() {   # push_tool NAME -> prints the phone path
 }
 NGPU=$(push_tool ngpu-metal) || exit 1
 FJB=$(push_tool fjbundle) || exit 1
+CAW=(); if [ "${CAWATCH:-0}" = 1 ]; then FJS=$(push_tool fjsurface) || exit 1; CAW=(--cawatch "$FJS"); fi
 T=20 $SS run $NGPU cpu 0.2 backboardd 2>&1 | grep -q "cpu over" || { echo "gfx-suite: !! $NGPU cpu does not run"; exit 1; }
 log "tools: $NGPU $FJB"
 
@@ -121,7 +123,7 @@ m['diag']=' '.join(l.strip() for l in open('$O/start.txt') if l.startswith('DIAG
 # 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
 scene() {   # scene NAME CPU-PROCS STEP...
   local name=$1 procs=$2; shift 2
-  python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "$@" 2>&1 | tee -a $O/suite.log
+  python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "${CAW[@]}" "$@" 2>&1 | tee -a $O/suite.log
   # A background process that took over BUSY_PCT (40) % of a core in the scene's last CPU windows and still does: sample it now
   # (proc-sample.sh, 3 s) into SCENE-sample-NAME.txt, so a daemon spinning beside the scene is named with its stacks (SAMPLE=0: off).
   [ "${SAMPLE:-1}" = 1 ] || return 0

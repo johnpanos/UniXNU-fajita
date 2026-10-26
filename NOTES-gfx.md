@@ -181,3 +181,54 @@ healthappd 59-139% and healthd 22-59% (b0's applib-r2 at 37 fps against 48.6 on 
 scenes on two boots, mobileassetd 63-98% and kbd 40-50% when the App Library first opens, mediaserverd 58-97% on www.apple.com (its
 video, decoded on the CPU), CalendarWidgetExtension 25-72%, ReportCrash after an app crash, Spotlight 37-54% in Maps. The suite now
 samples any background process over 40% after a scene (proc-sample.sh: thread stacks, symbolized against the shared cache).
+
+### CA's display timer (static model, QuartzCore 20H392; to be measured with `--cawatch`)
+
+Read with `tools/crash/dsc-disasm.py --syms --strings QuartzCore.framework/QuartzCore OFF N` (offsets image-relative; S = the
+IOMFBServer, D = its IOMFBDisplay at S+0x60, T = the `_CADisplayTimer`).
+
+- **The timer** is a Mach timer on its own port (`display_timer_callback` +0x36cc8, a CFMachPort callback on the render server's
+  display thread). Each firing: now = mach_absolute_time; with D' = T+0xe0 (this firing's deadline) and I = T+0xd8 (the interval),
+  if 0 <= now - D' <= I it re-arms at align(D' - slack) + I (`get_phase` against the timing reference, `mk_timer_arm_leeway`,
+  leeway 0) **before** calling the client, and passes D' as the tick time. A firing more than one interval late (the previous
+  callback ran > 2 I) re-phases from now (D' := now or now - I) and the skipped deadlines are gone: the LATE class.
+- **The client is the renderer itself.** `IOMFBServer::timer_callback` (+0xccb24) aligns the phase (`_CADisplayTimerAlignPhase`
+  with `IOMFBDisplay::timing_reference`) and tail-calls `IOMFBServer::vsync_callback(fb = NULL, frame#, T, I, S)` (+0x361ec), which
+  calls `Server::render_for_time` synchronously on the same thread. So a frame's whole CPU side (prepare, encode, the commit wait
+  for translation) runs on the timer thread; a frame over one interval makes the next callback late (still the next deadline), a
+  frame over two loses ticks.
+- **Gates in vsync_callback, in order:** S+0x2e0 := T (every tick); if S+0x2d8 (the vbl threshold) > T the tick is dropped
+  (S+0x30d |= 1): THRESHOLD. Otherwise, with S+0x2b0 the next update time (a double in CA time; inf when nothing is due): if inf,
+  the idle countdown S+0x308 drops by one and at 0 the timer stops (`set_vsync_disabled`); if the next update is later than T + I
+  (the frame this tick would show), CA only collects (`Render::collect`): NOTDUE. Else S+0x2b0 := inf and render_for_time(T + I).
+- **The threshold** (`IOMFBServer::update_vbl_threshold` +0x27d464, vtable +0x1c0) = t + max(vbl_delta, flag ? 4 frames : 0),
+  vbl_delta = one panel period (`IOMFBServer::vbl_delta` +0x27c9e0, display vtable +0x2d0). render_for_time sets it at the end of
+  a frame: on the timer path (arg 5 = 0) only when `CADisplayEnableAllQuantaMultiples`, to target - half a period (harmless); on the
+  **immediate path** (arg 5 = 1, `IOMFBServer::immediate_render`'s block +0x27d52c, entered from `Server::context_changed` +0x4ba18
+  when a client's commit asks for an immediate update) to **now + one period**: an immediate render just after a tick drops the next
+  tick, the classic 2-tick gap with nothing slow anywhere.
+- **can_update** (`IOMFBDisplay::can_update` +0xa1804 -> `can_update_` +0x3a944) walks CA's swap ring (D+0x358 head, +0x35c tail,
+  +0x360 count, capped at 2 in flight; 0x30-byte entries from D+0x3a8, swap id at +0x3c0) and frees each entry whose swap
+  `IOMobileFramebufferSwapWait` (or `swap_wait_timeout`, by the CADeviceUseVBL flag) reports done; when none is free the frame is
+  refused and D+0x258 counts it: CANT. With our display handing the presenter one swap at a time and the retire ~2 ms before a
+  vsync, a frame whose previous swap retires after the tick waits a whole period here.
+- **The phase reference**: `IOMFBDisplay::timing_reference` (+0x3840c) reads CA's own timing shmem (D+0x4c0, made by
+  `initialize_timings`: +0x28/+0x30 reference times, +0x38 period); zero means no reference and the timer free-runs at its own
+  phase (the drifting retire-to-vsync phase seen in b0). It is fed only by `IOMFBDisplay::add_timing` (+0x2b933c), called only from
+  `IOMFBServer::frame_info_callback` (+0x386d4), and only after `IOMFBDisplay::collect_frame_info(swap_id)` (+0x3b880) finds CA's
+  record of that swap: an exact match on the swap id CA got from the swap (records with lower ids are discarded). d6763c9's frame
+  info sent the family's completed generation as the id; if that is not CA's swap id every record misses and add_timing never
+  runs, which would explain fi1's "works but no phase lock". To check with `--cawatch` (the `ref` fields) before any rework.
+- **CADeviceUseVBL** (`___CADeviceUseVBL_block_invoke` +0xe90e4): CA_FORCE_TIMER (nonzero) or a ChipID in {0x7000, 0x7001, 0x8000,
+  0x8001, 0x8002, 0x8003, 0x8004, 0x8010} sets the flag (0x8015, the iPhone X we present as, does not); it is read once, when
+  IOMFBServer/EAGLServer and AppleDisplay are built, which is before the GPU plugin's gpu-env setenv: that is why CA_FORCE_TIMER
+  in gpu-env had no effect. Experiment (approved, default off, not for landing without numbers): boot-arg `fajita-ca-force-timer=1`
+  (patches/xnu/zzt-fajita-ca-force-timer.patch) gives backboardd alone CA_FORCE_TIMER=1 at exec. Its effects (static): S+0x30d bit
+  1, D+0x220 bit 5, SwapWait instead of swap_wait_timeout in can_update_, and set_next_update's generic Server path when no IOMFB
+  vsync source is registered (S+0x268).
+
+**Measuring it:** `gfx-scene.py --cawatch /private/var/ngpu/sbin/fjsurface-SHA ...` records `fjsurface --watch-ca` (S, D, T and the
+timing shmem polled every 200 us, found by S's vtable pointer) in place of the CPU windows; `tools/gpu/ca-timer.py SCENE.json`
+classifies every tick (RENDER, CANT, THRESHOLD, NOTDUE, IDLE, LATE), lists each 2+ tick gap between renders with its ticks'
+classes and the retire ring around it, says whether the phase reference was ever set and histograms the ticks' phase against the
+panel's rd_ptr ring. Pending a free phone (the daemons agent's Data reset).

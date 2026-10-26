@@ -1,0 +1,42 @@
+Experiment (default off): boot-arg fajita-ca-force-timer=1 starts the render server (/usr/libexec/backboardd, and no other
+process) with CA_FORCE_TIMER=1, the environment input of QuartzCore's CADeviceUseVBL decision (the other is the chip ID).
+iOS 16 runs launchd's signed job cache, so the job's environment cannot be edited, and the GPU plugin's gpu-env setenv runs
+after the decision is cached. What the flag changes in QuartzCore 20H392 (tools/crash/dsc-disasm.py --syms): IOMFBServer+0x30d
+bit 1 (EAGLServer's constructor) and IOMFBDisplay+0x220 bit 5 (AppleDisplay's), IOMobileFramebufferSwapWait instead of
+swap_wait_timeout in IOMFBDisplay::can_update_, and IOMFBServer::set_next_update's choice of the generic Server path. See
+NOTES-gfx.md "CA's display timer".
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5741,6 +5741,31 @@
+ 		imgp->ip_envc++;
+ 	}
+ 
++	/*
++	 * fajita (experiment, boot-arg fajita-ca-force-timer=1, default off): the render server (/usr/libexec/backboardd only) starts
++	 * with CA_FORCE_TIMER=1, the one input of QuartzCore's CADeviceUseVBL decision besides the chip ID (MobileGestalt ChipID in
++	 * 0x7000-0x8010). iOS 16 runs launchd's signed job cache, so the job's environment cannot be edited, and the GPU plugin's
++	 * setenv runs after the decision (dispatch_once in IOMFBServer's construction). Nothing else is changed: no chip ID, no
++	 * other process. NOTES-gfx.md "CA's display timer".
++	 */
++	{
++		int fajita_ca_force_timer = 0;
++		if (PE_parse_boot_argn("fajita-ca-force-timer", &fajita_ca_force_timer, sizeof(fajita_ca_force_timer)) &&
++		    fajita_ca_force_timer && strcmp(imgp->ip_strings + strlen(EXECUTABLE_KEY), "/usr/libexec/backboardd") == 0) {
++			static const char fajita_ca_env[] = "CA_FORCE_TIMER=1";
++			error = exec_add_user_string(imgp, CAST_USER_ADDR_T(fajita_ca_env), UIO_SYSSPACE, TRUE);
++			if (error) {
++				goto bad;
++			}
++			if (imgp->ip_argspace < new_ptr_size) {
++				error = E2BIG;
++				goto bad;
++			}
++			imgp->ip_argspace -= new_ptr_size;
++			imgp->ip_envc++;
++		}
++	}
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
