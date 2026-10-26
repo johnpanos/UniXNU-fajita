@@ -134,6 +134,8 @@ def frametrace(paths):
                                          'blits pixels pipe_us pipe_n wait_us flush_us flush_kib').split(), map(int, f[1:22])), label=','.join(f[22:])))
                 elif f[0] == 'S':
                     swaps.append(tuple(map(int, f[1:10])))
+                elif f[0] == 'Q' and len(f) >= 9:
+                    PRESENT_Q.append(tuple(map(int, f[1:9])))
             except ValueError:
                 continue
         if not swaps:
@@ -165,6 +167,7 @@ def frametrace(paths):
     return frames
 
 
+PRESENT_Q = []   # the presenter's stages per swap (frame trace Q lines): seq offered committed waitBegan waitEnded returned completeBegan completeEnded
 FT_KEYS = ('cpu_gap', 'encode', 'commit', 'gpu', 'gpu_queue', 'to_swap', 'present')
 
 
@@ -274,6 +277,13 @@ def scene_metrics(rec, ft_frames, refs):
     m['ft_med'] = {k: st.median(fr.get(k, 0) for fr in full) for k in FT_KEYS} if full else {}
     m['ft_slow'] = {k: st.mean(fr.get(k, 0) for fr in slow) for k in FT_KEYS} if slow else {}
     m['ft_slow_n'] = len(slow)
+    qs = [q for q in PRESENT_Q if all(q[1:]) and any(w['start'] <= q[1] <= w['end'] for w in ws)]
+    if qs:
+        stage = lambda a, b: st.median((q[b] - q[a]) / 1000 for q in qs)
+        p90 = lambda a, b: pct([(q[b] - q[a]) / 1000 for q in qs], 90)
+        m['present_stages'] = ('offer->committed %.2f, ->wait %.2f, wait %.2f (p90 %.2f), ->returned %.2f (p90 %.2f), ->complete call %.2f, '
+                               'complete %.2f (p90 %.2f) ms' % (stage(1, 2), stage(2, 3), stage(3, 4), p90(3, 4), stage(4, 5), p90(4, 5),
+                                                                stage(5, 6), stage(6, 7), p90(6, 7)))
     # bound
     why = ''
     sl = m['ft_slow']
@@ -395,6 +405,8 @@ def report(run, refs, quiet=False):
             L.append('  frame trace (%d frames, %d slow): median %s' % (m['ft_frames'], m['ft_slow_n'], ' '.join('%s %.1f' % (k, v) for k, v in m['ft_med'].items())))
             if m['ft_slow']:
                 L.append('    slow frames: ' + ' '.join('%s %.1f' % (k, v) for k, v in m['ft_slow'].items()))
+            if m.get('present_stages'):
+                L.append('    presenter (median): ' + m['present_stages'])
         if m.get('slot_busy') is not None:
             L.append('  job ring: submissions refused for a job slot %s, for ring space %s (retried by the client: waits), most jobs outstanding %s of 8' % (
                 m['slot_busy'], m['ring_full'], m['peak_jobs']))
