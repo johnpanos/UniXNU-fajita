@@ -27,8 +27,9 @@ Bottleneck, per scene:
              the presenter's copy returned)
 Frame trace (NGPU_FRAME_TRACE=1, pulled by the suite into RUN_DIR/frametrace/): per render-server frame in the windows, the median
 cpu_gap / encode / commit / gpu / present (ms), and the same on the slow frames (> 1.5 vsyncs).
-Correctness: every shot step's screenshot against REFS/<scene>-<name>.png (default $FAJITA_WORK/gfx/refs), below the status bar:
-pixels differing by more than 8; DIFF when over 1% of them. Stability: RUN_DIR/stability.json (the suite: CRASH rows, swap_wait
+Correctness: every shot step's screenshot against REFS/<scene>-<name>.png (default $FAJITA_WORK/gfx/refs; a repeat SCENE-r2 against
+SCENE's), below the status bar: pixels differing by more than 8, and strongly (more than 96: an icon, text or a block missing or moved,
+not a blur's or a gradient's rounding); DIFF when the strong ones are over 0.2% of the area. Stability: RUN_DIR/stability.json (the suite: CRASH rows, swap_wait
 timeouts, GPU faults from the run's log) and the scene counters (hand-offs reclaimed, retires lost, flips refused, GPU IRQ errors)."""
 import argparse
 import glob
@@ -163,6 +164,7 @@ def scene_metrics(rec, ft_frames, refs):
         iv += [(b - a) / 1000 for a, b in zip(f, f[1:])]
     tvm = tv / 1000
     m['windows'] = len(ws)
+    m['iv'] = iv
     m['frames'] = sum(len(w['frames']) for w in ws)
     m['motion_s'] = sum(iv) / 1000
     m['fps'] = len(iv) / (sum(iv) / 1000) if iv else 0
@@ -262,7 +264,7 @@ def scene_metrics(rec, ft_frames, refs):
         if s.get('kind') != 'shot':
             continue
         name = os.path.basename(s['path'])
-        ref = os.path.join(refs, name)
+        ref = os.path.join(refs, re.sub(r'-r\d+-', '-', name))   # a repeat (SCENE-r2) is compared with SCENE's reference
         d = diff(ref, s['path']) if os.path.exists(ref) and os.path.exists(s['path']) else None
         m['shots'].append((name, d))
     # stability counters over the scene
@@ -281,10 +283,10 @@ def diff(a, b, box=(0, 60, 540, 1170)):
     x = Image.open(a).convert('RGB').crop(box)
     y = Image.open(b).convert('RGB').crop(box)
     if x.size != y.size:
-        return dict(px=-1, max=-1, total=0)
+        return dict(px=-1, strong=-1, max=-1, total=0)
     d = ImageChops.difference(x, y)
-    px = list(d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata())
-    return dict(px=sum(1 for p in px if max(p) > 8), max=max(max(p) for p in px), total=len(px))
+    px = [max(p) for p in (d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata())]
+    return dict(px=sum(1 for p in px if p > 8), strong=sum(1 for p in px if p > 96), max=max(px), total=len(px))
 
 
 COLS = [('frames', '%6d'), ('fps', '%5.1f'), ('p50', '%5.1f'), ('p99', '%5.1f'), ('p999', '%6.1f'), ('low1', '%5.1f'), ('low01', '%6.1f'),
@@ -328,6 +330,15 @@ def report(run, refs, quiet=False):
     allv = []
     for m in ms:
         L.append('%-14s ' % m['scene'][:14] + ' '.join(f % m[k] for k, f in COLS) + '  ' + m['bound'])
+    # every motion frame of the run pooled: the 0.1% low over thousands of frames instead of one scene's hundreds
+    iv = [x for m in ms for x in m['iv']]
+    if iv:
+        tvm = ms[0]['vsync_ms']
+        a = dict(frames=sum(m['frames'] for m in ms), fps=len(iv) / (sum(iv) / 1000), p50=pct(iv, 50), p99=pct(iv, 99), p999=pct(iv, 99.9),
+                 low1=low(iv, 0.01), low01=low(iv, 0.001), over16=sum(1 for x in iv if x > 1.5 * tvm), over33=sum(1 for x in iv if x > 2.5 * tvm),
+                 missed=sum(max(0, round(x / tvm) - 1) for x in iv), max=max(iv), resp=st.median([m['resp'] for m in ms]),
+                 gpu_busy=st.mean(m['gpu_busy'] for m in ms), gpu_mhz=st.mean(m['gpu_mhz'] for m in ms))
+        L.append('%-14s ' % 'ALL' + ' '.join(f % a[k] for k, f in COLS) + '  (every scene\'s motion frames pooled)')
     L.append('')
     for m in ms:
         L.append('%s: %d windows, %.1f s of motion, %.0f%% of frames on time; source %s%s' % (
@@ -348,7 +359,7 @@ def report(run, refs, quiet=False):
                 L.append('    slow frames: ' + ' '.join('%s %.1f' % (k, v) for k, v in m['ft_slow'].items()))
         sh = []
         for name, d in m['shots']:
-            sh.append('%s %s' % (name, 'no ref' if d is None else ('%d px%s' % (d['px'], ' DIFF' if d['total'] and d['px'] > 0.01 * d['total'] else ''))))
+            sh.append('%s %s' % (name, 'no ref' if d is None else ('%d px, %d strong%s' % (d['px'], d['strong'], ' DIFF' if d['total'] and d['strong'] > 0.002 * d['total'] else ''))))
         if sh:
             L.append('  shots: ' + ', '.join(sh))
         st_bad = ['%s %s' % (k, m[k]) for k in ('reclaimed', 'retire_lost', 'flips_refused', 'gpu_fallbacks', 'failures', 'scanned_writes') if m.get(k)]
@@ -371,7 +382,7 @@ def report(run, refs, quiet=False):
         for m in ms:
             f.write('\t'.join(('%.3f' % m[k]) if isinstance(m[k], float) else str(m[k]) for k in keys) + '\t' +
                     ','.join(str(d['px']) if d else '-' for _, d in m['shots']) + '\n')
-    json.dump(ms, open(os.path.join(run, 'metrics.json'), 'w'), indent=1, default=str)
+    json.dump([{k: v for k, v in m.items() if k != 'iv'} for m in ms], open(os.path.join(run, 'metrics.json'), 'w'), indent=1, default=str)
     if not quiet:
         sys.stdout.write(txt)
     return ms

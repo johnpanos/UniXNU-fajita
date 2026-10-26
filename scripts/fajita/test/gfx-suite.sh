@@ -79,6 +79,7 @@ scene() {   # scene NAME CPU-PROCS STEP...
 }
 home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1; }
 open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
+TOP="tap,540,30 wait,1.5"   # a tap on the status bar scrolls a list or page to its top: a rest point that does not depend on where the drags ended
 SCROLL="xy,540,1900,540,900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,900,540,1900:60"
 WEB="xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40"
 run_scene() {   # run_scene SCENE SUFFIX
@@ -87,15 +88,15 @@ run_scene() {   # run_scene SCENE SUFFIX
     home)     home || { log "!! $n: not on home page 1"; return; }
               scene $n backboardd,SpringBoard left right left right left:60 right:60 left:60 right:60 shot,page1 ;;
     applib)   $TD/home-page1.sh --applib >/dev/null 2>&1 || { log "!! $n: App Library not reached"; return; }
-              scene $n backboardd,SpringBoard $SCROLL $SCROLL wait,1 shot,top; home ;;
+              scene $n backboardd,SpringBoard $SCROLL $SCROLL $TOP shot,top; home ;;
     settings) home; STAY=1 $TD/settings-scroll.sh gfx-settings 0 >/dev/null 2>&1 || { log "!! $n: Settings did not open"; home; return; }
-              scene $n backboardd,Preferences $SCROLL wait,1 shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
-    calendar) home; scene $n backboardd,MobileCal open,calshow:// wait,3 $SCROLL wait,1 shot,rest left:30 right:30 up; home ;;
+              scene $n backboardd,Preferences $SCROLL $TOP shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
+    calendar) home; scene $n backboardd,MobileCal open,calshow:// wait,3 $SCROLL $TOP shot,rest left:30 right:30 up; home ;;
     maps)     home; scene $n backboardd,Maps open,'maps://?ll=37.7749,-122.4194&z=13' wait,5 xy,300,1500,800,900:40 xy,800,900,300,1500:40 \
                 xy,540,1600,540,800:40 xy,540,800,540,1600:40 up; home ;;
-    web-hn)   home; open_url https://news.ycombinator.com/ 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
-    web-wiki) open_url https://en.wikipedia.org/wiki/Main_Page 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
-    web-apple) open_url https://www.apple.com/ 10; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB wait,1 shot,top ;;
+    web-hn)   home; open_url https://news.ycombinator.com/ 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB $TOP shot,top ;;
+    web-wiki) open_url https://en.wikipedia.org/wiki/Main_Page 8; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB $TOP shot,top ;;
+    web-apple) open_url https://www.apple.com/ 10; scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU $WEB $TOP shot,top ;;
     web-heavy) open_url ${HEAVY_URL:-https://www.theverge.com/} 12
               scene $n backboardd,MobileSafari,com.apple.WebKit.WebContent,com.apple.WebKit.GPU anim,4 $WEB wait,1 up; home ;;
     *) log "!! unknown scene $s" ;;
