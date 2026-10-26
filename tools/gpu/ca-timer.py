@@ -13,7 +13,8 @@
 Model and evidence: NOTES-gfx.md "CA's display timer". Prints per scene the counts, then every gap of 2+ ticks between renders with the
 classes of the ticks in it and the retire ring around it (ms since the last retire, ms to the next), whether CA's phase reference
 (the timing shmem frame info feeds) was ever set, and the ticks' phase against the panel's vsync (rd_ptr) ring: a locked timer
-fills one bin."""
+fills one bin. And CA's per-swap FrameInfo records: a count that only grows means frame info never matches CA's swap id
+(collect_frame_info takes the exact id and drops the older ones); no records at all means CA keeps none (D+0x9f2 bit 35 clear)."""
 import bisect
 import json
 import math
@@ -29,7 +30,9 @@ def parse(lines):
         f = l.split()
         try:
             d = dict(t=int(f[1]), tick=int(f[3]), thr=int(f[5]), next=float(f[7]), idle=int(f[9]), cant=int(f[11]),
-                     ring=f[13], dl=int(f[15]), ref=tuple(int(x) for x in f[17:20]) if len(f) >= 20 else None)
+                     ring=f[13], dl=int(f[15]), ref=tuple(int(x) for x in f[17:20]) if len(f) >= 20 else None,
+                     fin=int(f[21]) if len(f) >= 25 else None, fid=int(f[22]) if len(f) >= 25 else None,
+                     flags=int(f[24], 16) if len(f) >= 25 else None)
         except (IndexError, ValueError):
             continue
         out.append(d)
@@ -94,6 +97,15 @@ def main():
         print('  phase reference (timing shmem +0x28/+0x30/+0x38): %s' % (
             'never set (no frame info reached add_timing: the timer runs at its own phase)' if refs <= {(0, 0, 0)} else
             '%d distinct values, last %s' % (len(refs), s[-1]['ref'])))
+        fi = [x for x in s if x.get('fin') is not None]
+        if fi:
+            ids = [x['fid'] for x in fi if x['fin']]
+            c1 = rec.get('counters1') or {}
+            print('  CA FrameInfo records waiting: max %d, oldest ids %s..%s; records kept (D+0x9f2 bit 35): %s; display sent %s frame infos, '
+                  'last id %s, ids differing from the generation %s' % (
+                      max(x['fin'] for x in fi), min(ids) if ids else '-', max(ids) if ids else '-',
+                      'yes' if any(x['flags'] >> 35 & 1 for x in fi) else 'no',
+                      (c1.get('fi_sent') or 0) - ((rec.get('counters0') or {}).get('fi_sent') or 0), c1.get('fi_last_id'), c1.get('fi_id_differs')))
         vs = rec.get('vsync', [])
         if vs:
             ph = []

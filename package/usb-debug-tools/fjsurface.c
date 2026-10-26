@@ -408,7 +408,8 @@ static int sample(int pid, double seconds, int hz, int all) {
 // SERVER and TIMER (the addresses an earlier window printed) skip the search of the task's memory.
 //   timing shmem R = [D+0x4c0]: +0x28/+0x30 the phase reference times, +0x38 its period (IOMFBDisplay::timing_reference; zero = no
 //     reference: the timer runs at its own phase, not the panel's)
-// A line: "t TICKS tick T thr THR next NEXT idle N cant C ring H/T/N dl DEADLINE ref R28 R30 R38" (host ticks, 19.2 MHz; NEXT in CA s).
+//   D+0x448..0x450 CA's FrameInfo records awaiting frame info (count, the oldest's swap id), D+0x9f2 flags (bit 35: records are kept)
+// A line: "t TICKS tick T thr THR next NEXT idle N cant C ring H/T/N dl DEADLINE ref R28 R30 R38 fi COUNT ID flags F" (host ticks, 19.2 MHz; NEXT in CA s).
 static int readq(mach_port_t task, uint64_t a, void *out, size_t n) {
   mach_vm_size_t got = 0;
   return mach_vm_read_overwrite(task, a, n, (mach_vm_address_t)out, &got) || got != n;
@@ -455,7 +456,7 @@ static int watch_ca(int pid, double seconds, int us, uint64_t S, uint64_t T) {
     }
   uint64_t R = 0;   // the display's timing shmem (D+0x4c0): the phase reference IOMFBDisplay::add_timing keeps (fed only by frame info)
   if (!readq(task, D + 0x4c0, &R, 8) && R) printf("timings %#llx\n", (unsigned long long)R);
-  struct { uint64_t tick, thr, idle, dl, r0, r1, r2; double next; uint32_t cant, h, t, n; } prev = {0}, cur;
+  struct { uint64_t tick, thr, idle, dl, r0, r1, r2, fin, flags; double next; uint32_t cant, h, t, n, fid; } prev = {0}, cur;
   const uint64_t end = mach_absolute_time() + (uint64_t)(seconds * 19200000.0);
   unsigned lines = 0;
   while (mach_absolute_time() < end) {
@@ -466,12 +467,19 @@ static int watch_ca(int pid, double seconds, int us, uint64_t S, uint64_t T) {
     uint32_t idle; memcpy(&idle, sb + 0x58, 4); cur.idle = idle;
     if (!readq(task, D + 0x258, &cur.cant, 4) && !readq(task, D + 0x358, db, sizeof db)) { cur.h = db[0]; cur.t = db[1]; cur.n = db[2]; }
     if (T) readq(task, T + 0xe0, &cur.dl, 8);
+    uint64_t fv[2], fp = 0;   // CA's per-swap FrameInfo records (D+0x448 begin, +0x450 end; record +0: its swap id) and D+0x9f2's flags
+    if (!readq(task, D + 0x448, fv, sizeof fv) && fv[1] >= fv[0] && fv[1] - fv[0] < 0x10000) {
+      cur.fin = (fv[1] - fv[0]) / 8;
+      if (cur.fin && !readq(task, fv[0], &fp, 8) && fp) readq(task, fp, &cur.fid, 4);
+    }
+    readq(task, D + 0x9f2, &cur.flags, 8);
     uint64_t rb[3];
     if (R && !readq(task, R + 0x28, rb, sizeof rb)) { cur.r0 = rb[0]; cur.r1 = rb[1]; cur.r2 = rb[2]; }
     if (memcmp(&cur, &prev, sizeof cur)) {
-      printf("t %llu tick %llu thr %llu next %.6f idle %llu cant %u ring %u/%u/%u dl %llu ref %llu %llu %llu\n", (unsigned long long)mach_absolute_time(),
+      printf("t %llu tick %llu thr %llu next %.6f idle %llu cant %u ring %u/%u/%u dl %llu ref %llu %llu %llu fi %llu %u flags %#llx\n", (unsigned long long)mach_absolute_time(),
              (unsigned long long)cur.tick, (unsigned long long)cur.thr, cur.next, (unsigned long long)cur.idle, cur.cant, cur.h, cur.t, cur.n,
-             (unsigned long long)cur.dl, (unsigned long long)cur.r0, (unsigned long long)cur.r1, (unsigned long long)cur.r2);
+             (unsigned long long)cur.dl, (unsigned long long)cur.r0, (unsigned long long)cur.r1, (unsigned long long)cur.r2,
+             (unsigned long long)cur.fin, cur.fid, (unsigned long long)cur.flags);
       prev = cur; ++lines;
     }
     usleep((useconds_t)us);

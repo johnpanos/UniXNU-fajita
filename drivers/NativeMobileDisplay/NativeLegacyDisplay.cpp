@@ -66,8 +66,8 @@ extern "C" volatile uint64_t fajita_dpu_latch_ring[2048] __attribute__((weak));
 extern "C" volatile uint32_t fajita_dpu_latch_n __attribute__((weak));
 // Frame info (fajita-frame-info, default 1): the keys the display reports per presented frame, in the order supportedFrameInfo
 // (selector 74) enumerates them, and what was sent: [0] notifications, [1] clients they went to, [2] send failures, [3] frames with no
-// client registered.
-extern "C" {volatile uint32_t native_legacy_frame_info[4];}
+// client registered, [4] mode-2 frames whose swap id differed from the completed generation (mode 1's id), [5] the last id sent.
+extern "C" {volatile uint32_t native_legacy_frame_info[6];}
 static const char *const kFrameInfoKeys[]={"Presentation_time","Vbl_FrameTime"};
 // IOUserClient's async send is protected; the original family's own senders call it from its user client. Never instantiated.
 struct NativeFrameInfoSend : public IOUserClient {
@@ -75,11 +75,16 @@ struct NativeFrameInfoSend : public IOUserClient {
         return sendAsyncResult64WithOptions(reference,kIOReturnSuccess,args,count,kIOUserNotifyOptionCanDrop);
     }
 };
-static bool frameInfoEnabled() {
-    static int on=-1;
-    if(on<0){unsigned v=1;PE_parse_boot_argn("fajita-frame-info",&v,sizeof v);on=v!=0;}
-    return on;
+// fajita-frame-info: 0 off, 1 (default) the frame's id is the family's completed generation, 2 it is the swap id of the request that
+// completed last, read from the request itself (NATIVE_LEGACY_REQUEST_SWAP_ID, the id CA got from SwapBegin: QuartzCore's
+// IOMFBDisplay::collect_frame_info matches its record by that exact id, NOTES-gfx.md "CA's display timer"); 2 falls back to 1 on a
+// build whose offset is not qualified.
+static unsigned frameInfoMode() {
+    static int mode=-1;
+    if(mode<0){unsigned v=1;PE_parse_boot_argn("fajita-frame-info",&v,sizeof v);mode=(int)(v>2?1:v);if(mode==2 && NATIVE_LEGACY_REQUEST_SWAP_ID<0)mode=1;}
+    return (unsigned)mode;
 }
+static bool frameInfoEnabled() {return frameInfoMode()!=0;}
 extern "C" uint64_t mach_continuous_time(void);
 // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
 // either way (no compression is implemented), so the bytes are the same.
@@ -214,6 +219,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // vsync sender walks queue 5). The arguments are IOMobileFramebuffer's FrameInfoNotifyFunc's: the key mask with bit 31 (each
     // value as two 32-bit halves), the frame's number, then the values in key order (mach times).
     uint32_t frameInfoLatches=0;
+    uint32_t completedSwapId=0;bool completedSwapIdValid=false;   // the last completed request's own swap id (fajita-frame-info=2)
     void sendFrameInfo(uint64_t vblInterval) {
         if(!frameInfoEnabled() || !&fajita_dpu_latch_n || !&fajita_dpu_latch_ring)return;
         const uint32_t n=fajita_dpu_latch_n;
@@ -221,9 +227,15 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         frameInfoLatches=n;
         const uint64_t presented=fajita_dpu_latch_ring[(n-1)%2048];
         uint32_t generation=0;memcpy(&generation,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_COMPLETED_GENERATION,4);
+        uint32_t id=generation;
+        if(frameInfoMode()==2 && completedSwapIdValid) {
+            id=completedSwapId;
+            if(id!=generation)native_legacy_frame_info[4]=native_legacy_frame_info[4]+1;
+        }
+        native_legacy_frame_info[5]=id;
         const uint64_t values[2]={presented,vblInterval};
         io_user_reference_t args[2+2*2];
-        args[0]=0x80000000ull|((1u<<2)-1);args[1]=generation;
+        args[0]=0x80000000ull|((1u<<2)-1);args[1]=id;
         for(unsigned i=0;i<2;++i){args[2+2*i]=values[i]&0xffffffffull;args[3+2*i]=values[i]>>32;}
         native_legacy_frame_info[0]=native_legacy_frame_info[0]+1;
         const void *node=nullptr;memcpy(&node,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_FRAME_INFO_CLIENTS,sizeof node);
@@ -632,6 +644,10 @@ public:
                 return;
             }
             removeValidated(request);
+#if NATIVE_LEGACY_REQUEST_SWAP_ID >= 0
+            // Read before the family completes (and may free) it: the request is the pending head activateOnlyPendingSwap selected.
+            memcpy(&completedSwapId,reinterpret_cast<const unsigned char *>(request)+NATIVE_LEGACY_REQUEST_SWAP_ID,4);completedSwapIdValid=true;
+#endif
             IOMobileFramebufferLegacy::completeCurrentSwap();
             native_legacy_retirement_observed(this);
             // The unchanged family has retired this generation and released

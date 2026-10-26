@@ -241,3 +241,41 @@ panel's rd_ptr ring. Pending a free phone (the daemons agent's Data reset).
 | CA_FORCE_TIMER (CADeviceUseVBL) experiment | gfx 57259e3 kernel; boot-arg `fajita-ca-force-timer=1` vs off, same build | patch in the kernel (strings present) | A/B REPEAT=2 against the new b0; landing needs the lead's approval |
 | metal2vulkan draw-cost (johnpanos/metal2vulkan draw-cost f35f75b1 = 1ff8f4b3 + bench fix) | stack f6ad4e9 (fork fajita-gfx-m2v; NativeMetal gfx-m2v 3d54a97: two bridge patches refreshed), payload in .cache/fajita-out-m2v (built rc 0) | encode bench STEADY=1 (lavapipe, callgrind): 35333 -> 34357 instructions per draw (-2.8%), 19.5 -> 10.8 allocations per draw | frame-trace commit wait per draw, REPEAT=2 against b0 |
 | CA frame capture for the host replay | `ca-capture.sh [FRAMES [SKIP]]` (needs fajita-ssh=1) | - | pulls backboardd's command buffers over Wi-Fi, builds frames.json for command-replay |
+
+### Frame info with CA's exact swap id (fajita-frame-info=2)
+
+swap_wait_gated (the original family, 20H392) waits for a swap by comparing the waited id with the display's completed
+generation (+5220) and the current request's own id (request +788, `ldr w8, [x8, #0x314]` at 0xfffffff004c114b4): the request's
+word at +788 is the id SwapBegin gave CA, and the completed generation follows the same numbering. So mode 1 (the generation at
+the latch) should mostly carry the right id already; mode 2 sends the id read from the request that completed last (read in
+finishTransfer before completeCurrentSwap), qualified in build-native-legacy-display.py (swap_id=788, swap_id_checks), and counts
+in native_legacy_frame_info[4] the frames where the two differ ([5]: the last id sent; gfx-scene records them as fi_*). If they
+never differ, the missing phase lock has another cause: `--cawatch` now also reads CA's FrameInfo records (D+0x448..0x450, the
+oldest's id) and D+0x9f2's flags (bit 35: finish_update keeps a record per swap only when set). Records that pile up = ids never
+match; no records = CA keeps none, and frame info is ignored whatever its id. Arms by boot arg on one kernel: fajita-frame-info=0
+(as ios16-port), 1, 2; fajita-ca-force-timer=0/1.
+
+### Two swaps in flight (design, not coded)
+
+Today the display hands the presenter one swap at a time: the next offer waits for this one's COMPLETE_SWAP and retire (in flip
+mode the retire is at the DPU latch unless retireEarly), so swap N+1's copy is committed only after N's round trip, even though
+CA's ring (`can_update_`, two entries) already has N+1 submitted. Accepting a second in-flight swap needs:
+- **Presenter (NativeGOPPresenter):** the single `Swap swap` becomes a FIFO of two entries, each with offered/delivered, sequence,
+  target, deliveredTask and deliveredAt. waitSwap delivers the oldest offered-undelivered entry; completeSwap matches by sequence and
+  must complete in order (a later one finishing first is held). freeTarget must also exclude the targets of delivered-uncompleted
+  entries. With three scan-out buffers (front, pending flip, queued) a second copy has a target only while no flip is pending: full
+  pipelining wants a fourth buffer (10.1 MB at 1080x2340) or the second offer is refused when no target is free (then it behaves
+  as today).
+- **Display (NativeLegacyDisplay):** `gpuRequest` and the `transferred` latch become a two-entry in-flight list; kickSwapQueue offers
+  the request behind the one in flight (the family's pending head stays N; N+1 is found through NATIVE_LEGACY_REQUEST_NEXT); a
+  finishTransfer for N+1 that arrives before N's (a failed GPU copy of N falling back to the CPU) waits until N is completed, because
+  activateOnlyPendingSwap only completes the pending head.
+- **The frozen-screen fixes (11232f7, 8a71b82):** both rely on one latch. With two in flight: a client that died takes both requests
+  (each finishTransfer then takes the why==1 path: drop, count, and kick only when nothing else is in flight); the presenter's
+  reclaim must fail every entry delivered to the dead task, oldest first, so the display completes them in order; a reclaimed
+  entry's target is freed with it. The "keep the latch set while completion can reenter" rule becomes "no new offer while a
+  completion is running".
+- **What it can buy:** only the gap between N's retire and N+1's offer (COMPLETE_SWAP ~1 ms, the kick and the presenter's wake); the
+  copy still waits on the GPU for CA's own N+1 work (offer -> copy start 7.7 ms today is mostly that). Worth it only if the CAWATCH
+  pass shows CANT ticks whose previous retire lands within a couple of ms after the tick. About 150-200 lines across two drivers with
+  the wedge invariants above: not small, so not coded until the watcher says CANT is a real share of the gaps.
