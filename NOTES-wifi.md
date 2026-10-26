@@ -224,6 +224,11 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
 ## Current state (keep this updated; a restart starts here)
 
 **Opus round (branch `wifi-opus`, worktree `../UniXNU-fajita-wifi3`), 2026-10-25.**
+- **Handover point (2026-10-26):** all work is on ios16-port. Opus stops here; the phone goes to the next agent. Open for done:
+  (1) wifid seeing the interface (status icon, Settings > Wi-Fi, join from Settings) - the stopped IO80211.framework survey
+  below; (2) Safari loads a page (after 1); (3) credentials from wifid/keychain instead of wifi.psk (after 1). The SMMU
+  translating bank is done and default. Best test: `scripts/fajita/test/wifi-test.sh modem link servers wlfw scan assoc
+  dhcp ping` (all PASS); add `WIFI_EXTRA_ARGS="fajita-wifi-iokit=1 fajita-wifid=1"` for iOS's own stack and the real wifid.
 - **wlfw solved (on the phone).** The wlan PD was up all along: the modem announces 32 QMI services before wlfw, and
   the router's remote-server table had 32 slots, so wlfw's NEW_SERVER (the 33rd) was dropped without an event (77dd018).
   Candidates (a)(b)(c) were not needed. Table now 128, overflow still delivers the event. Result:
@@ -256,9 +261,14 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
   read in the kernel, never logged); FW7 link row (row 11); `kcmd wifidev connect`.
 - MAC: the phone's own, from persist:/wlan_mac.bin (only Intf2 filled), via `tools/wifi/persist-wlan-mac.py` on the EFS
   backup -> `fajita-wifi-mac=`; LAA 02:fa:6a:17:4e:03 fallback.
-- **TODO before done (lead): apps_smmu translating bank.** SIDs 0x40/0x41 are on a *bypass* bank (the chip can DMA
-  anywhere). Replace with a stage-1 translating context bank that maps only the arena (the handoff's design) and check
-  CB_FSR stays clear.
+- **Done: apps_smmu translating bank (default since 2026-10-26).** `drivers/FajitaWifi/WifiSmmu.[ch]` (host-tested, t_smmu.c:
+  a software walk maps the arena, faults its neighbours, other RAM and the tables) builds a stage-1 AArch64 context: 4 KiB
+  granule, T0SZ 32, L1 + L2 with four 2 MiB block entries over the 8 MiB arena, IOVA = PA, Normal NC (MAIR 0x44), AF/RW/OSH;
+  TCR 0x800020, TCR2 0x38002 (40-bit PA, SEP upstream), SCTLR 0x27 (M, TRE, AFE, CFRE; no context interrupt), CBAR S1+S2-bypass,
+  CBA2R VA64, ASID 0x40. The kernel (FajitaWifiDev.cpp smmuTranslateWlan) keeps the tables in their own contiguous buffer
+  (outside the arena, cleaned to PoC), TLBIALL+SYNC, SCTLR.M last, then two exact SMRs 0x40 and 0x41 -> the bank (phone:
+  bank 5, slots 8/9). CB_FSR faults are logged as `FW6 SMMU FAULT fsr .. far ..`; wifi-test fails a run on one. Phone proof:
+  modem..ping all PASS, no faults. `fajita-wifi-smmu=bypass` restores the old bypass bank.
 - **TODO before done (lead): credentials from iOS, not a file.** `/private/var/ngpu/wifi.psk` is the passphrase in plain
   text on the Data volume (bring-up only). Once wifid drives the join, the passphrase must come through iOS's own path
   (wifid / keychain via the IO80211 associate request) and the file and its push in wifi-test.sh must go.
