@@ -70,6 +70,8 @@ build() {
   local args=(fajita-wifi=$maxN fajita-wifi-dump=1 native-ufs-partread=1   # partread: rmtfs reads the EFS partitions (read-only)
               "phys-reserve=$PHYS_RESERVE")                                 # the modem carve-outs, off XNU's free lists
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
+  local mac; mac=$(python3 "$ROOT/tools/wifi/persist-wlan-mac.py" 2>/dev/null)   # the phone's own MAC, from the persist backup
+  [ -n "$mac" ] && args+=("fajita-wifi-mac=$mac")
   for s in "${want[@]}"; do [ "$s" = lower ] && args+=(fajita-wifi-ro=1); done   # the read-only survey (FWR rows)
   for s in "${want[@]}"; do [ "$s" = qmp ] && args+=(fajita-wifi-qmp=1); done     # the AOSS QMP link-up (FWQ rows)
   [ -n "${WIFI_EXTRA_ARGS:-}" ] && args+=($WIFI_EXTRA_ARGS)   # e.g. fajita-wifi-blk=1024

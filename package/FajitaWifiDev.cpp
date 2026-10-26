@@ -211,7 +211,22 @@ extern "C" int fajita_wifi_dev_start(void)
     __asm__ volatile("dsb sy" ::: "memory");
     note("FW6 arena zeroed; CE0 sr_size %x ctrl1 %x intr %x", ioRdRaw(0x240000 + 0x08), ioRdRaw(0x240000 + 0x18), ioRdRaw(0x24c000));
     // the firmware's READY carries no MAC on this phone: a locally administered one (FajitaNet's USB en0 is ...:02)
-    const wdev_ops ops = {nullptr, devNow, devRandom, devRx, devLink, devLog, devAlloc, devFree, {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x03}};
+    wdev_ops ops = {nullptr, devNow, devRandom, devRx, devLink, devLog, devAlloc, devFree, {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x03}};
+    {   // fajita-wifi-mac=<12 hex>: the phone's own MAC (persist:/wlan_mac.bin, tools/wifi/persist-wlan-mac.py)
+        char m[20] = {0};
+        uint8_t v[6];
+        unsigned k = 0;
+        if (PE_parse_boot_arg_str("fajita-wifi-mac", m, sizeof m)) {
+            for (const char *q = m; *q && k < 12; ++q) {
+                const int h = *q >= '0' && *q <= '9' ? *q - '0' : *q >= 'a' && *q <= 'f' ? *q - 'a' + 10 : *q >= 'A' && *q <= 'F' ? *q - 'A' + 10 : -1;
+                if (h < 0) continue;   // separators
+                if (k & 1) v[k / 2] = uint8_t(v[k / 2] << 4 | h); else v[k / 2] = uint8_t(h);
+                ++k;
+            }
+            if (k == 12 && !(v[0] & 1) && (v[0] | v[1] | v[2] | v[3] | v[4] | v[5])) {memcpy(ops.mac, v, 6); note("FW6 mac from fajita-wifi-mac (persist)");}
+            else note("FW6 fajita-wifi-mac '%s' not a unicast MAC: using the LAA", m);
+        }
+    }
     const wce_io io = {nullptr, ioRd, ioWr, ioBarrier};
     IOLockLock(gLock);
     const int r = wdev_start(&gDev, &ops, &io, reinterpret_cast<void *>(gArena.va), FW_WLAN_DMA_PHYS, static_cast<uint32_t>(FW_WLAN_DMA_SIZE));
@@ -244,7 +259,7 @@ extern "C" void fajita_wifi_dev_poll(void)
         const wce &ce = gDev.ce;
         row(8, "FW6 dev %s%s%s mac %02x:%02x:%02x:%02x:%02x:%02x%s htc %d eid htt%u wmi%u wmi cmds%u ev%u bad%u unk%u(%x) chunks%u htt %u rx%u tx%u arena %u/%u ce rx%u/%u/%u tx%u smmu-fsr %x",
             wdev_state_name(gDev.state), gDev.state == WDEV_FAILED ? " in " : "", gDev.state == WDEV_FAILED ? wdev_state_name(gDev.failed_in) : "",
-            gDev.mac[0], gDev.mac[1], gDev.mac[2], gDev.mac[3], gDev.mac[4], gDev.mac[5], gDev.mac_fallback ? "(laa)" : "", gDev.htc.state, gDev.htt_eid, gDev.wmi_eid,
+            gDev.mac[0], gDev.mac[1], gDev.mac[2], gDev.mac[3], gDev.mac[4], gDev.mac[5], gDev.mac_fallback ? (gDev.ops.mac[0] == 0x02 ? "(laa)" : "(persist)") : "", gDev.htc.state, gDev.htt_eid, gDev.wmi_eid,
             gDev.wmi.cmds, gDev.wmi.events, gDev.wmi.bad_events, gDev.wmi.unknown_events, gDev.wmi.last_unknown_id, gDev.wmi.nchunks,
             gDev.htt.state, gDev.htt.rx_frames, gDev.htt.tx_frames, gDev.dma.used, gDev.dma.size, ce.pipe[1].rx, ce.pipe[2].rx, ce.pipe[5].rx,
             ce.pipe[0].tx + ce.pipe[3].tx + ce.pipe[4].tx, smmuFaults());
