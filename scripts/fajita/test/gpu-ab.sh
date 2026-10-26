@@ -13,6 +13,9 @@ $TD/gpu-status.sh >/dev/null; [ $? -eq 2 ] && { echo "no run holds the phone"; e
 # ROUNDS=N (default 1): the variants N times, interleaved (A B A B ...), so drift over the boot cancels; a summary at the end gives each
 # variant's median and spread of home and App Library motion fps over its rounds.
 RUN=$G/.ab-run-$$; : > $RUN
+# The phone's gpu-env persists: whatever variant ran last (a diagnostic one included) would stay for every later run. The plain one goes back
+# on exit, for the next backboardd start.
+trap 'printf "# plain\n" > $G/.ab-plain; T=60 H push $G/.ab-plain /private/var/ngpu/gpu-env 644 >/dev/null 2>&1' EXIT
 list=(); for r in $(seq 1 ${ROUNDS:-1}); do list+=("$@"); done
 for env in "${list[@]}"; do
   name=$(basename $env); echo "=== $name: $(tr '\n' ' ' < $env)"
