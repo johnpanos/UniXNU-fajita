@@ -2,6 +2,44 @@
 
 ## Current state (keep this updated; a restart starts here)
 
+Round 8 (lead): a USB network transport, so a future iOS network interface can be tested against this laptop. The
+interface itself, IONetworkingFamily, modem boot, SCM, memory assignment, the SMMU and WMI stay on hold.
+
+**USB network transport (done 2026-10-25, on the phone, PASS twice).** fjdbg channel 7 `NET`: one Ethernet frame
+(14..1536 bytes, no FCS) per fjdbg frame, both directions, behind `usb-net=1` (default off: NET frames from the host are
+counted and ignored, `fajita_usbnet_send` returns -1). The other channels and the hub ops are unchanged.
+- Kernel API (drivers/NativeDwc3/NativeDwc3.cpp; callers declare them weak): `int fajita_usbnet_send(const void *frame,
+  size_t len)` queues on the gadget's TX ring from any thread (not interrupt context), never blocks; 0 queued, -1 off or
+  no USB configuration, -2 bad length, -3 ring full (dropped, counted); NET never takes the ring's last 4 KiB, so command
+  replies and SHELL output keep room. `int fajita_usbnet_register_rx(fn, ctx)`, `fn(ctx, frame, len)` runs on the USB poll
+  thread for every frame the host sends: the frame is valid only for the call and fn must not block (copy it out); fn
+  may call fajita_usbnet_send; fn = nullptr unregisters. `int fajita_usbnet_link_up(void)`.
+- Core and test hook: `drivers/NativeDwc3/UsbNet.h` (freestanding, shared with the host simulator): echo mode, the
+  dispatch (echo, then the probe's replies, then the registered receiver, else dropped), and a probe that is a tiny IPv4
+  client: DHCP DISCOVER -> OFFER -> REQUEST -> ACK, ARP for the router, one ICMP echo (1 s retry, 4 tries per step, then
+  `FAILED: <step>`). `kcmd usbnet [state] | echo on|off | dhcp [A.B.C.D] | show`; its rows (`usbnet: ...`) go to the
+  kernel log. Probe MAC 02:fa:6a:17:4e:01 (locally administered).
+- Host: `scripts/fajita-usbdbg-hub.py` op `net`: after the JSON reply line the hub connection carries frames in qemu
+  stream format (u32 BE length + frame, what passt speaks); one NET client at a time; a slow client loses frames rather
+  than stalling the hub's reader (queue of 1024); `call net-stats` prints the counters.
+  `scripts/fajita/test/usbnet-host.py bridge [--pcap F] [-v]` starts passt (`-f -1 -s SOCK --mtu 1500`, no root: DHCP,
+  DNS forwarding, NAT through the laptop's sockets) and relays both ways; `usbnet-host.py echo --count N` is the
+  transport test (frames of 14..1536 bytes, every byte value including the fjdbg escape bytes, checked intact and in
+  order). passt's default MTU is 65520: the bridge asks for 1500 and drops anything larger than 1536 from passt.
+- Tests: `drivers/NativeDwc3/tests/UsbNet.cpp` (in tests/run.sh): builders and checksums (RFC 1071 example), parsers on
+  good and malformed replies, dispatch, the probe against a scripted server including retries, NAK and silence.
+  `scripts/fajita/test/net-test.sh sim` runs the same core in UsbDbgSim behind a private hub bridged to a real passt (no
+  phone); `net-test.sh usbnet` builds `--test usb-net=1` (into .cache/fajita-out-net), holds one session, and runs the
+  echo test, then the bridge and `kcmd usbnet dhcp`, checking the probe's PASS row in the kernel log.
+- On the phone (two boots, both PASS): `kcmd usbnet` `link=1`; echo 300 frames (235772 bytes) in 0.25 s and 2000
+  frames (1.5 MB) in 2.37 s, all intact and in order (about 0.6-0.9 MiB/s each way with 8 frames in flight; the 1 ms
+  poll period bounds it); then the kernel's DISCOVER reached passt: **`usbnet: DHCP OFFER 192.168.0.183 from 192.168.0.1
+  ... router 192.168.0.1 dns 192.168.0.1 mtu 1500, 1-2 ms`**, ACK, ARP for 192.168.0.1, ICMP echo reply rtt 1-2 ms,
+  `usbnet: probe PASS: DHCP, ARP and ping over the NET channel in 5-6 ms`. Hub counters: no frame dropped.
+- For the iOS interface (next, on hold): register an RX callback that copies into an mbuf and hands it to the
+  interface's input path from a thread of its own (not the poll thread); transmit with fajita_usbnet_send and treat -3
+  as an output drop. Address config can come from passt's DHCP (the lease is infinite; MTU 1500).
+
 Round 7 (lead): the AOSS QMP link-up, AP side only (no load_state or other message). Modem boot, SCM, memory
 assignment, the SMMU, WMI and the network interface stay on hold.
 

@@ -67,6 +67,9 @@ The CDC-ACM/-ECM gadget itself (event buffer, TRB rings, DEPCMDs, enumeration,
   `../NativeUfs/SmmuTakeover.h`.
 - `UsbDbgProto.cpp` — fjdbg framing (every byte value, CRC, resync) and the command layer.
 - `UsbDbgSim.cpp` + `fajita-usbdbg.py selftest` — the host tool end to end against the device code.
+- `UsbNet.cpp` — the NET channel core (`UsbNet.h`): frame builders and parsers, echo/receiver dispatch, and the
+  DHCP/ARP/ping probe against a scripted server. `scripts/fajita/test/net-test.sh sim` runs the same core in
+  `UsbDbgSim` behind the hub, bridged to a real passt.
 
 ## Build
 

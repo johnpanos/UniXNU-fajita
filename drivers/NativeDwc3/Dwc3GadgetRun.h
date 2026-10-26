@@ -23,6 +23,8 @@ void wakeup(void *chan);   // bsd/sys/systm.h
 // The panel scanout, as package/BootDiagExport.c reaches it: the legacy display's own mapping, else a mapping of
 // the console framebuffer made through ArmCpu (ml_io_map's submap has no room for a 10 MB panel).
 extern volatile uint64_t native_gop_virtual __attribute__((weak_import));
+// NativeDwc3.cpp: a frame the host sent on the NET channel (usb-net=1; UsbNet.h). Runs on this poll thread.
+void native_dwc3_net_rx(const uint8_t *frame, size_t len);
 extern uint64_t armcpu_map_physical(uint64_t physical, uint64_t length) __attribute__((weak_import));
 }
 
@@ -607,6 +609,8 @@ inline void Gadget::onBulkOut(uint32_t remaining)
         shHead = shHead + 1;
       }
       wakeup(const_cast<uint32_t *>(&shHead));
+    } else if (rx.channel() == usbdbg::kChNet) {
+      native_dwc3_net_rx(rx.data(), rx.length());   // the frame is valid only for the call (the decoder's buffer)
     }
   }
   armBulkOut();

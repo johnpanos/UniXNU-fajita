@@ -5,7 +5,10 @@
 # Default: the kernel log streams over USB (fjdbg hub) and the ~5 min pmOS pull only runs when that capture failed.
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; mkdir -p "$W"; S=$W
 # One run on the phone at a time (several agents use it): the whole cycle holds $W/phone.lock.
-[ -n "$FAJITA_PHONE_LOCKED" ] || { export FAJITA_PHONE_LOCKED=1; exec flock $S/phone.lock "$0" "$@"; }
+# The phone lock is global (one phone, any worktree or work dir): ${XDG_RUNTIME_DIR:-/tmp}/fajita-phone.lock. The old per-work-dir lock
+# ($S/phone.lock) is taken too, so copies of this script from before the change still exclude this one.
+G=${XDG_RUNTIME_DIR:-/tmp}/fajita-phone.lock
+[ -n "$FAJITA_PHONE_LOCKED" ] || { export FAJITA_PHONE_LOCKED=1; exec flock "$G" flock $S/phone.lock "$0" "$@"; }
 O=${FAJITA_OUT:-$TD/../../../.cache/fajita-out}
 NAME=$1; PAYLOAD=${2:-$O/payload.img}; BOOT=${3:-$O/boot.img}   # default: the scripts/fajita/build.sh output
 OUT=$S/logs/$NAME; mkdir -p $OUT

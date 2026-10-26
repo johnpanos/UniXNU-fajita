@@ -43,6 +43,7 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `bright-probe.py STAGE LEVEL` | DSI brightness probe |
 | `scripts/fajita/build-usbdbg-agent.sh` | rebuild the phone's USB debug agent (package/usb-debug-tools/fjdbg-agent.c) on Linux into .cache/fajita-inputs |
 | `bg.sh start NAME [--max S] CMD...` / `status` / `wait NAME [S]` / `kill` | run anything long (builds, fps.sh, session start, leakwatch) in the background: returns at once, `wait` polls at most 90 s, flags STALLED output, kills at --max |
+| `net-test.sh sim\|usbnet`, `usbnet-host.py bridge\|echo` | the USB network transport (fjdbg NET channel, `usb-net=1`): echo test, bridge to passt, the kernel's DHCP/ARP/ping probe |
 | `hc OP ...` | a raw hub call (`run`, `kcmd`, `screenshot`, `read32`, `reset`, ...) |
 
 ## Best practices

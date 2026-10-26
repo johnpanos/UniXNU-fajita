@@ -37,6 +37,7 @@ extern "C" {
 #include "../NativeUfs/SmmuTakeover.h"   // generic ARM SMMUv2 stream planner (read-only use here)
 #include "Dwc3Gadget.h"                  // stage B: the DWC3 CDC-ACM device controller (usb-debug=N)
 #include "AgentBlob.h"                   // generated: the CI-signed fjdbg-agent (empty without FAJITA_USBDBG_AGENT)
+#include "UsbNet.h"                      // the NET channel core (usb-net=1): echo, the DHCP/ARP/ping probe, the receiver hook
 
 // The embedded userland agent, for the kernel's boot-time write into Data (kern_exec.c, usb-debug=3).
 extern "C" int native_dwc3_agent_blob(const uint8_t **data, uint64_t *bytes)
@@ -202,6 +203,100 @@ static void fjdbgCreateNode()
   devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "fjdbg");
 }
 
+// ---- the NET channel (7): Ethernet frames to and from the laptop -------------------
+// usb-net=1 (default off) turns it on. The in-kernel API for a network interface:
+//   fajita_usbnet_send(frame, len)        queue one Ethernet frame (14..1536 bytes, no FCS) to the host; any thread
+//                                         except interrupt context. 0 = queued; -1 channel off or no USB configuration
+//                                         yet; -2 bad length; -3 the TX ring is full (the frame is dropped, as a NIC
+//                                         would on a full ring). It never blocks.
+//   fajita_usbnet_register_rx(fn, ctx)    fn(ctx, frame, len) gets every frame the host sends (unless echo or the probe
+//                                         takes it). It runs on the USB poll thread: the frame is valid only for the call,
+//                                         and fn must not block (copy the frame into an mbuf and return). fn may call
+//                                         fajita_usbnet_send. Register once; fn = nullptr unregisters. 0, or -1 when off.
+//   fajita_usbnet_link_up()               1 when the channel is on and the host has configured the gadget.
+// Callers should declare these weak (like fajita_usbdbg_register_kcmd) so a kernel without NativeDwc3 still links.
+// Test hook: kcmd usbnet [state] | echo on|off | dhcp [A.B.C.D] | show (UsbNet.h).
+extern "C" {
+typedef void (*fajita_usbnet_rx_fn)(void *ctx, const void *frame, size_t len);
+int fajita_usbnet_send(const void *frame, size_t len);
+int fajita_usbnet_register_rx(fajita_usbnet_rx_fn fn, void *ctx);
+int fajita_usbnet_link_up(void);
+volatile uint32_t native_dwc3_net_on = 0, native_dwc3_net_tx = 0, native_dwc3_net_tx_dropped = 0, native_dwc3_net_rx_off = 0;
+}
+static usbnet::Net *gNet = nullptr;   // IONewZero'd when usb-net=1; touched by the poll thread (except the TX counters)
+static const uint32_t kNetKeepFree = 4096;   // NET frames never take the last 4 KiB of the TX ring: replies and SHELL keep room
+
+static uint64_t netNowMs()
+{
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+  return ns / 1000000;
+}
+static int netSend(void *, const uint8_t *frame, size_t len) { return fajita_usbnet_send(frame, len); }
+static void netLog(void *, const char *text) { printf("%s\n", text); }
+
+extern "C" int fajita_usbnet_send(const void *frame, size_t len)
+{
+  dwc3::Gadget *g = gGadget;
+  if (!native_dwc3_net_on || !g || !g->bulkStarted) return -1;
+  if (!frame || len < usbnet::kMinFrame || len > usbnet::kMaxFrame) return -2;
+  if (!g->queueFrame(usbdbg::kChNet, static_cast<const uint8_t *>(frame), len, kNetKeepFree)) {
+    __atomic_fetch_add(&native_dwc3_net_tx_dropped, 1, __ATOMIC_RELAXED);
+    return -3;
+  }
+  __atomic_fetch_add(&native_dwc3_net_tx, 1, __ATOMIC_RELAXED);
+  return 0;
+}
+
+extern "C" int fajita_usbnet_register_rx(fajita_usbnet_rx_fn fn, void *ctx)
+{
+  if (!native_dwc3_net_on || !gNet) return -1;
+  if (fn) gNet->rxCtx = ctx;
+  __atomic_store_n(&gNet->rxFn, fn, __ATOMIC_RELEASE);
+  return 0;
+}
+
+extern "C" int fajita_usbnet_link_up(void)
+{
+  return native_dwc3_net_on && gGadget && gGadget->bulkStarted ? 1 : 0;
+}
+
+extern "C" void native_dwc3_net_rx(const uint8_t *frame, size_t len)
+{
+  if (gNet && native_dwc3_net_on) gNet->onFrame(frame, len);
+  else native_dwc3_net_rx_off = native_dwc3_net_rx_off + 1;   // usb-net=0: the frame is ignored
+}
+
+static size_t netKcmd(const char *args, size_t len, char *out, size_t cap)
+{
+  if (!gNet) {
+    int n = snprintf(out, cap, "usbnet off (boot with usb-net=1); frames ignored %u\n", native_dwc3_net_rx_off);
+    return n < 0 ? 0 : size_t(n);
+  }
+  char head[96];
+  snprintf(head, sizeof head, "link=%d tx=%u tx_dropped=%u ", fajita_usbnet_link_up(), native_dwc3_net_tx, native_dwc3_net_tx_dropped);
+  return gNet->kcmd(args, len, out, cap, head);
+}
+
+static void netStart()
+{
+  uint32_t on = 0;
+  PE_parse_boot_argn("usb-net", &on, sizeof(on));
+  if (on) {
+    gNet = IONewZero(usbnet::Net, 1);
+    if (gNet) {
+      gNet->send = netSend;
+      gNet->log = netLog;
+      gNet->nowMs = netNowMs;
+      // A locally administered MAC for the probe: 02:fa:6a:17:4e:01 ("fajita NET").
+      static const uint8_t mac[6] = {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x01};
+      for (int i = 0; i < 6; i++) gNet->probe.mac[i] = mac[i];
+      __atomic_store_n(&native_dwc3_net_on, 1u, __ATOMIC_RELEASE);
+    }
+  }
+  fajita_usbdbg_register_kcmd("usbnet", netKcmd, "NET channel (usb-net=1): [state] | echo on|off | dhcp [A.B.C.D] | show");
+}
+
 // The polled service thread: drains the DWC3 event buffer, mirrors the kernel log to
 // the host and moves queued frames to the bulk-IN endpoint. Only this thread touches
 // the controller. Once the root (and with it devfs) is mounted it creates /dev/fjdbg.
@@ -242,6 +337,7 @@ static void dwc3GadgetThread(void *, wait_result_t)
       gGadget->poll();
       gGadget->pumpLog();
       gGadget->pumpShot();
+      if (gNet) gNet->tick();   // the NET probe's retries and timeouts
       gGadget->kickTx();
       usbdbgk::pollReset();
       if (!gDevCreated && &rootvnode && rootvnode) {
@@ -333,6 +429,7 @@ void NativeDwc3::startGadget()
     return;
   }
   gGadget->bringUp(gGadgetMode);
+  netStart();
   thread_t t;
   if (kernel_thread_start_priority(dwc3GadgetThread, nullptr, MAXPRI_KERNEL, &t) == KERN_SUCCESS) {
     thread_deallocate(t);

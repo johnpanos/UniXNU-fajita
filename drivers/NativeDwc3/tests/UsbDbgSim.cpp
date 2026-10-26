@@ -8,10 +8,15 @@
 // Memory: 4 KiB of "kernel" at 0xfffffff007004000 (bytes i & 0xff) and the same
 // bytes at physical 0x80000000; MMIO: GSNPSID 0x5533330a at 0x0a60c120.
 // On start it prints a console line and one LOG frame, like the kernel's banner.
+// NET channel: always on, with the kernel's UsbNet.h core (kcmd usbnet ...: echo, the DHCP/ARP/ping probe); probe rows
+// go out as console text.
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <poll.h>
 #include <unistd.h>
 #include "../UsbDbgDevice.h"
+#include "../UsbNet.h"
 
 using namespace usbdbg;
 
@@ -45,8 +50,23 @@ static size_t state(void *, char *out, size_t cap)
 {
   return size_t(snprintf(out, cap, "link=sim\nresets=%d\n", gResets));
 }
+static usbnet::Net gNet;
+static uint64_t nowMs()
+{
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return uint64_t(ts.tv_sec) * 1000 + uint64_t(ts.tv_nsec) / 1000000;
+}
+static int netSend(void *, const uint8_t *f, size_t n) { emit(kChNet, 0, f, n); return 0; }
+static void netLog(void *, const char *text)
+{
+  if (write(1, text, strlen(text)) < 0 || write(1, "\n", 1) < 0) _exit(2);
+}
+
 static size_t kcmd(void *, const char *cmd, size_t len, char *out, size_t cap)
 {
+  if (len >= 6 && memcmp(cmd, "usbnet", 6) == 0 && (len == 6 || cmd[6] == ' '))
+    return gNet.kcmd(cmd + 6, len - 6, out, cap, "link=1 sim ");
   return size_t(snprintf(out, cap, "kcmd '%.*s': ok\n", int(len), cmd));
 }
 static int32_t logFrom(void *, uint64_t off, uint64_t *used)
@@ -81,10 +101,20 @@ int main(int argc, char **argv)
   uint64_t used;
   logFrom(nullptr, 0, &used);
 
+  gNet.send = netSend;
+  gNet.log = netLog;
+  gNet.nowMs = nowMs;
+  static const uint8_t mac[6] = {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x01};
+  memcpy(gNet.probe.mac, mac, 6);
+
   Decoder d;
   alignas(4) static uint8_t rsp[kMaxData];
   uint8_t buf[512];
   for (;;) {
+    pollfd pfd = {0, POLLIN, 0};
+    int pr = poll(&pfd, 1, 20);
+    gNet.tick();
+    if (pr == 0) continue;
     ssize_t n = read(0, buf, sizeof buf);
     if (n <= 0) return 0;
     for (ssize_t i = 0; i < n; i++) {
@@ -117,6 +147,8 @@ int main(int argc, char **argv)
       } else if (d.channel() == kChCmd) {
         size_t len = handleCommand(t, d.data(), d.length(), rsp);
         emit(kChRsp, d.seq(), rsp, len);
+      } else if (d.channel() == kChNet) {
+        gNet.onFrame(d.data(), d.length());
       } else if (d.channel() == kChShell) {
         // Emulate fjdbg-agent: one command per line; an unknown program prints an error line without an exit
         // marker, anything else "runs" and ends with `fjdbg: exit N` (N = the argument count, to test parsing).
