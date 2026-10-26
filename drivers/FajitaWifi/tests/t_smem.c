@@ -235,6 +235,67 @@ static void t_smem_inspect(void)
     free(mem);
 }
 
+
+// The layout the phone's SBL leaves (smem-snap.py, 2026-10-25; NOTES-wifi.md "Lower layers"): 15 ptable entries with
+// cacheline 0x20, the ptable and the header listed as host 0xffff entries, SIII with 615 items (past the 512 TOC), the
+// global partition at 0x1000+0x88000 holding items above 512, partitions between other hosts, and an empty
+// APPS<->MODEM partition at 0xb9000+0x7c000. Then what stage 3 will do on it: GLINK's items and the SMP2P out item.
+static void t_smem_phone_layout(void)
+{
+    uint8_t *mem = aligned_alloc(4096, T_SMEM_SIZE);
+    memset(mem, 0, T_SMEM_SIZE);
+    put32(mem, 64 + 4 * 7, 0x000c0000);
+    put32(mem, 192, 1); put32(mem, 196, 0x1000); put32(mem, 200, 0);
+    const size_t pt = T_SMEM_SIZE - 4096;
+    memcpy(mem + pt, "$TOC", 4); put32(mem, pt + 4, 1); put32(mem, pt + 8, 6);
+    // {offset, size, flags, host0, host1, cacheline}
+    static const uint32_t ents[6][6] = {{0x1ff000, 0x1000, 1, 0xffff, 0xffff, 0}, {0x1af000, 0x30000, 3, 0, 2, 0x20},
+                                        {0x153000, 0xc000, 3, 2, 3, 0x20}, {0xb9000, 0x7c000, 3, 0, 1, 0x20},
+                                        {0x1000, 0x88000, 3, 0xfffe, 0xfffe, 0x20}, {0, 0x1000, 3, 0xffff, 0xffff, 0}};
+    for (unsigned i = 0; i < 6; ++i) {
+        const size_t e = pt + 32 + 48 * i;
+        put32(mem, e, ents[i][0]); put32(mem, e + 4, ents[i][1]); put32(mem, e + 8, ents[i][2]);
+        put16(mem, e + 12, (uint16_t)ents[i][3]); put16(mem, e + 14, (uint16_t)ents[i][4]); put32(mem, e + 16, ents[i][5]);
+        if (ents[i][3] == 0xffff) continue;
+        const uint32_t o = ents[i][0];
+        memcpy(mem + o, "$PRT", 4); put16(mem, o + 4, (uint16_t)ents[i][3]); put16(mem, o + 6, (uint16_t)ents[i][4]);
+        put32(mem, o + 8, ents[i][1]); put32(mem, o + 12, 32); put32(mem, o + 16, ents[i][1]);
+        if (ents[i][3] == 2) memcpy(mem + o, "XXXX", 4);   // adsp<->slpi: not ours, never even validated
+    }
+    memcpy(mem + pt + 32 + 6 * 48, "SIII", 4); put32(mem, pt + 32 + 6 * 48 + 4, T_SMEM_SIZE);
+    put32(mem, pt + 32 + 6 * 48 + 8, 0x86000000u); put16(mem, pt + 32 + 6 * 48 + 16, 615);
+    // Two global items, one above 512, with data padding (sizes that are not multiples of 8, as on the phone).
+    put16(mem, 0x1020, WSMEM_CANARY); put16(mem, 0x1022, 469); put32(mem, 0x1024, 0x1000); put16(mem, 0x1028, 0);
+    put16(mem, 0x2030, WSMEM_CANARY); put16(mem, 0x2032, 604); put32(mem, 0x2034, 0x390); put16(mem, 0x2038, 3);
+    put32(mem, 0x1000 + 12, 0x2040 + 0x390 - 0x1000);
+    wsmem s;
+    CHECK(wsmem_init(&s, mem, T_SMEM_SIZE, WSMEM_HOST_APPS) == 0);
+    CHECK(s.version == 12 && s.item_count == 615 && s.nparts == 2 && s.global.offset == 0x1000 && s.global.size == 0x88000);
+    CHECK(s.part[1].offset == 0xb9000 && s.part[1].cacheline == 0x20 && s.part[2].size == 0x30000 && !s.part[3].size);
+    t_items g = {0};
+    CHECK(wsmem_items(&s, WSMEM_GLOBAL_HOST, collect, &g) == 2 && g.item[1] == 604 && g.size[1] == 0x38d && g.off[1] == 0x2040);
+    size_t sz = 0; int err = 0;
+    CHECK(wsmem_get(&s, 1, 604, &sz, &err) == NULL && err == WSMEM_ERR_NOENT);   // modem partition first: absent there
+    CHECK(wsmem_get(&s, 7, 604, &sz, &err) && sz == 0x38d);                     // no APPS<->tz partition: global
+    CHECK(wsmem_items(&s, 1, collect, &g) == 0);
+    // Stage 3 on this layout: GLINK descriptor + TX fifo, the SMP2P out item, then the modem's cached RX fifo (480,
+    // cacheline 0x20: header step 0x20).
+    CHECK(wsmem_alloc(&s, 1, 478, 32) == 0 && wsmem_alloc(&s, 1, 479, 16384) == 0);
+    wsmp2p p;
+    CHECK(wsmp2p_init(&p, &s, 0, 1, 435, 428, 0, 0) == 0 && wsmp2p_add_entry(&p, "master-kernel") == 0);
+    const size_t end = 0xb9000 + 0x7c000, ce = end - 0x20;
+    put16(mem, ce, WSMEM_CANARY); put16(mem, ce + 2, 480); put32(mem, ce + 4, 16384); put16(mem, ce + 8, 0);
+    put32(mem, 0xb9000 + 16, (uint32_t)(ce - 16384 - 0xb9000));
+    t_items t = {0};
+    CHECK(wsmem_items(&s, 1, collect, &t) == 4 && t.item[2] == 435 && t.item[3] == 480 && t.cached[3] && t.off[3] == ce - 16384);
+    CHECK(wsmem_get(&s, 1, 480, &sz, &err) && sz == 16384);
+    CHECK(wsmem_free_space(&s, 1) == (long)(ce - 16384 - 0xb9000) - (long)(32 + 16 + 32 + 16 + 16384 + 16 + 344));
+    wsmp2p_view v;
+    volatile uint8_t *it = wsmem_get(&s, 1, 435, &sz, &err);
+    CHECK(wsmp2p_peek(it, sz, &v) == 0 && v.valid == 1 && !strcmp(v.entry[0].name, "master-kernel"));
+    free(mem);
+}
+
 // The real thing: a SMEM snapshot pulled from the phone (scripts/fajita/test/smem-snap.py; .cache only, never committed).
 // Only the parts the AP may read are in it (header, ptable, the APPS and global partitions); the rest is zero.
 static void t_smem_real(void)
@@ -266,7 +327,15 @@ static void t_smem_real(void)
     }
     t_items g = {0};
     CHECK(wsmem_items(&s, WSMEM_GLOBAL_HOST, collect, &g) >= 0);
-    CHECK(!memcmp(raw, mem, len));
+    CHECK(!memcmp(raw, mem, len));   // the walks never wrote
+    // What stage 3 will write, on this copy only: GLINK's descriptor + TX fifo and the SMP2P out item.
+    const long before = wsmem_free_space(&s, WSMEM_HOST_MODEM);
+    CHECK(wsmem_alloc(&s, WSMEM_HOST_MODEM, 478, 32) == 0 && wsmem_alloc(&s, WSMEM_HOST_MODEM, 479, 16384) == 0);
+    wsmp2p p;
+    CHECK(wsmp2p_init(&p, &s, 0, 1, 435, 428, 0, 0) == 0);
+    CHECK(wsmem_free_space(&s, WSMEM_HOST_MODEM) == before - (16 + 32) - (16 + 16384) - (16 + 344));
+    t_items t = {0};
+    CHECK(wsmem_items(&s, WSMEM_HOST_MODEM, collect, &t) == 3 && t.item[0] == 478 && t.item[2] == 435);
     free(mem);
     free(raw);
 }
@@ -277,5 +346,6 @@ void t_smem(void)
     RUN(t_smem_heap);
     RUN(t_smp2p);
     RUN(t_smem_inspect);
+    RUN(t_smem_phone_layout);
     RUN(t_smem_real);
 }

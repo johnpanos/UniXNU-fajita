@@ -133,10 +133,12 @@ evaluate() {
            local r; r=$(con_has 'FW1 res'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     lower)
       local ok=1 r
-      for re in 'FWR smem @[0-9a-f]+ init 0 .*\(v12\)' 'FWR part apps-modem .* = [0-9]+$' 'FWR part apps-global .* = [0-9]+$' \
+      for re in 'FWR smem @[0-9a-f]+ init 0 .*\(v12\)' 'FWR part apps-modem .* = [0-9]+$' 'FWR part apps-global @' \
                 'FWR rpmh cx.lvl lookup 0' 'FWR rpmh mx.lvl lookup 0' 'FWR rpmh mss.lvl lookup 0' 'FWR aoss .*magic [0-9a-f]+\(ok\)'; do
         [ -n "$(con_has "$re")" ] || { ok=0; say "  missing /$re/"; }
       done
+      # an item walk that hit a corrupt list ends its (possibly wrapped) row with "= -ERR"
+      [ -z "$(con_has 'FWR .* = -[0-9]+$')" ] || { ok=0; say "  an SMEM item walk failed: $(con_has 'FWR .* = -[0-9]+$' | tail -1)"; }
       grep -aE 'FWR ' "$CON" 2>/dev/null | sed 's/^.*fajita-wifi: //' | awk '!seen[$0]++' | head -60 | while read -r r; do say "  $r"; done
       # The SMEM snapshot for the host tests (read-only on the phone), then the parser on it.
       if python3 -I "$TD/smem-snap.py" > "$RES/smem-snap.txt" 2>&1; then

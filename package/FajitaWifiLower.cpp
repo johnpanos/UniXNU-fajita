@@ -75,25 +75,30 @@ void rowEnd()
     }
     rowStart();
 }
-// Long lists wrap onto continuation rows.
-void rowWrap(const char *cont) {if (gRowLen > 150) {rowEnd(); rowAdd("%s", cont);}}
+// Long lists wrap onto continuation rows: call before adding the next element.
+void rowWrap(const char *cont) {if (gRowLen > 140) {rowEnd(); rowAdd("%s", cont);}}
 
+// SMEM host ids (Qualcomm's smem host numbering; smem.c names 0 APPS, 1 MODEM; 0xfffe is the global partition and 0xffff
+// marks the ptable's own entries for the header and the table).
 const char *hostName(unsigned h)
 {
-    static const char *const names[] = {"apps", "modem", "adsp", "slpi", "?4", "cdsp", "?6", "?7", "?8", "?9", "?10",
-                                        "?11", "?12", "?13", "?14", "?15", "?16", "?17", "?18", "?19", "?20", "?21",
-                                        "?22", "?23", "?24"};
+    static const char *const names[] = {"apps", "modem", "adsp", "slpi", "wcnss", "cdsp", "rpm", "tz", "spss", "hyp"};
+    static char other[4][8];
+    static unsigned next;
     if (h == WSMEM_GLOBAL_HOST) return "global";
-    return h < 25 ? names[h] : "?";
+    if (h < sizeof names / sizeof names[0]) return names[h];
+    char *o = other[next++ & 3];
+    snprintf(o, sizeof other[0], "%x", h);
+    return o;
 }
 
 struct ItemCtx {unsigned n;};
 void itemRow(void *ctx, unsigned item, uint32_t off, uint32_t size, int cached)
 {
     ItemCtx *c = static_cast<ItemCtx *>(ctx);
+    rowWrap("FWR   ...");
     rowAdd(" %u@%x+%x%s", item, off, size, cached ? "c" : "");
     ++c->n;
-    rowWrap("FWR   ...");
 }
 
 void surveySmem()
@@ -113,8 +118,8 @@ void surveySmem()
     for (unsigned i = 0; i < n; ++i) {
         wsmem_ptentry e;
         if (wsmem_ptable_entry(&s, i, &e)) break;
-        rowAdd(" %s-%s@%x+%x/cl%x/f%x", hostName(e.host0), hostName(e.host1), e.offset, e.size, e.cacheline, e.flags);
         rowWrap("FWR   ptable");
+        rowAdd(" %s-%s@%x+%x/cl%x/f%x", hostName(e.host0), hostName(e.host1), e.offset, e.size, e.cacheline, e.flags);
     }
     rowEnd();
     if (r) return;
@@ -145,7 +150,7 @@ void surveySmem()
             const int pk = wsmp2p_peek(it, sz, &v);
             rowAdd(" @%lx+%lx peek %d magic %08x v%u feat %x pid %u->%u entries %u/%u flags %x", wsmem_offset(&s, it),
                    (unsigned long)sz, pk, v.magic, v.version, v.features, v.local_pid, v.remote_pid, v.valid, v.total, v.flags);
-            for (unsigned i = 0; i < v.nentries; ++i) {rowAdd(" %s=%x", v.entry[i].name, v.entry[i].value); rowWrap("FWR   smp2p");}
+            for (unsigned i = 0; i < v.nentries; ++i) {rowWrap("FWR   smp2p"); rowAdd(" %s=%x", v.entry[i].name, v.entry[i].value);}
             rowEnd();
         }
     }
