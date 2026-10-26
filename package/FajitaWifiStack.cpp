@@ -33,6 +33,9 @@ int native_ufs_part_read(uint8_t lun, uint64_t lba, uint32_t count, void *dst) _
 // The modem-boot side (memory assignment is theirs): hand the wlfw MSA regions HLOS -> MSS_MSA + WLAN, as
 // ath10k_qmi_setup_msa_permissions does. 0 on success. Without it stage 5 stops before msa_ready (FW5 "msa-assign?").
 int fajita_wifi_msa_assign(const wlfw_mem_region *regions, unsigned count) __attribute__((weak));
+// ld64 does not take an undefined weak reference out of a static archive: this weak default (-78, ENOSYS) stands in
+// until the modem-boot side links its strong definition.
+__attribute__((weak)) int fajita_wifi_msa_assign(const wlfw_mem_region *, unsigned) {return -78;}
 }
 
 // Not in FajitaWifiBoard.h (kept separate from the modem-boot constants):
@@ -206,10 +209,11 @@ uint8_t *gBoard;
 uint32_t gBoardLen;
 char gBoardName[24];
 
+int gMsaRc;
 int msaAssign(void *, const wlfw_mem_region *regions, unsigned count)
 {
-    if (!fajita_wifi_msa_assign) return -1;
-    return fajita_wifi_msa_assign(regions, count);
+    gMsaRc = fajita_wifi_msa_assign(regions, count);
+    return gMsaRc;
 }
 // cnss naming of the modem partition's board files: bdwlan.bin (id 0xff), bdwlan.bNN (< 0xff), bdwlan.NNN.
 int boardData(void *, uint32_t board_id, uint32_t, const uint8_t **data, uint32_t *len)
@@ -388,7 +392,7 @@ extern "C" void fajita_wifi_stack(unsigned stage)
                     wwlfw_state_name(gWlfw.state), gWlfw.state == WWLFW_FAILED ? " in " : "",
                     gWlfw.state == WWLFW_FAILED ? wwlfw_state_name(gWlfw.failed_in) : "", gWlfw.indications,
                     gWlfw.cap.chip_id, gWlfw.cap.board_id, gWlfw.cap.fw_version, gWlfw.msa.count,
-                    gWlfw.failed_in == WWLFW_MSA_DELAY && !fajita_wifi_msa_assign ? " msa-assign?" : gWlfw.msa_assigned ? " assigned" : "",
+                    gWlfw.failed_in == WWLFW_MSA_DELAY && gMsaRc == -78 ? " msa-assign?" : gWlfw.msa_assigned ? " assigned" : "",
                     gBoardName[0] ? gBoardName + 6 : "-", gWlfw.bd_off, gWlfw.bd_len, gWlfw.bd_seg, gWlfw.last_result,
                     gWlfw.last_error, gWlfw.fw_ready);
         }
