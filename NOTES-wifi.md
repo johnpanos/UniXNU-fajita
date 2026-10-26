@@ -262,6 +262,23 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
 - **TODO before done (lead): credentials from iOS, not a file.** `/private/var/ngpu/wifi.psk` is the passphrase in plain
   text on the Data volume (bring-up only). Once wifid drives the join, the passphrase must come through iOS's own path
   (wifid / keychain via the IO80211 associate request) and the file and its push in wifi-test.sh must go.
+- **Data on the air (2026-10-25):** fajita-net=wifi (en0 over HTT, the station MAC): DHCP 192.168.0.84 gw 192.168.0.1,
+  ping 3/3 ~9 ms, CFNetwork GET http://192.168.0.1/ 200. The data path was right from the start (TX completions all ok,
+  the AP re-broadcast our encrypted DISCOVER); fjnet's DHCP sent from 169.254.0.1 to 169.254.255.255 (passt answered,
+  a real server does not); it now uses BPF raw frames. Name lookups fail (ENETDOWN): configd does not manage a bare en0.
+  Full suite PASS: `wifi-test.sh modem link servers wlfw scan assoc dhcp ping`.
+- **The real wifid (fajita-wifid=1, on the phone):** iOS 16 launchd runs jobs from its signed cache
+  (/System/Library/xpc/launchd.plist, 532 daemons; LaunchDaemons overlay plists never load) and com.apple.wifid is the only
+  root RunAtLoad+KeepAlive job in /usr/sbin (its `_LimitLoadToDeviceTree` is wlan/marconi-wifi). So the agent still starts
+  as that job and splits: a child (setsid, flock on /private/var/ngpu/fjdbg/agent.lock) keeps the debug channel, the job's
+  process execs Apple's wifid from /private/var/ngpu/fjdbg/wifid.real (build.sh puts the 20H392 binary from
+  .cache/mnt/os20H392/root into the boot addon with scripts/fajita/addon-put.py; trusted by cdhash). Phone: pid 42 = real
+  wifid (7.3 MB RSS, ppid 1), pid 87 = agent (ppid 42, own session), channel works, WiFiCloudAssetsXPCService and
+  wifianalyticsd start, lock screen normal. Default boots unchanged.
+- wifid's IOKit side (strings): Apple80211.framework (Apple80211Open/BindToInterfaceWithParams/ScanAsync/AssociateAsync/
+  EventMonitoringInit2 ...), IOServiceAddMatchingNotification on **IO80211SkywalkInterface**, the **IO80211APIUserClient**,
+  `_SCNetworkInterfaceCreateWithIONetworkInterfaceObject`. Next: what Apple80211 sends through the user client (dyld cache
+  at .cache/mnt/sysos20H392/root/System/Library/Caches/com.apple.dyld/).
 - kcmd `wifidev [state|scan [SSID]|connect|bss]`; rows FW6 (row 8, device), FW7 scan (row 9), FW3 MODEM FATAL (row 10),
   FW7 link (row 11).
 - Test: `scripts/fajita/test/wifi-test.sh modem link servers wlfw scan` (via bg.sh; reuse FAJITA_OUT).
