@@ -358,7 +358,7 @@ extern "C" int fajita_wifi_dev_start(void)
         row(8, "FW6 map failed (membase %d arena %d)", gMem.va != 0, gArena.va != 0);
         return -2;
     }
-    char mode[8] = "bypass";   // fajita-wifi-smmu=xlate|bypass
+    char mode[8] = "xlate";   // fajita-wifi-smmu=xlate (default: stage-1 tables over the arena only) | bypass
     PE_parse_boot_arg_str("fajita-wifi-smmu", mode, sizeof mode);
     const int s = !strcmp(mode, "xlate") ? smmuTranslateWlan() : smmuBypassWlan();
     note("FW6 smmu %s sid %x/%x rc %d slot %d/%d bank %d", gSmmuXlate ? "xlate" : "bypass", FW_WLAN_SMMU_SID, FW_WLAN_SMMU_MASK, s, gSmmuSlot,

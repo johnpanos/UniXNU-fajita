@@ -84,6 +84,7 @@ typedef struct wmlme {
     int sae_step;                           // 0 commit sent, 1 confirm sent
     uint8_t sae_token[WSAE_TOKEN_MAX]; unsigned sae_token_len;
     uint32_t sae_commits, sae_confirms, sae_tokens, sae_status;
+    uint8_t avoid[6]; int have_avoid;       // the BSS whose authentication last failed: the next connect prefers another BSS of the SSID
     int keys_sent, ptk_installed, authorized, vdev_started;
     uint32_t key_events;
     // management buffers

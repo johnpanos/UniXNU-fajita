@@ -549,6 +549,10 @@ static void t_mlme_failures(void)
     CHECK(s->m.state == WMLME_AUTH);
     advance(s, 5000);
     CHECK(s->m.state == WMLME_FAILED && s->m.reason == WMLME_REASON_AUTH && s->ap_auth_rx == 1 + WMLME_RETRIES);
+    // the next try prefers the other BSS of the SSID (the strongest did not answer); the vdev start is all it needs to choose
+    CHECK(s->m.have_avoid && !memcmp(s->m.avoid, kAp, 6));
+    CHECK(wmlme_connect(&s->m, "KittyCorner", "hunter22hunter") == 0 && !memcmp(s->m.target.bssid, kOther, 6));
+    wmlme_disconnect(&s->m);
     // authentication refused
     s = new_sim("KittyCorner", "hunter22hunter");
     wmlme_start(&s->m); wmlme_scan(&s->m, NULL, 0); pump(s);

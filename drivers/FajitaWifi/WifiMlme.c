@@ -40,7 +40,13 @@ static void set_state(wmlme *m, unsigned s, unsigned reason)
     if (m->ops.state) m->ops.state(m->ops.ctx, s, reason);
 }
 static void arm(wmlme *m) {m->step_at = m->ops.now_ms(m->ops.ctx) + WMLME_TIMEOUT_MS;}
-static void fail(wmlme *m, unsigned reason) {wwpa_supp_clear(&m->supp); set_state(m, WMLME_FAILED, reason);}
+static void fail(wmlme *m, unsigned reason)
+{
+    if (reason == WMLME_REASON_AUTH || reason == WMLME_REASON_ASSOC) {copy(m->avoid, m->target.bssid, 6); m->have_avoid = 1;}
+    else if (reason == WMLME_REASON_NONE) m->have_avoid = 0;
+    wwpa_supp_clear(&m->supp);
+    set_state(m, WMLME_FAILED, reason);
+}
 
 void wmlme_init(wmlme *m, const wmlme_ops *ops, wwmi *wmi, const uint8_t mac[6], uint32_t vdev_id)
 {
@@ -300,6 +306,13 @@ int wmlme_connect(wmlme *m, const char *ssid, const char *pass)
 {
     if (m->state == WMLME_SCANNING || (m->state >= WMLME_VDEV_START && m->state <= WMLME_CONNECTED)) return WMLME_ERR_BUSY;
     const wmlme_bss *b = wmlme_find(m, ssid);
+    if (b && m->have_avoid && eq(b->bssid, m->avoid, 6)) {   // the strongest did not answer last time: another BSS of the SSID, if usable
+        const size_t l = slen(ssid);
+        for (unsigned i = 0; i < m->nbss; ++i) {
+            const wmlme_bss *o = &m->bss[i];
+            if (o->ssid_len == l && eq(o->ssid, ssid, l) && o->rsn_ok && !eq(o->bssid, m->avoid, 6)) {b = o; break;}
+        }
+    }
     if (!b) {set_state(m, WMLME_FAILED, WMLME_REASON_NO_BSS); return WMLME_ERR_NOENT;}
     if (!b->rsn_ok) {set_state(m, WMLME_FAILED, WMLME_REASON_UNSUPPORTED); return WMLME_ERR_NOTSUP;}
     const size_t pl = slen(pass);
