@@ -5,6 +5,11 @@ gfx-report.py --compare RUN_A RUN_B [OUT.txt]: the two runs side by side (A/B: t
 gfx-report.py --noise RUN_DIR: scenes measured more than once in the run (SCENE, SCENE-r2, ...): the spread of each metric.
 
 Speed, over the scene's motion windows only (a frame the render server did not present because nothing changed is not a drop):
+  Inside a window, idle cadence is left out (idle gaps, counted): an interval over IDLE_VSYNCS (4) vsyncs between two long ones that
+  ends in a small frame (the clock's 10 Hz while a drag has not moved anything yet); a long interval next to short ones is a stall.
+  From SLOW_TAIL_MS (400) after the lift, a gap over 2.5 vsyncs ends the window too: a fling's slow tail moves less than a pixel a frame,
+  so its frames repeat and are not presented. A window's frames start at the first two frames under 2.5 vsyncs apart: what came
+  before (touch slop, gesture recognition, an app launch's first frame) is response time (resp), not frame time.
   A motion window starts at a touch step's start (a tap: its lift) and runs while the finger is down, then on after the lift while
   frames keep coming less than IDLE_MS (150) apart, for at most TAIL_MS (2000): a fling's or page snap's animation. A gap longer than
   IDLE_MS after the lift ends the motion; a gap of any length while the finger moves is a stall.
@@ -43,6 +48,9 @@ import sys
 IDLE_MS = float(os.environ.get('IDLE_MS', 150))
 TAIL_MS = float(os.environ.get('TAIL_MS', 2000))
 TAP_FIRST_MS = float(os.environ.get('TAP_FIRST_MS', 1000))
+IDLE_VSYNCS = float(os.environ.get('IDLE_VSYNCS', 4))
+SLOW_TAIL_MS = float(os.environ.get('SLOW_TAIL_MS', 400))
+TV_US = 16684.0   # the panel's vsync period (59.94 Hz), measured per scene in scene_metrics
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.environ.get('FAJITA_WORK') or os.path.join(HERE, '..', '..', '.cache', 'fajita-work')
 
@@ -88,10 +96,18 @@ def windows(rec):
                     break
             elif p > s['end_us'] and (p - prev > IDLE_MS * 1000 or p > s['end_us'] + TAIL_MS * 1000):
                 break
+            elif p > s['end_us'] + SLOW_TAIL_MS * 1000 and p - prev > 2.5 * TV_US:
+                break   # a fling's slow tail: moves under a pixel a frame, so frames repeat and are not presented (not drops)
             frames.append(p)
             prev = p
-        out.append(dict(spec=s['spec'], start=ws, end=frames[-1] if frames else ws, lift=s['end_us'], frames=frames,
-                        resp=(frames[0] - ws) / 1000 if frames else None))
+        # The motion starts at the first of two frames under 2.5 vsyncs apart: before that (the touch slop, gesture recognition, an app
+        # launch's first frame) is response time, not frame time.
+        k = 0
+        while k + 1 < len(frames) and frames[k + 1] - frames[k] > 2.5 * TV_US:
+            k += 1
+        resp = (frames[k] - ws) / 1000 if frames else None
+        frames = frames[k:]
+        out.append(dict(spec=s['spec'], start=ws, end=frames[-1] if frames else ws, lift=s['end_us'], frames=frames, resp=resp))
     return out, src
 
 
@@ -158,11 +174,31 @@ def scene_metrics(rec, ft_frames, refs):
     ws, src = windows(rec)
     m['source'] = src
     m['vsync_ms'] = tv / 1000
-    iv = []
+    tvm = tv / 1000
+    # Idle cadence inside a window: a finger can be down while nothing moves (a drag that has not passed the touch slop, a list at its
+    # end), and then the only frames are the idle ones (the home screen's clock, 10 Hz). An interval over IDLE_VSYNCS (4) vsyncs whose
+    # neighbours are long too is that cadence, not a stall; with a frame trace it must also end in a small frame (under 40% of the
+    # scene's median draws). A stall is a long interval next to short ones. Idle intervals are left out and counted (idle_gaps).
+    offers = sorted(ft_frames)
+    otimes = [t for t, _ in offers]
+    med_draws = st.median([f.get('draws', 0) for t, f in offers if any(w['start'] <= t <= w['end'] for w in ws)] or [0])
+    def small(t):
+        import bisect
+        i = bisect.bisect_right(otimes, t) - 1
+        if i < 0 or t - otimes[i] > 60000:
+            return not offers
+        return offers[i][1].get('draws', 0) < 0.4 * med_draws
+    iv, idle = [], []
     for w in ws:
         f = w['frames']
-        iv += [(b - a) / 1000 for a, b in zip(f, f[1:])]
-    tvm = tv / 1000
+        d = [(b - a) / 1000 for a, b in zip(f, f[1:])]
+        for i, x in enumerate(d):
+            long_ = lambda j: j < 0 or j >= len(d) or d[j] > IDLE_VSYNCS * tvm
+            if x > IDLE_VSYNCS * tvm and long_(i - 1) and long_(i + 1) and small(f[i + 1]):
+                idle.append(x)
+            else:
+                iv.append(x)
+    m['idle_gaps'], m['idle_s'] = len(idle), sum(idle) / 1000
     m['windows'] = len(ws)
     m['iv'] = iv
     m['frames'] = sum(len(w['frames']) for w in ws)
@@ -272,6 +308,8 @@ def scene_metrics(rec, ft_frames, refs):
     dd = lambda k: (c1.get(k) or 0) - (c0.get(k) or 0) if c1.get(k) is not None and c0.get(k) is not None else None
     m['reclaimed'], m['retire_lost'], m['flips_refused'] = dd('reclaimed'), dd('retire_lost'), dd('flips_refused')
     m['gpu_fallbacks'], m['failures'], m['scanned_writes'] = dd('gpu_fallbacks'), dd('failures'), dd('scanned_writes')
+    m['slot_busy'], m['ring_full'] = dd('slot_busy'), dd('ring_full')
+    m['peak_jobs'] = c1.get('peak_jobs')
     m['irq_error'] = '%x' % c1['irq_first_error'] if c1.get('irq_first_error') else ''
     m['overflow'] = rec.get('overflow', {})
     m['step_errors'] = [s['spec'] + ': ' + s['error'] for s in rec['steps'] if 'error' in s]
@@ -341,8 +379,8 @@ def report(run, refs, quiet=False):
         L.append('%-14s ' % 'ALL' + ' '.join(f % a[k] for k, f in COLS) + '  (every scene\'s motion frames pooled)')
     L.append('')
     for m in ms:
-        L.append('%s: %d windows, %.1f s of motion, %.0f%% of frames on time; source %s%s' % (
-            m['scene'], m['windows'], m['motion_s'], 100 * m['ontime'], m['source'],
+        L.append('%s: %d windows, %.1f s of motion, %.0f%% of frames on time, %d idle gaps (%.1f s) left out; source %s%s' % (
+            m['scene'], m['windows'], m['motion_s'], 100 * m['ontime'], m['idle_gaps'], m['idle_s'], m['source'],
             ' | !! windows with no motion: %s' % ' '.join(m['empty_windows']) if m['empty_windows'] else ''))
         L.append('  bound: %s%s' % (m['bound'], ' (%s)' % m['bound_why'] if m['bound_why'] else ''))
         L.append('  gpu: busy %.0f%% (peak 20 ms %.0f%%) at %.0f MHz, levels %s, cap %s, max %.1f C | scene perf: busy %.0f%% alu %.0f%% of SP busy, '
@@ -357,6 +395,9 @@ def report(run, refs, quiet=False):
             L.append('  frame trace (%d frames, %d slow): median %s' % (m['ft_frames'], m['ft_slow_n'], ' '.join('%s %.1f' % (k, v) for k, v in m['ft_med'].items())))
             if m['ft_slow']:
                 L.append('    slow frames: ' + ' '.join('%s %.1f' % (k, v) for k, v in m['ft_slow'].items()))
+        if m.get('slot_busy') is not None:
+            L.append('  job ring: submissions refused for a job slot %s, for ring space %s (retried by the client: waits), most jobs outstanding %s of 8' % (
+                m['slot_busy'], m['ring_full'], m['peak_jobs']))
         sh = []
         for name, d in m['shots']:
             sh.append('%s %s' % (name, 'no ref' if d is None else ('%d px, %d strong%s' % (d['px'], d['strong'], ' DIFF' if d['total'] and d['strong'] > 0.002 * d['total'] else ''))))

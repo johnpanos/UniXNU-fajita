@@ -345,15 +345,32 @@ public:
         // Nothing in the family publishes IOMFBDisplayRefresh (its platform subclass does), and without it the render server keeps its own
         // 1/60 s heartbeat (int-210: refresh=0). Publish it before any client can find the display, only when sheng-vsync asks for more.
         unsigned hz=0;PE_parse_boot_argn("sheng-vsync",&hz,sizeof(hz));
-        if(primary && hz>60 && hz<=240)native_legacy_set_refresh_properties(this);
+        if(primary && ((hz>60 && hz<=240) || panelRefreshUs()))native_legacy_set_refresh_properties(this);
         IOService::registerService(options);native_legacy_registration_observed(this);
     }
     bool isMainDisplay() override {return primary;}
     // The render server paces its display timer by the minimum refresh interval in IOMFBDisplayRefresh (int-209: no vsync client ever
     // registered, frames came every 16.7 ms), and the generic slot 301 fixes it at 1/60 s. With sheng-vsync=<Hz> it reports the panel's
     // own rate instead; the maximum interval and the step keep the original values. Words in 32.32 seconds, then their mach times.
+    // fajita: with the panel's TE pacing the frames (fajita-hw-vsync), the interval is the panel's own: fajita-refresh-us=<us> (default
+    // 16685, 59.94 Hz, the TE period measured by the DPU's rd_ptr; 0 keeps the family's 1/60 s). The render server's display timer runs
+    // at this interval; at 1/60 s it ran 0.1% fast against the panel and slipped a frame every ~17 s.
+    uint64_t panelRefreshUs() const {
+        unsigned hw=0;PE_parse_boot_argn("fajita-hw-vsync",&hw,sizeof(hw));
+        if(!hw)return 0;
+        unsigned us=16685;PE_parse_boot_argn("fajita-refresh-us",&us,sizeof(us));
+        return us>=4000 && us<=34000?us:0;
+    }
     bool getRefreshAttributes(uint64_t *words,bool fixed) override {
         if(!IOMobileFramebufferLegacy::getRefreshAttributes(words,fixed) || !words)return false;
+        if(const uint64_t us=panelRefreshUs()) {
+            const uint64_t interval=(us<<32)/1000000ull;   // 32.32 seconds
+            uint64_t machTime=0;nanoseconds_to_absolutetime(us*1000ull,&machTime);
+            words[0]=interval;words[1]=machTime;
+            if(fixed){words[2]=interval;words[3]=machTime;}
+            native_legacy_vsync_observed(5,(unsigned)(1000000ull/us));
+            return true;
+        }
         unsigned hz=0;PE_parse_boot_argn("sheng-vsync",&hz,sizeof(hz));
         if(hz<=60 || hz>240)return true;
         const uint64_t interval=(1ull<<32)/hz;

@@ -2,7 +2,7 @@
 # gfx-suite.sh RUN [SCENE...]: the graphics suite on the held session (session.sh start, or wifi-test.sh with WIFI_HOLD=1 for the web
 # scenes): each scene's motion measured frame by frame on the panel's timeline (gfx-scene.py), its GPU, CPU and clocks, a screenshot
 # at its rest points, and the stability counters; one report: $FAJITA_WORK/gfx/RUN/report.txt (+ report.tsv, metrics.json).
-#   gfx-suite.sh ab RUN ENV_A ENV_B [ROUNDS]   A/B two gpu-env files in this boot (backboardd restarted per variant, as gpu-ab.sh),
+#   gfx-suite.sh ab RUN ENV_A ENV_B [ROUNDS [SCENE...]]   A/B two gpu-env files in this boot (backboardd restarted per variant, as gpu-ab.sh),
 #                                              ROUNDS times interleaved; RUN-a1, RUN-b1, ... and the comparison in RUN-ab.txt
 # Scenes (default all): home applib settings calendar maps web-hn web-wiki web-apple web-heavy (web-*: Wi-Fi up). Apps with real
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
@@ -21,10 +21,10 @@ usage() { sed -n 2,13p "$0"; exit 2; }
 
 if [ "$1" = ab ]; then
   [ $# -ge 4 ] || usage
-  R=$2 A=$3 B=$4 N=${5:-1}
+  R=$2 A=$3 B=$4 N=${5:-1}; shift 5 2>/dev/null || shift $#
   for i in $(seq 1 $N); do
-    ENV=$A $0 $R-a$i || echo "gfx-suite: !! $R-a$i failed"
-    ENV=$B $0 $R-b$i || echo "gfx-suite: !! $R-b$i failed"
+    ENV=$A $0 $R-a$i "$@" || echo "gfx-suite: !! $R-a$i failed"
+    ENV=$B $0 $R-b$i "$@" || echo "gfx-suite: !! $R-b$i failed"
   done
   for i in $(seq 1 $N); do python3 -I $BOARD/tools/gpu/gfx-report.py --compare $W/gfx/$R-a$i $W/gfx/$R-b$i; done | tee $W/gfx/$R-ab.txt
   exit 0
