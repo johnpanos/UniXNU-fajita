@@ -19,7 +19,20 @@ uint8_t *t_slurp(const char *path, size_t *len)
     fclose(f); *len = n; return b;
 }
 
-#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw)
+static void *t_allocs[4096];
+static unsigned t_nallocs;
+void *t_talloc(size_t n)
+{
+    void *p = calloc(1, n ? n : 1);
+    if (t_nallocs < 4096) t_allocs[t_nallocs++] = p;
+    return p;
+}
+void t_tfree_all(void)
+{
+    while (t_nallocs) free(t_allocs[--t_nallocs]);
+}
+
+#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw) X(ce)
 #define DECL(n) void t_##n(void);
 T_LAYERS(DECL)
 

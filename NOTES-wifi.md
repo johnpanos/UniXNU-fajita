@@ -42,7 +42,9 @@ apps_smmu facts for the Wi-Fi glue (round 3, read-only findings):
 | 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
 | 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | `WifiRouter`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` + kernel glue `package/FajitaWifiStack.cpp` | `tests/t_qrtr.c` (simulated modem router; real .jsn, real wlanmdsp.mbn via FAT, real EFS backup) | done |
 | 4 wlfw client | `WifiWlfw.[ch]`, `WifiSnoc.[ch]` (snoc CE tables); stage 5 in FajitaWifiStack.cpp | `tests/t_wlfw.c` (fixture server, every request decoded; real bdwlan.102 == board-2.bin id 0x102) | done |
-| 5 ath10k CE/HTC/WMI | in progress: 5a CE (64-bit desc, RRI on DDR, shadow write idx) + HTC; 5b WMI-TLV init/ready/scan; 5c assoc + HTT | target simulator (register file + DMA arena) planned | next |
+| 5a CE + HTC | `WifiCe.[ch]` (rings, RRI on DDR, shadow src idx, rx post/repost, gather; one DMA arena `wdma`), `WifiHtc.[ch]` (READY, connect, SETUP_COMPLETE_EX, credits/trailers, WMI queue, CE5 direct HTT) | `tests/t_ce.c` on `tests/wsim.[ch]` (CE register/DMA target) + `tests/wfw.[ch]` (firmware model) | done |
+| 5b WMI-TLV init/ready/scan | | | next |
+| 5c assoc + HTT | | | |
 | 6 iOS Ethernet + WPA2 + DHCP | | | |
 
 Goal: join a WPA2 network and pass IP traffic in iOS on the OnePlus 6T. The Wi-Fi radio (WCN3990) runs on the modem

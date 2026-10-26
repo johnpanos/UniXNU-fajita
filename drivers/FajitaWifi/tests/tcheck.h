@@ -13,6 +13,9 @@ extern const char *t_modem_img;
 extern const char *t_efs_dir;
 extern const char *t_board2;   // argv[3]: board-2.bin
 uint8_t *t_slurp(const char *path, size_t *len);
+// Test allocations, released together by t_tfree_all() (the kernel side never frees its ring state).
+void *t_talloc(size_t n);
+void t_tfree_all(void);
 // A synthetic partitioned SMEM image (version 12): a global partition and an APPS<->MODEM private partition.
 #define T_SMEM_SIZE (2u << 20)
 void t_smem_image(uint8_t *mem, int heap_only);

@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WIFI = ROOT / 'drivers/FajitaWifi'
 SOURCES = ['WifiMdt.c', 'WifiQmi.c', 'WifiQrtr.c', 'WifiBoard.c', 'WifiFat.c', 'tests/test_wifi.c']
 # The stack above a booted modem (tests/test_stack.c + one t_*.c per layer).
-STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiSnoc.c', 'WifiWlfw.c']
-STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c']
+STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiSnoc.c', 'WifiWlfw.c', 'WifiCe.c', 'WifiHtc.c']
+STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c', 'tests/wsim.c', 'tests/wfw.c', 'tests/t_ce.c']
 LIB_FOR_STACK = ['WifiQmi.c', 'WifiQrtr.c', 'WifiFat.c', 'WifiMdt.c', 'WifiBoard.c']
 DEFAULT_EFS = ROOT / '.cache/efs-backup'
 DEFAULT_MODEM = ROOT / '.cache/fw-modem-part/modem_b.img'   # ufspart.py backup --passes 1 --out .cache/fw-modem-part modem_b
