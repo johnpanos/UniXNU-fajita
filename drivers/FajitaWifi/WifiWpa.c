@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // WPA2-PSK supplicant core: SHA-1/HMAC, AES + key wrap, PBKDF2 PSK, PRF/PTK, EAPOL-Key, the 4-way handshake. See WifiWpa.h.
 #include "WifiWpa.h"
+#include "WifiSae.h"
 
 static void cpy(uint8_t *d, const uint8_t *s, size_t n) {for (size_t i = 0; i < n; ++i) d[i] = s[i];}
 static void wipe(void *p, size_t n) {volatile uint8_t *b = (volatile uint8_t *)p; for (size_t i = 0; i < n; ++i) b[i] = 0;}
@@ -336,6 +337,27 @@ int wwpa_ptk_derive(const uint8_t pmk[WWPA_PMK_LEN], const uint8_t aa[6], const 
     return WWPA_OK;
 }
 
+int wwpa_ptk_derive_sha256(const uint8_t pmk[WWPA_PMK_LEN], const uint8_t aa[6], const uint8_t spa[6],
+                           const uint8_t anonce[WWPA_NONCE_LEN], const uint8_t snonce[WWPA_NONCE_LEN], unsigned tk_len, wwpa_ptk *ptk)
+{
+    if (tk_len != 16 && tk_len != 32) return WWPA_ERR_INVAL;
+    uint8_t data[6 + 6 + 32 + 32], buf[WWPA_KCK_LEN + WWPA_KEK_LEN + 32];
+    const int a_lo = cmp(aa, spa, 6) < 0, n_lo = cmp(anonce, snonce, 32) < 0;
+    cpy(data, a_lo ? aa : spa, 6);
+    cpy(data + 6, a_lo ? spa : aa, 6);
+    cpy(data + 12, n_lo ? anonce : snonce, 32);
+    cpy(data + 44, n_lo ? snonce : anonce, 32);
+    const size_t len = WWPA_KCK_LEN + WWPA_KEK_LEN + tk_len;
+    wsae_kdf_sha256(pmk, WWPA_PMK_LEN, "Pairwise key expansion", data, sizeof data, buf, len * 8);
+    cpy(ptk->kck, buf, WWPA_KCK_LEN);
+    cpy(ptk->kek, buf + WWPA_KCK_LEN, WWPA_KEK_LEN);
+    wipe(ptk->tk, sizeof ptk->tk);
+    cpy(ptk->tk, buf + WWPA_KCK_LEN + WWPA_KEK_LEN, tk_len);
+    ptk->tk_len = tk_len;
+    wipe(buf, sizeof buf);
+    return WWPA_OK;
+}
+
 // ---- EAPOL-Key ----
 // Offsets from the start of the EAPOL frame.
 #define F_DESC 4u
@@ -405,6 +427,35 @@ int wwpa_key_mic(const uint8_t kck[WWPA_KCK_LEN], const uint8_t *frame, size_t l
     return WWPA_OK;
 }
 
+int wwpa_key_mic_cmac(const uint8_t kck[WWPA_KCK_LEN], const uint8_t *frame, size_t len, uint8_t mic[WWPA_MIC_LEN])
+{
+    if (!frame || len < F_DATA) return WWPA_ERR_INVAL;
+    static const uint8_t zero[WWPA_MIC_LEN];
+    const uint8_t *v[3] = {frame, zero, frame + F_MIC + WWPA_MIC_LEN};
+    const size_t vl[3] = {F_MIC, WWPA_MIC_LEN, len - F_MIC - WWPA_MIC_LEN};
+    wsae_aes_cmac(kck, 3, v, vl, mic);
+    return WWPA_OK;
+}
+// the MIC of the supplicant's AKM
+static int supp_mic(const wwpa_supp *s, const uint8_t kck[WWPA_KCK_LEN], const uint8_t *frame, size_t len, uint8_t mic[WWPA_MIC_LEN])
+{
+    return s->akm == WWPA_AKM_SAE ? wwpa_key_mic_cmac(kck, frame, len, mic) : wwpa_key_mic(kck, frame, len, mic);
+}
+static int supp_sign(const wwpa_supp *s, const uint8_t kck[WWPA_KCK_LEN], uint8_t *frame, size_t len)
+{
+    uint8_t mic[WWPA_MIC_LEN];
+    const int r = supp_mic(s, kck, frame, len, mic);
+    if (!r) cpy(frame + F_MIC, mic, WWPA_MIC_LEN);
+    return r;
+}
+static int supp_verify(const wwpa_supp *s, const uint8_t kck[WWPA_KCK_LEN], const uint8_t *frame, size_t len)
+{
+    uint8_t mic[WWPA_MIC_LEN];
+    const int r = supp_mic(s, kck, frame, len, mic);
+    if (r) return r;
+    return ct_eq(mic, frame + F_MIC, WWPA_MIC_LEN) ? WWPA_OK : WWPA_ERR_MIC;
+}
+
 int wwpa_key_sign(const uint8_t kck[WWPA_KCK_LEN], uint8_t *frame, size_t len)
 {
     uint8_t mic[WWPA_MIC_LEN];
@@ -460,6 +511,7 @@ void wwpa_supp_init(wwpa_supp *s, const uint8_t pmk[WWPA_PMK_LEN], const uint8_t
 }
 
 void wwpa_supp_clear(wwpa_supp *s) {wipe(s, sizeof *s);}
+void wwpa_supp_set_akm(wwpa_supp *s, unsigned akm) {s->akm = akm == WWPA_AKM_SAE ? WWPA_AKM_SAE : WWPA_AKM_PSK;}
 
 // Key data of M3 can be at most this long (an RSNE, a GTK KDE and room for an IGTK/second RSNE).
 #define MAX_KEY_DATA 512u
@@ -471,7 +523,8 @@ int wwpa_supp_rx(wwpa_supp *s, const uint8_t *frame, size_t len, const uint8_t s
     wwpa_key k;
     int r = wwpa_key_parse(frame, len, &k);
     if (r) return r;
-    if ((k.info & WWPA_KI_VER_MASK) != WWPA_KI_VER_HMAC_SHA1_AES) return WWPA_ERR_PROTO;
+    const uint16_t ver = s->akm == WWPA_AKM_SAE ? 0 : WWPA_KI_VER_HMAC_SHA1_AES;   // SAE: key descriptor version 0 (AKM-defined)
+    if ((k.info & WWPA_KI_VER_MASK) != ver) return WWPA_ERR_PROTO;
     if (!(k.info & WWPA_KI_PAIRWISE) || !(k.info & WWPA_KI_ACK) || (k.info & (WWPA_KI_REQUEST | WWPA_KI_ERROR))) return WWPA_ERR_PROTO;
     // 12.7.2: a frame whose replay counter is not larger than the last valid one is discarded.
     if (s->replay_valid && k.replay <= s->replay) return WWPA_ERR_REPLAY;
@@ -485,15 +538,16 @@ int wwpa_supp_rx(wwpa_supp *s, const uint8_t *frame, size_t len, const uint8_t s
         if (k.info & (WWPA_KI_INSTALL | WWPA_KI_SECURE | WWPA_KI_ENC_DATA)) return WWPA_ERR_PROTO;
         if (!snonce) return WWPA_ERR_INVAL;
         wwpa_ptk t;
-        r = wwpa_ptk_derive(s->pmk, s->aa, s->spa, k.nonce, snonce, 16, &t);
+        r = s->akm == WWPA_AKM_SAE ? wwpa_ptk_derive_sha256(s->pmk, s->aa, s->spa, k.nonce, snonce, 16, &t)
+                                   : wwpa_ptk_derive(s->pmk, s->aa, s->spa, k.nonce, snonce, 16, &t);
         if (r) return r;
-        o.info = WWPA_KI_VER_HMAC_SHA1_AES | WWPA_KI_PAIRWISE | WWPA_KI_MIC;
+        o.info = ver | WWPA_KI_PAIRWISE | WWPA_KI_MIC;
         o.key_len = 0;
         cpy(o.nonce, snonce, 32);
         o.data = s->own_rsne; o.data_len = (uint16_t)s->own_rsne_len;
         const long n = wwpa_key_build(&o, out, cap);
         if (n < 0) {wipe(&t, sizeof t); return (int)n;}
-        wwpa_key_sign(t.kck, out, (size_t)n);
+        supp_sign(s, t.kck, out, (size_t)n);
         cpy(s->anonce, k.nonce, 32);
         cpy(s->snonce, snonce, 32);
         s->tptk = t;
@@ -509,7 +563,7 @@ int wwpa_supp_rx(wwpa_supp *s, const uint8_t *frame, size_t len, const uint8_t s
     const uint16_t need = WWPA_KI_MIC | WWPA_KI_INSTALL | WWPA_KI_SECURE | WWPA_KI_ENC_DATA;
     if ((k.info & need) != need) return WWPA_ERR_PROTO;
     if (cmp(k.nonce, s->anonce, 32)) return WWPA_ERR_PROTO;
-    r = wwpa_key_verify(s->tptk.kck, frame, flen);
+    r = supp_verify(s, s->tptk.kck, frame, flen);
     if (r) return r;
     if (k.data_len < 24 || k.data_len % 8 || k.data_len - 8u > MAX_KEY_DATA) return WWPA_ERR_PROTO;
     uint8_t plain[MAX_KEY_DATA];
@@ -520,10 +574,10 @@ int wwpa_supp_rx(wwpa_supp *s, const uint8_t *frame, size_t len, const uint8_t s
     if (!r && s->ap_rsne_len && (kd.rsne_len != s->ap_rsne_len || cmp(kd.rsne, s->ap_rsne, kd.rsne_len))) r = WWPA_ERR_PROTO;
     if (!r && !kd.gtk_len) r = WWPA_ERR_PROTO;
     if (r) {wipe(plain, sizeof plain); wipe(&kd, sizeof kd); return r;}
-    o.info = WWPA_KI_VER_HMAC_SHA1_AES | WWPA_KI_PAIRWISE | WWPA_KI_MIC | WWPA_KI_SECURE;
+    o.info = ver | WWPA_KI_PAIRWISE | WWPA_KI_MIC | WWPA_KI_SECURE;
     const long n = wwpa_key_build(&o, out, cap);
     if (n < 0) {wipe(plain, sizeof plain); wipe(&kd, sizeof kd); return (int)n;}
-    wwpa_key_sign(s->tptk.kck, out, (size_t)n);
+    supp_sign(s, s->tptk.kck, out, (size_t)n);
     s->replay = k.replay;
     if (out_len) *out_len = (size_t)n;
     if (resend) {wipe(plain, sizeof plain); wipe(&kd, sizeof kd); return WWPA_M4_RESENT;}

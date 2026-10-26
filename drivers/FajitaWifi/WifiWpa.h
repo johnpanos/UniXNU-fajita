@@ -118,6 +118,7 @@ typedef struct {
     uint8_t gtk[32];
     unsigned gtk_len, gtk_idx;
     uint8_t eapol_version;
+    unsigned akm;          // 2 PSK (key descriptor version 2: HMAC-SHA1 MIC, PRF-SHA1); 8 SAE (version 0: AES-CMAC MIC, KDF-SHA256)
 } wwpa_supp;
 void wwpa_supp_init(wwpa_supp *s, const uint8_t pmk[WWPA_PMK_LEN], const uint8_t aa[6], const uint8_t spa[6],
                     const uint8_t *own_rsne, unsigned own_rsne_len, const uint8_t *ap_rsne, unsigned ap_rsne_len);
@@ -129,6 +130,15 @@ int wwpa_supp_rx(wwpa_supp *s, const uint8_t *frame, size_t len, const uint8_t s
                  size_t cap, size_t *out_len);
 // Wipe every key in s.
 void wwpa_supp_clear(wwpa_supp *s);
+// The AKM of the association (after wwpa_supp_init): WWPA_AKM_PSK (default) or WWPA_AKM_SAE.
+#define WWPA_AKM_PSK 2u
+#define WWPA_AKM_SAE 8u
+void wwpa_supp_set_akm(wwpa_supp *s, unsigned akm);
+// SAE / AKMs with the SHA-256 KDF: PTK = KDF-SHA256-<bits>(PMK, "Pairwise key expansion", min(AA,SPA) || max || min(nonces) || max)
+int wwpa_ptk_derive_sha256(const uint8_t pmk[WWPA_PMK_LEN], const uint8_t aa[6], const uint8_t spa[6],
+                           const uint8_t anonce[WWPA_NONCE_LEN], const uint8_t snonce[WWPA_NONCE_LEN], unsigned tk_len, wwpa_ptk *ptk);
+// The EAPOL-Key MIC with AES-128-CMAC (key descriptor version 0 for SAE, 3 for the SHA-256 AKMs)
+int wwpa_key_mic_cmac(const uint8_t kck[WWPA_KCK_LEN], const uint8_t *frame, size_t len, uint8_t mic[WWPA_MIC_LEN]);
 
 #ifdef __cplusplus
 }

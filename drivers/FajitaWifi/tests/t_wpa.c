@@ -258,6 +258,33 @@ static void t_wpa_handshake(void)
     wwpa_supp_clear(&s);
 }
 
+// WPA3-Personal (AKM SAE): key descriptor version 0, KDF-SHA-256 PTK, AES-CMAC MIC, an IGTK KDE in M3 (ignored: BIP is not
+// offloaded); M2 and M4 byte for byte the Python reference's.
+static void t_wpa_handshake_sae(void)
+{
+    wwpa_supp s;
+    uint8_t out[256];
+    size_t n = 0;
+    wwpa_supp_init(&s, V_SAE_PMK, V_AA, V_SPA, V_SAE_RSNE, sizeof V_SAE_RSNE, V_SAE_RSNE, sizeof V_SAE_RSNE);
+    // without the AKM set, the version-0 M1 is refused (version 2 expected)
+    CHECK(wwpa_supp_rx(&s, V_SAE_M1, sizeof V_SAE_M1, V_SNONCE, out, sizeof out, &n) == WWPA_ERR_PROTO);
+    wwpa_supp_set_akm(&s, WWPA_AKM_SAE);
+    CHECK(wwpa_supp_rx(&s, V_SAE_M1, sizeof V_SAE_M1, V_SNONCE, out, sizeof out, &n) == WWPA_GOT_M1);
+    CHECK(n == sizeof V_SAE_M2 && !memcmp(out, V_SAE_M2, sizeof V_SAE_M2));
+    CHECK(wwpa_supp_rx(&s, V_SAE_M3, sizeof V_SAE_M3, NULL, out, sizeof out, &n) == WWPA_DONE);
+    CHECK(n == sizeof V_SAE_M4 && !memcmp(out, V_SAE_M4, sizeof V_SAE_M4));
+    CHECK(!memcmp(s.ptk.tk, V_SAE_TK, 16) && !memcmp(s.ptk.kck, V_SAE_KCK, 16) && s.gtk_len == 16 && !memcmp(s.gtk, V_GTK, 16));
+    // a PSK-style (HMAC-SHA1) MIC on an SAE association is refused
+    uint8_t m3[sizeof V_SAE_M3];
+    memcpy(m3, V_SAE_M3, sizeof m3);
+    wwpa_supp_init(&s, V_SAE_PMK, V_AA, V_SPA, V_SAE_RSNE, sizeof V_SAE_RSNE, V_SAE_RSNE, sizeof V_SAE_RSNE);
+    wwpa_supp_set_akm(&s, WWPA_AKM_SAE);
+    CHECK(wwpa_supp_rx(&s, V_SAE_M1, sizeof V_SAE_M1, V_SNONCE, out, sizeof out, &n) == WWPA_GOT_M1);
+    wwpa_key_sign(V_SAE_KCK, m3, sizeof m3);
+    CHECK(wwpa_supp_rx(&s, m3, sizeof m3, NULL, out, sizeof out, &n) == WWPA_ERR_MIC);
+    wwpa_supp_clear(&s);
+}
+
 void t_wpa(void)
 {
     RUN(t_wpa_sha1_hmac);
@@ -266,4 +293,5 @@ void t_wpa(void)
     RUN(t_wpa_psk_prf);
     RUN(t_wpa_frames);
     RUN(t_wpa_handshake);
+    RUN(t_wpa_handshake_sae);
 }

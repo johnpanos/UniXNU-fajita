@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """gen-wpa-vectors.py: the independent reference for drivers/FajitaWifi/WifiWpa.c's 4-way handshake test. Computes, with
 Python's hashlib/hmac and the `cryptography` package's AES key wrap (not with WifiWpa.c), a complete WPA2-PSK 4-way
-handshake (CCMP, key descriptor version 2) on the IEEE 802.11-2016 Annex J inputs, and writes it as a C header.
+handshake (CCMP, key descriptor version 2) on the IEEE 802.11-2016 Annex J inputs, and a WPA3-Personal one (AKM SAE
+00-0f-ac:8: key descriptor version 0, KDF-SHA-256 PTK, AES-128-CMAC MIC via `cryptography`, PMF with an IGTK KDE) on the
+PMK of the SAE test vector (IEEE 802.11-2020 J.10), and writes them as a C header.
 
   tools/wifi/gen-wpa-vectors.py [--check]     write (or verify) drivers/FajitaWifi/tests/wpa_vectors.h
 
@@ -15,6 +17,8 @@ import sys
 from pathlib import Path
 
 from cryptography.hazmat.primitives.keywrap import aes_key_wrap
+from cryptography.hazmat.primitives.cmac import CMAC
+from cryptography.hazmat.primitives.ciphers import algorithms
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'drivers/FajitaWifi/tests/wpa_vectors.h'
@@ -32,6 +36,20 @@ def eapol_key(info, key_len, replay, nonce, data=b'', version=2, mic=bytes(16)):
     body = bytes([2]) + info.to_bytes(2, 'big') + key_len.to_bytes(2, 'big') + replay.to_bytes(8, 'big') + nonce + \
         bytes(16) + bytes(8) + bytes(8) + mic + len(data).to_bytes(2, 'big') + data
     return bytes([version, 3]) + len(body).to_bytes(2, 'big') + body
+
+
+def kdf_sha256(k, label, data, bits):
+    r, i = b'', 1
+    while len(r) * 8 < bits:
+        r += hmac.new(k, i.to_bytes(2, 'little') + label + data + bits.to_bytes(2, 'little'), 'sha256').digest()
+        i += 1
+    return r[:bits // 8]
+
+
+def sign_cmac(kck, frame):
+    c = CMAC(algorithms.AES(kck))
+    c.update(frame)
+    return frame[:81] + c.finalize() + frame[97:]
 
 
 def sign(kck, frame):
@@ -60,6 +78,21 @@ def main():
     m3 = sign(kck, eapol_key(V | P | INST | ACK | MIC | SEC | ENC, 16, 2, anonce, aes_key_wrap(kek, plain)))
     m4 = sign(kck, eapol_key(V | P | MIC | SEC, 0, 2, bytes(32)))
 
+    # WPA3-Personal: the SAE AKM, PMF required (RSN capabilities MFPC | MFPR), an IGTK KDE in M3
+    spmk = bytes.fromhex('4e4dfab1a2dd8ac1a91790f953faaa452ae5c6873ab75b63605ba663f8a7fe59')
+    sptk = kdf_sha256(spmk, b'Pairwise key expansion', min(aa, spa) + max(aa, spa) + min(anonce, snonce) + max(anonce, snonce), 384)
+    skck, skek, stk = sptk[:16], sptk[16:32], sptk[32:48]
+    srsne = bytes.fromhex('30140100000fac040100000fac040100000fac08c000')
+    igtk = bytes(range(0x30, 0x40))
+    ikde = bytes([0xdd, 4 + 2 + 6 + 16, 0x00, 0x0f, 0xac, 0x09, 0x04, 0x00]) + bytes(6) + igtk   # key id 4, IPN 0
+    splain = srsne + kde + ikde
+    if len(splain) % 8:
+        splain += b'\xdd' + bytes(8 - len(splain) % 8 - 1)
+    sm1 = eapol_key(P | ACK, 16, 1, anonce)
+    sm2 = sign_cmac(skck, eapol_key(P | MIC, 0, 1, snonce, srsne))
+    sm3 = sign_cmac(skck, eapol_key(P | INST | ACK | MIC | SEC | ENC, 16, 2, anonce, aes_key_wrap(skek, splain)))
+    sm4 = sign_cmac(skck, eapol_key(P | MIC | SEC, 0, 2, bytes(32)))
+
     def arr(name, b):
         rows = ['    ' + ', '.join('0x%02x' % x for x in b[i:i + 12]) + ',' for i in range(0, len(b), 12)]
         return 'static const uint8_t %s[%d] = {\n%s\n};\n' % (name, len(b), '\n'.join(rows))
@@ -70,7 +103,9 @@ def main():
             + ''.join(arr(n, b) for n, b in [('V_PMK', pmk), ('V_AA', aa), ('V_SPA', spa), ('V_ANONCE', anonce),
                                              ('V_SNONCE', snonce), ('V_KCK', kck), ('V_KEK', kek), ('V_TK', tk),
                                              ('V_RSNE', rsne), ('V_GTK', gtk), ('V_M1', m1), ('V_M2', m2), ('V_M3', m3),
-                                             ('V_M4', m4)])
+                                             ('V_M4', m4), ('V_SAE_PMK', spmk), ('V_SAE_KCK', skck), ('V_SAE_TK', stk),
+                                             ('V_SAE_RSNE', srsne), ('V_SAE_M1', sm1), ('V_SAE_M2', sm2), ('V_SAE_M3', sm3),
+                                             ('V_SAE_M4', sm4)])
             + '#endif\n')
     if a.check:
         if not OUT.is_file() or OUT.read_text() != text:
