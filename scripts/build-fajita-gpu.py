@@ -193,7 +193,13 @@ def main():
         path = FIRMWARE / name
         blob = path.read_bytes() if path.is_file() else b''
         if len(blob) != size or hashlib.sha256(blob).hexdigest() != digest:
-            print(f'WARNING: {name} missing or not the pinned file: {label} left out')
+            # Fatal unless asked for: a firmware-less archive builds, then the kernel link fails on the weak references far from here
+            # (a new worktree whose ios16/.cache was an empty directory instead of the shared one, 2026-10-26).
+            if os.environ.get('FAJITA_GPU_NO_FIRMWARE') != '1':
+                raise SystemExit(f'{path}: missing or not the pinned file ({label}). In a new worktree, link ios16/.cache to the '
+                                 f'main tree\'s (ln -s ../../UniXNU-fajita-ios16/ios16/.cache ios16/.cache); '
+                                 f'FAJITA_GPU_NO_FIRMWARE=1 builds without it on purpose.')
+            print(f'WARNING: {name} missing or not the pinned file: {label} left out (FAJITA_GPU_NO_FIRMWARE=1)')
             continue
         embedded[label] = name
         assembly += ['.p2align 12', '.globl _' + label, '_' + label + ':', '.incbin ' + json.dumps(str(path)), '_' + label + '_end:',

@@ -69,6 +69,8 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Use real git worktrees (`git worktree add`), never copied directories.
 - Two agents never edit the same worktree at the same time. The second agent works in its own worktree on a short-lived branch
   (`git worktree add ../UniXNU-fajita-<topic> -b <topic> origin/ios16-port`), and merges into ios16-port when a piece is done.
+  A new worktree needs the shared inputs: `ln -s ../../UniXNU-fajita-ios16/ios16/.cache ios16/.cache` (firmware, IPSW), run in the
+  new worktree (an empty `ios16/.cache` once built a GPU archive without firmware, and the kernel failed to link far from the cause).
   In a shared worktree, one agent's commit of a shared file (board.toml) sweeps up the other's half-finished edit to it: the
   Wi-Fi archive line once landed in a GPU commit before its script existed, and HEAD stopped building. A copy shares or loses the gitdir and its submodule state.
 - Commit explicit paths (`git add PATH`), never `git commit -a`. In trees with submodules, `-a` silently reverts submodule pins
