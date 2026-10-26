@@ -284,10 +284,16 @@ static int sample(int pid, double seconds, int hz, int all) {
   kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
   if (kr) { printf("task_for_pid(%d) failed: %#x\n", pid, kr); return 1; }
   struct task_dyld_info info; mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-  uint64_t slide = 0;
+  uint64_t slide = 0, mainbase = 0;
   if (!task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &count)) {
     struct dyld_all_image_infos all; mach_vm_size_t got = 0;
-    if (!mach_vm_read_overwrite(task, info.all_image_info_addr, sizeof all, (mach_vm_address_t)&all, &got)) slide = all.sharedCacheSlide;
+    if (!mach_vm_read_overwrite(task, info.all_image_info_addr, sizeof all, (mach_vm_address_t)&all, &got)) {
+      slide = all.sharedCacheSlide;
+      struct dyld_image_info first; // infoArray[0] is the main executable: its frames print as main+offset on the host
+      if (all.infoArray && all.infoArrayCount &&
+          !mach_vm_read_overwrite(task, (mach_vm_address_t)all.infoArray, sizeof first, (mach_vm_address_t)&first, &got))
+        mainbase = (uint64_t)first.imageLoadAddress;
+    }
   }
   enum { kMax = 4096 };
   struct sample_stack *stacks = calloc(kMax, sizeof *stacks);
@@ -340,7 +346,8 @@ static int sample(int pid, double seconds, int hz, int all) {
     vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof *list);
     usleep((useconds_t)(1000000 / hz));
   }
-  printf("sample pid %d: %u rounds over %.1f s, slide %#llx, %u threads, %u distinct stacks%s\n", pid, rounds, seconds, (unsigned long long)slide, nthreads,
+  printf("sample pid %d: %u rounds over %.1f s, slide %#llx, main %#llx, %u threads, %u distinct stacks%s\n", pid, rounds, seconds,
+         (unsigned long long)slide, (unsigned long long)mainbase, nthreads,
          nstacks, overflow ? " (table full: some dropped)" : "");
   for (unsigned t = 0; t < nthreads; ++t) {
     if (!threads[t].running && !all) continue;

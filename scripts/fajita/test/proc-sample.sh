@@ -21,6 +21,7 @@ import re, subprocess, sys
 raw, board = sys.argv[1], sys.argv[2]
 lines = open(raw, errors='replace').read().splitlines()
 slide = next((m.group(1) for l in lines for m in [re.search(r'slide (0x[0-9a-f]+)', l)] if m), '0x0')
+mainbase = int(next((m.group(1) for l in lines for m in [re.search(r'main (0x[0-9a-f]+)', l)] if m), '0x0'), 16)
 addrs = sorted({a for l in lines if l.startswith('  ') and ':' in l for a in l.split(':', 1)[1].split()})
 names = {}
 if addrs:
@@ -35,7 +36,10 @@ for l in lines:
         n, frames = l.split(':', 1)
         print('  %s samples:' % n.strip())
         for a in frames.split():
-            print('      %-12s %s' % (a, names.get(a, '?')))
+            n = names.get(a, '?')
+            if mainbase and 'not in any image' in n:   # the process's own executable: offset from its load address (for dsc-disasm/otool)
+                n = 'main +%#x' % (int(a, 16) + int(slide, 16) - mainbase)
+            print('      %-12s %s' % (a, n))
     else:
         print(l)
 EOF
