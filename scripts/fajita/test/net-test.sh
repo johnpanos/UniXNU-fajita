@@ -75,7 +75,7 @@ stage_usbnet() {
   else
     say "build: --test usb-net=1 -> $OUT"
     git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
-    FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 > "$RES/build.txt" 2>&1 \
+    FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 2>&1 | tee "$RES/build.txt" \
       || { verdict usbnet FAIL "build failed (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; return; }
   fi
   FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { verdict usbnet FAIL "session start failed"; return; }
@@ -97,7 +97,7 @@ stage_ios() {
   else
     say "build: --test usb-net=1 fajita-net=usb -> $OUT"
     git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
-    FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 fajita-net=usb > "$RES/build.txt" 2>&1 \
+    FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 fajita-net=usb 2>&1 | tee "$RES/build.txt" \
       || { verdict ios FAIL "build failed (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; return; }
   fi
   FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { verdict ios FAIL "session start failed"; return; }

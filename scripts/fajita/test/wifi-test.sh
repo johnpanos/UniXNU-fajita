@@ -77,7 +77,7 @@ build() {
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
   FAJITA_OUT=$OUT FAJITA_AUTORESET=${WIFI_AUTORESET:-900} "$TD/../build.sh" --test --skip-plugin "${args[@]}" \
-    > "$RES/build.txt" 2>&1 || { say "BUILD FAILED (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; exit 1; }
+    2>&1 | tee "$RES/build.txt"; [ "${PIPESTATUS[0]}" = 0 ] || { say "BUILD FAILED (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; exit 1; }
   say "build: $(grep -a '^\[' "$RES/build.txt" | tail -1 | sed 's#.*-> ##')"
 }
 
