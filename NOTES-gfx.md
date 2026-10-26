@@ -301,3 +301,38 @@ CA's ring (`can_update_`, two entries) already has N+1 submitted. Accepting a se
   boot, while the display kept delivering it to the registered client. With frame info on, both slots now return success
   (native_legacy_frame_info_leaf counts them; gfx-scene records fi_leaf292/fi_leaf211). That is what fi1 and fi2 test now; d6763c9's
   null result predates it.
+
+## Final-Data baseline and arms (2026-10-26, Data after the daemons agent's reset, ios16-port 4dc7801 merged, stack a5b51ef)
+
+**Blank web content:** on the final Data the plugin's m2v cache directory did not exist: the plugin made it with one mkdir of
+`~/Library/Caches/com.apple.backboardd`, whose parent chain a fresh Data store lacks in part, so every candidate after it was tried
+(temp directories). NativeMetal ec8c726 creates the whole path and logs the directory it used and why others were refused. With it
+(the b0 image) Safari draws news.ycombinator.com and apple.com fully; backboardd's cache is `/var/mobile/Library/Caches/
+com.apple.backboardd/m2v`, Safari's WebKit GPU process uses its container's tmp/m2v. The old-stand-ins A/B (sbxold) was not
+needed to make pages draw; whether the sandbox change alone blanked them is not proven either way.
+
+**b0 (b0f):** arm image .cache/fajita-out-gfx-b0 (fajita-frame-info=0, autoreset 3000 s), REPEAT=2, full suite, settled start
+(busiest other process 21% mobileassetd). ALL 7640 frames, 51.2 fps, 1% low 10.8, 0.1% low 6.3, >16.7 970, >33 142.
+
+**CAWATCH pass (cawatch-b0, b0 image, 9 scenes):** first cause of each 2+ tick gap between renders: LATE 178 (the render on the timer
+thread ran past the next tick: the CPU side of a frame over one period), NOTDUE 90 (a client's commit came after the tick), CANT 23,
+IDLE 11, THRESHOLD 0. Phase reference never set (frame info off); the timer's phase against the panel drifts from scene to scene.
+In web-heavy the timer's own interval was 22.9 ms (CA lowered the rate). So the 2-tick gaps are mostly render-server CPU time per
+frame and late client commits, not the swap hand-off.
+
+| arm (all on the final Data) | scenes | ALL fps | 1% low | 0.1% low | >16.7 | >33 |
+| --- | --- | --- | --- | --- | --- | --- |
+| b0 (frame info off) | all 9 x2, Wi-Fi | 51.2 | 10.8 | 6.3 | 970 | 142 |
+| fi1 (frame info, generation id, slots 292/211 answered) | all 9 x2, Wi-Fi | 50.6 | 10.3 | 6.6 | 942 | 181 |
+| fi2 (frame info, request swap id) | all 9 x2, Wi-Fi | 51.3 | 10.4 | 6.9 | 941 | 158 |
+| b0, offline five (home applib settings calendar maps x2) | 5 x2 of the Wi-Fi run | 49.5 | 10.4 | 6.5 | 647 | 69 |
+| fi1, offline five | 5 x2 of the Wi-Fi run | 49.7 | 10.0 | 6.9 | 595 | 80 |
+| fi2, offline five | 5 x2 of the Wi-Fi run | 49.8 | 9.8 | 6.7 | 595 | 76 |
+| timer (CA_FORCE_TIMER), offline five | 5 x2, NO Wi-Fi boot | 50.5 | 9.6 | 5.7 | 550 | 66 |
+| m2v (draw-cost translator), offline five | 5 x2, NO Wi-Fi boot | 52.2 | 10.9 | 6.0 | 433 | 58 |
+
+fi1/fi2: CA now registers frame info (slots 292 and 211 answered: 3 and 6 calls), fi2's id never differed from the generation; no
+measurable change, >33 slightly worse in fi1. timer and m2v could not join Wi-Fi (KittyCorner's 2.4 GHz BSS: SAE commits unanswered,
+a Wi-Fi agent owns it), so they ran the five offline scenes on boots without Wi-Fi: not full results, and a boot without Wi-Fi has
+less background work than b0's. Against b0's same scenes m2v has a third fewer frames over a vsync (433 vs 647) and +2.7 fps, and
+beats the timer arm booted the same way (550): the strongest candidate; the web scenes are to be rerun for both once Wi-Fi works.
