@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
       CFStringRef k = CFStringCreateWithCString(NULL, argv[i], kCFStringEncodingUTF8);
       CFPreferencesSetAppValue(k, eq[1] == 'd' ? NULL : eq[1] == '1' ? kCFBooleanTrue : kCFBooleanFalse, app);
       printf("%s %s = %c\n", argv[2], argv[i], eq[1]);
+      CFPreferencesAppSynchronize(app);   // per key: with one synchronize at the end only the first of several removals reached the plist
     }
     printf("synchronize: %d\n", CFPreferencesAppSynchronize(app));
     return 0;

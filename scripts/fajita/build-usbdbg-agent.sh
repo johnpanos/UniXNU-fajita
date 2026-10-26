@@ -32,5 +32,11 @@ clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -
 codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjbundle \
   --entitlements "$BOARD/package/usb-debug-tools/fjdbg-agent-entitlements.plist" "$T/fjbundle"
 cp "$T/fjbundle" "$(dirname "$OUT")/fjbundle"
+# fjsurface: every process's IOSurfaces (size, format, purgeable state, pixel census, raw dump); push with session.sh push
+clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -Werror \
+  -framework CoreFoundation -framework CoreGraphics -framework IOSurface "$BOARD/package/usb-debug-tools/fjsurface.c" -o "$T/fjsurface"
+codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjsurface \
+  --entitlements "$BOARD/package/usb-debug-tools/fjsurface-entitlements.plist" "$T/fjsurface"
+cp "$T/fjsurface" "$(dirname "$OUT")/fjsurface"
 codesign -dvvv "$OUT" 2>&1 | grep -E 'CDHash|Identifier' || true
 echo "built $OUT"

@@ -136,6 +136,17 @@ if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-wifid=1'; then
 else
   python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop fjdbg/ >/dev/null
 fi
+# The processes besides the render server that get their own GPU device (addons/NativeAdrenoMetal.clients, read by NativeAdrenoMetalPlugin.mm
+# listedClient; a listed process takes one of the three 170 MiB client windows, NativeAdrenoPublish.cpp kClientWindows, while its device
+# lives). WebKit draws its tiles through Metal: CoreGraphics renders the deep-colour backing stores (RGB10 'w30r' IOSurfaces, chosen for this
+# P3 display) with Metal, in com.apple.WebKit.GPU (the GPU process, Safari's default) or in com.apple.WebKit.WebContent (GPU process off).
+# Without a device there every tile stayed zero and Safari's page area was black (NOTES-wifi.md section 9).
+# FAJITA_GPU_CLIENTS replaces the list (process names as getprogname() gives them).
+GPU_CLIENTS=${FAJITA_GPU_CLIENTS:-ngpu-metal com.apple.WebKit.GPU com.apple.WebKit.WebContent}
+printf '%s\n' $GPU_CLIENTS > "$OUT/gpu-clients"
+python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop addons/NativeAdrenoMetal.clients \
+  "addons/NativeAdrenoMetal.clients=$OUT/gpu-clients:644" >/dev/null
+say "gpu clients: $GPU_CLIENTS"
 say "payload: ${ARGS[*]}"
 FAJITA_EARLY_WDOG=1 FAJITA_PANIC_RESET=${FAJITA_PANIC_RESET:-30} UNIXNU_UNIQUE_CHIP_ID=$(cat "$IN/platform-seed") \
   ./unixnu build payload -D "$D16" --uefi "$UNIXNU_UEFI" --trust-cache "$BOARD/.cache/trust/original-static-system.bundle" \

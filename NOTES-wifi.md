@@ -764,7 +764,7 @@ backup. Keep every run unattended and self-recovering (`--test`, autoreset + wat
   GPU addon path; keep it additive + default-off and clear it with the lead/GPU agent before committing.
 - iOS option (a) IO80211 remains research; (b) IOEthernetController is the first target.
 
-## 9. Safari: WebKit XPC services crashed at launch (fixed 2026-10-26)
+## 9. Safari: WebKit XPC services crashed at launch, the hang, the black page (all fixed 2026-10-26)
 
 Symptom: Safari opens; tapping a favorite gives a blank page, and every `com.apple.WebKit.Networking` / `WebContent` process dies
 at once: `CRASH ... sig11 ... E92000005 F8` (NULL + 8 read in CoreFoundation, called from WebKit +0x1e6dac).
@@ -808,18 +808,40 @@ build-fajita-verified-root.py, NativeUfs) and mount it at `/private/preboot/Cryp
 host-side extraction into the Data seed is not an option without an LZBITMAP decoder. Result: Safari stays responsive, apple.com loads over
 Wi-Fi (padlock, title "iPhone Duo - Apple", tab switcher shows the page), no CRASH rows.
 
-Open (next blocker, investigated 2026-10-26, not solved): Safari's page content is black although the page loads (padlock, title "Apple" /
-"Example Domain", back button live, tab switcher responsive). Findings:
-- Not the WebKit GPU process: `fjbundle --prefs com.apple.mobilesafari WebKit{,Experimental,Internal}UseGPUProcessFor{DOMRendering,CanvasRendering,Media,WebGL}Enabled=0`
-  (runs as uid 501 through cfprefsd; `=d` removes the key again) stops com.apple.WebKit.GPU from being spawned (spindump), and the live view is still black.
-  With it off the tab thumbnail was white once (apple.com), black for example.com; with it on the thumbnail had white stripes on black.
-- Not the GPU plugin's CPU-held shortcut: gpu-env `NGPU_CPU_HELD=0` (push to /private/var/ngpu/gpu-env, `ngpu-metal killall backboardd`) changes nothing.
-  (The phone's gpu-env was emptied and the Safari keys removed again afterwards.)
-- Not a sandbox refusal: minisandbox logs no refusal for any WebKit process; no CRASH rows; WebContent, Networking idle in their run loops.
-- The DOM exists (the URL bar's "On This Page (2 matches)" counts text of the page) and the loaded page's title and favicon reach Safari, so
-  WebContent loads and lays out; the pixels are black/empty in both the live view and WebKit's own snapshot (the tab thumbnail).
-  Open questions for the next person: does WebContent ever run a rendering update (display-link/CADisplayLink from the UI process,
-  RenderingUpdateScheduler), is its remote layer tree commit received (backing store IOSurface from WebContent to Safari to backboardd),
-  and do the IOSurface pages WebContent writes reach backboardd's import (the plugin logs `ngpu: import at iova ... unmapped (page now 0)`
-  during page loads: NativeAdrenoVm.cpp publishMapped, plugin area). Settings > General > About > Legal has no web view on this
-  iPhone model name, so no second WKWebView screen was found to compare.
+Third blocker, the black page (fixed 2026-10-26): the page loads (padlock, title "Apple" / "Example Domain", find-on-page counts its text)
+but the content area is black. Earlier findings that still hold: not the GPU process as such, not the plugin's CPU-held textures
+(`NGPU_CPU_HELD=0`), not the sandbox; and not the kernel's import maintenance either (`kcmd gpu set ro-skip 0`, `wpub-skip 0`,
+`uncached-skip 0` live: still black). The `ngpu: import at iova ... unmapped (page now 0)` lines are not it: every session logs its
+cap of eight, Safari or not (an import's pages are held by its own memory entry, so the owner's unmapped address is harmless there).
+
+Cause: WebKit draws its tiles into deep-colour backing stores because this board's display is P3 (`artwork-display-gamut` P3 in the
+device tree): opaque tiles are RGB10 IOSurfaces (`w30r`, 1125x1536 and 1125x1164), and CoreGraphics renders RGB10 IOSurface contexts
+through Metal (CGIOSurfaceContextCreate there loads QuartzCore, IOSurfaceAccelerator and Metal, and Metal loads the GPU plugin). The plugin
+gives a Metal device only to the render server and to the processes named in `addons/NativeAdrenoMetal.clients` (NativeAdrenoMetalPlugin.mm
+`listedClient`), which held only `ngpu-metal`. With no device, CoreGraphics' drawing silently writes nothing: every tile stays zero (the
+render server imports them fine and draws them, as black). Who draws depends on Safari's preferences: by default the WebKit GPU process
+(`com.apple.WebKit.GPU`; the WebContent processes then never load Metal), with the GPU-process preferences off WebContent itself; neither
+was listed, which is why turning the GPU process off changed nothing. With `WebKitAcceleratedDrawingEnabled=0` (bitmap backing stores
+in shared memory, drawn by the CPU) pages drew, which pointed at the IOSurface path.
+
+Fix: `scripts/fajita/build.sh` writes the client list into the boot add-on: `ngpu-metal com.apple.WebKit.GPU com.apple.WebKit.WebContent`
+(`FAJITA_GPU_CLIENTS` replaces it; the build prints `gpu clients:`). A listed process takes one of the three 170 MiB client windows
+(NativeAdrenoPublish.cpp `kClientWindows`) while its device lives: with Safari's defaults the GPU process takes one, an idle WebContent none.
+The list on the phone is the add-on's, copied at boot (`/System/Library/Extensions/NativeAdrenoMetal.clients`): a push to
+/private/var/ngpu/addons does not change the running view, rebuild the payload.
+
+Proof (session-032805, Wi-Fi up, Safari defaults with the GPU process): apple.com drawn (`.cache/webpaint/safari-apple-fixed.png`);
+with the GPU process off (WebContent drawing, session-031744) example.com and apple.com draw too, and scroll; there the probe's census showed
+the w30r tiles at nz1000 (non-zero words per mille) against nz0 in the sessions before the fix. fps.sh unchanged: home motion 54.7 [50.0-57.2], App Library motion
+51.8 [42.0-58.4]. Still open, separate: a one-pixel dark line at some tile seams with WebContent drawing (GPU process off); product images
+on apple.com are missing (image decode, not the tiles); the tab overview's background is pink.
+
+Tools: `package/usb-debug-tools/fjsurface.c` (built by build-usbdbg-agent.sh): `--cg w30r|BGRA` draws with CoreGraphics into a new surface
+and counts the result (the w30r test reproduces the zero tiles in any unlisted process; list the tool's name in FAJITA_GPU_CLIENTS to see it
+draw), `--share` checks cross-process IOSurface sharing (passes), `--images PID [FILTER]` lists another process's loaded images (whether
+Metal and NativeAdrenoMetal are in it), `--scan` / `--dump` (IOSurfaceLookup by ID is refused for other processes' surfaces here: "IOSurface
+disallowing global lookups"). `scripts/fajita/test/safari-page.sh OUT.png [open|apple|reload|wake]` wakes, opens Safari, screenshots and
+prints the SI/HC rows; `tools/gpu/surface-png.py` turns a raw dump into a PNG. The plugin's SI/HC telemetry rows (NativeMetal
+NativeBridgeMetalFrontend.mm `probeSurface`): the last large surface imports with format, size, seed and purgeable state; `NGPU_SURFACE_PROBE=1`
+in gpu-env adds the pixel census. `fjbundle --prefs` now synchronizes per key (with one synchronize at the end, only the first of several
+`=d` removals reached the plist).

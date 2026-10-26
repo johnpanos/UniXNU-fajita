@@ -37,6 +37,7 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 | `fps.sh` | the standard frame-rate benchmark: home page 1 <-> 2 swipes, then App Library scroll |
 | `gpu-ab.sh ENV...` | A/B plugin settings in one session: frame rate, GPU busy, screenshot diff per variant |
 | `settings-scroll.sh NAME` | correctness pass: open Settings, scroll, screenshot each step |
+| `safari-page.sh OUT.png [open\|apple\|reload]` | open Safari on a held session, screenshot the page, print the plugin's surface rows (SI/HC) |
 | `perf.py`, `passes.py`, `ts.py` | GPU counters, per-pass timing, timestamps |
 | `rows.py` | the Metal frontend's telemetry rows |
 | `to-fastboot.sh` | get the phone back to fastboot |
