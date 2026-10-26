@@ -242,7 +242,7 @@ static void t_wmi_ready_scan(void)
     w32(h, 6); w32(h + 4, 40); w32(h + 8, 0); w32(h + 12, 1); w32(h + 16, 10); w32(h + 20, 0);
     uint8_t *f = put_tlv(ev + 4 + 44, WA_WMI_TLV_TAG_ARRAY_BYTE, 12);
     memcpy(f, "0123456789", 10);
-    CHECK(wwmi_rx(w, ev, 4 + 44 + 4 + 12) == 0 && g_nev == 3 && g_ev[2].type == WWMI_EV_MGMT_RX && g_ev[2].a == 6 && g_ev[2].b == 40 &&
+    CHECK(wwmi_rx(w, ev, 4 + 44 + 4 + 12) == 0 && g_nev == 3 && g_ev[2].type == WWMI_EV_MGMT_RX && g_ev[2].a == 2437 &&   /* channel 6 */ g_ev[2].b == 40 &&
           g_ev[2].len == 10 && !memcmp(g_ev[2].data, "0123456789", 10) && g_ev[2].d == 0);
     w32(h + 16, 13);   // buf_len beyond the array
     CHECK(wwmi_rx(w, ev, 4 + 44 + 4 + 12) == WWMI_ERR_PROTO);

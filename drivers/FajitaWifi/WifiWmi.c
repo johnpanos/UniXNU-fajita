@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // WMI-TLV, station path, after ath10k wmi-tlv.c and wmi.c (Linux v6.16). See WifiWmi.h.
 #include "WifiWmi.h"
+
+// wmi_tlv_mgmt_rx_ev.channel is the channel number (ath10k_wmi_event_mgmt_rx: ieee80211_channel_to_frequency); a value
+// that already looks like a frequency is kept.
+static uint32_t chan_to_freq(uint32_t ch)
+{
+    if (ch >= 1 && ch <= 13) return 2407 + 5 * ch;
+    if (ch == 14) return 2484;
+    if (ch >= 36 && ch <= 177) return 5000 + 5 * ch;
+    return ch;
+}
 #include "WifiAth10kIds.h"
 
 static void zero(void *p, size_t n) {uint8_t *b = p; while (n--) *b++ = 0;}
@@ -198,7 +208,7 @@ int wwmi_rx(wwmi *w, const uint8_t *d, uint32_t len)
         if (!h || !f) {rc = WWMI_ERR_PROTO; break;}
         const uint32_t buf_len = g32(h->p + 16);
         if (buf_len > f->len) {rc = WWMI_ERR_PROTO; break;}
-        ev.type = WWMI_EV_MGMT_RX; ev.a = g32(h->p); ev.b = g32(h->p + 4); ev.c = g32(h->p + 8);
+        ev.type = WWMI_EV_MGMT_RX; ev.a = chan_to_freq(g32(h->p)); ev.b = g32(h->p + 4); ev.c = g32(h->p + 8);
         ev.d = g32(h->p + 20);
         ev.data = f->p; ev.len = buf_len;
         emit(w, &ev);

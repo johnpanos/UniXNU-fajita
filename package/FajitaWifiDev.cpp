@@ -152,7 +152,7 @@ uint32_t smmuFaults()
     const uintptr_t smmu = gSmmu.va;
     const uint32_t idr1 = *reinterpret_cast<volatile uint32_t *>(smmu + 0x24);
     const unsigned pages = 1u << (((idr1 >> 28) & 7) + 1);
-    return *reinterpret_cast<volatile uint32_t *>(smmu + (pages + unsigned(gSmmuBank)) * 4096 + 0x58);
+    return *reinterpret_cast<volatile uint32_t *>(smmu + (pages + unsigned(gSmmuBank)) * 4096 + 0x58) & ~0x600u;   // FORMAT (bits 10:9) is not a fault
 }
 
 uint32_t ioRdRaw(uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
@@ -203,7 +203,8 @@ extern "C" int fajita_wifi_dev_start(void)
     bzero(reinterpret_cast<void *>(gArena.va), FW_WLAN_DMA_SIZE);
     __asm__ volatile("dsb sy" ::: "memory");
     note("FW6 arena zeroed; CE0 sr_size %x ctrl1 %x intr %x", ioRdRaw(0x240000 + 0x08), ioRdRaw(0x240000 + 0x18), ioRdRaw(0x24c000));
-    const wdev_ops ops = {nullptr, devNow, devRandom, devRx, devLink, devLog, devAlloc, devFree};
+    // the firmware's READY carries no MAC on this phone: a locally administered one (FajitaNet's USB en0 is ...:02)
+    const wdev_ops ops = {nullptr, devNow, devRandom, devRx, devLink, devLog, devAlloc, devFree, {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x03}};
     const wce_io io = {nullptr, ioRd, ioWr, ioBarrier};
     IOLockLock(gLock);
     const int r = wdev_start(&gDev, &ops, &io, reinterpret_cast<void *>(gArena.va), FW_WLAN_DMA_PHYS, static_cast<uint32_t>(FW_WLAN_DMA_SIZE));
@@ -234,9 +235,9 @@ extern "C" void fajita_wifi_dev_poll(void)
     if (t - last >= 1000) {
         last = t;
         const wce &ce = gDev.ce;
-        row(8, "FW6 dev %s%s%s mac %02x:%02x:%02x:%02x:%02x:%02x htc %d eid htt%u wmi%u wmi cmds%u ev%u bad%u unk%u(%x) chunks%u htt %u rx%u tx%u arena %u/%u ce rx%u/%u/%u tx%u smmu-fsr %x",
+        row(8, "FW6 dev %s%s%s mac %02x:%02x:%02x:%02x:%02x:%02x%s htc %d eid htt%u wmi%u wmi cmds%u ev%u bad%u unk%u(%x) chunks%u htt %u rx%u tx%u arena %u/%u ce rx%u/%u/%u tx%u smmu-fsr %x",
             wdev_state_name(gDev.state), gDev.state == WDEV_FAILED ? " in " : "", gDev.state == WDEV_FAILED ? wdev_state_name(gDev.failed_in) : "",
-            gDev.mac[0], gDev.mac[1], gDev.mac[2], gDev.mac[3], gDev.mac[4], gDev.mac[5], gDev.htc.state, gDev.htt_eid, gDev.wmi_eid,
+            gDev.mac[0], gDev.mac[1], gDev.mac[2], gDev.mac[3], gDev.mac[4], gDev.mac[5], gDev.mac_fallback ? "(laa)" : "", gDev.htc.state, gDev.htt_eid, gDev.wmi_eid,
             gDev.wmi.cmds, gDev.wmi.events, gDev.wmi.bad_events, gDev.wmi.unknown_events, gDev.wmi.last_unknown_id, gDev.wmi.nchunks,
             gDev.htt.state, gDev.htt.rx_frames, gDev.htt.tx_frames, gDev.dma.used, gDev.dma.size, ce.pipe[1].rx, ce.pipe[2].rx, ce.pipe[5].rx,
             ce.pipe[0].tx + ce.pipe[3].tx + ce.pipe[4].tx, smmuFaults());
@@ -272,6 +273,11 @@ size_t kcmdDev(const char *args, size_t, char *out, size_t cap)
             ssid[k] = 0;
             n += snprintf(out + n, cap - n, "  %02x:%02x:%02x:%02x:%02x:%02x %4u MHz %4d dBm %s%s '%s'\n", b.bssid[0], b.bssid[1], b.bssid[2],
                           b.bssid[3], b.bssid[4], b.bssid[5], b.freq, b.rssi, b.rsn_len ? (b.rsn_ok ? "wpa2" : "rsn?") : "open", b.ht ? " ht" : "", ssid);
+            if (b.rsn_len && !b.rsn_ok && n + 3 * b.rsn_len + 12 < cap) {   // why the RSN element was not usable
+                n += snprintf(out + n, cap - n, "    rsn");
+                for (unsigned k = 0; k < b.rsn_len; ++k) n += snprintf(out + n, cap - n, " %02x", b.rsn[k]);
+                n += snprintf(out + n, cap - n, "\n");
+            }
         }
     } else {
         n = snprintf(out, cap, "%s%s\n%s\n", gText, fajita_wifi_rows[8], fajita_wifi_rows[9]);

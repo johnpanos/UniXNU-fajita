@@ -112,8 +112,8 @@ static void fw_wmi(wfw *f, const uint8_t *cmd, uint32_t len)
         ++g->scans;
         send_scan_event(g, WA_WMI_SCAN_EVENT_STARTED, 0);
         send_scan_event(g, WA_WMI_SCAN_EVENT_FOREIGN_CHANNEL, 2437);
-        send_beacon(g, g->ssid, 2437, 50);
-        send_beacon(g, "", 2437, 52);   // a hidden-SSID beacon of another BSS... same BSSID here: must not wipe the SSID
+        send_beacon(g, g->ssid, 6, 50);   // the firmware reports the channel number
+        send_beacon(g, "", 6, 52);   // a hidden-SSID beacon of another BSS... same BSSID here: must not wipe the SSID
         send_scan_event(g, WA_WMI_SCAN_EVENT_COMPLETED, 0);
     }
 }
@@ -151,7 +151,7 @@ static rig *new_rig(const char *ssid)
 }
 static int start(rig *g)
 {
-    const wdev_ops ops = {g, tnow, trandom, NULL, tlink, NULL, talloc, tfree};
+    const wdev_ops ops = {g, tnow, trandom, NULL, tlink, NULL, talloc, tfree, {0x02, 0xfa, 0, 0, 0, 1}};
     const wce_io io = wsim_io(&g->s);
     return wdev_start(&g->d, &ops, &io, g->s.mem, g->s.iova, g->s.size);
 }

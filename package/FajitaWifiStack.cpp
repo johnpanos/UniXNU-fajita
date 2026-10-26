@@ -364,7 +364,7 @@ extern "C" void fajita_wifi_smp2p_diag(char *buf, size_t cap)
     volatile void *cr = wsmem_get(&gSmem, 1, 421, &sz, &err);
     if (!cr) cr = wsmem_get(&gSmem, WSMEM_GLOBAL_HOST, 421, &sz, &err);
     if (cr && sz && at + 30 < cap) {
-        char s[64];
+        char s[200];
         for (unsigned i = 0; i < sizeof s - 1 && i < sz; ++i) {const char c = ((volatile const char *)cr)[i]; s[i] = c >= 32 && c < 127 ? c : (c ? '?' : 0); s[i + 1] = 0;}
         snprintf(buf + at, cap - at, " | crash421 '%s'", s);
     }
@@ -481,6 +481,17 @@ extern "C" void fajita_wifi_stack(unsigned stage)
                 snprintf(svcs + strlen(svcs), sizeof svcs - strlen(svcs), "%s%x", i ? "," : "", gSeen[i].service);
             uint32_t bits = 0;
             if (gSmp2p.in) {uint32_t ch; wsmp2p_take(&gSmp2p, "slave-kernel", &bits, &ch);}
+            static bool fatalShown;
+            if ((bits & 1) && !fatalShown) {   // the modem's fatal bit: its crash reason is SMEM item 421 (qcom_q6v5 fatal handler)
+                fatalShown = true;
+                char diag[400];
+                fajita_wifi_smp2p_diag(diag, sizeof diag);
+                IOLog("fajita-wifi: FW3 MODEM FATAL (smp2p bits %x) %s\n", bits, diag);
+                strlcpy(fajita_wifi_rows[10], "FW3 MODEM FATAL: ", sizeof fajita_wifi_rows[10]);
+                const char *cr = diag;
+                for (const char *q = diag; *q; ++q) if (!strncmp(q, "crash421", 8)) {cr = q; break;}
+                strlcat(fajita_wifi_rows[10], cr, sizeof fajita_wifi_rows[10]);
+            }
             row(4, "FW3 smp2p %x glink v%s fifo1 %s rx%u tx%u err%u[%s] ipcrtr %s qrtr hello %d rx%u bad%u drop%u flowfull%u txqfull%u smp2p-over%u servers %s%s",
                 bits, gGlink.version_acked ? "1" : "?", gGlink.rx.fifo ? "yes" : "no", gGlink.rx_cmds, gGlink.tx_cmds,
                 gGlink.errors, gsites, wglink_ready(&gGlink, gIpcrtr) ? "open" : "closed", gQrtr.hello_seen, gQrtr.rx_pkts,

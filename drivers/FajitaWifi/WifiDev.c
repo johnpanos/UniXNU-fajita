@@ -187,6 +187,7 @@ static void step(wdev *d)
     case WDEV_READY_WAIT:
         if (!d->wmi.ready) break;
         memcpy(d->mac, d->wmi.mac, 6);
+        if (!(d->mac[0] | d->mac[1] | d->mac[2] | d->mac[3] | d->mac[4] | d->mac[5])) {memcpy(d->mac, d->ops.mac, 6); d->mac_fallback = 1;}
         r = whtt_start(&d->htt);
         if (r) {fail(d, r); return;}
         enter(d, WDEV_HTT_WAIT);

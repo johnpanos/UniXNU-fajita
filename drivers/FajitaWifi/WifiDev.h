@@ -43,6 +43,8 @@ typedef struct {
     // ordinary (CPU-only) memory: CE transfer contexts, HTC's queued copies
     void *(*alloc)(size_t size, void *ctx);
     void (*free)(void *p, size_t size, void *ctx);
+    // The station MAC when the firmware's READY carries none (WCN3990: ath10k takes it from the DT's local-mac-address).
+    uint8_t mac[6];
 } wdev_ops;
 
 typedef struct wdev {
@@ -61,6 +63,7 @@ typedef struct wdev {
     int mlme_up;
     uint8_t mac[6];
     // counters
+    int mac_fallback;                 // READY's MAC was zero: ops.mac is used
     uint32_t polls, ce_work, wmi_send_fail, htt_tx_fail, eapol_drop, rx_eth;
     uint32_t steps_ms[WDEV_FAILED];   // when each state was entered (relative to wdev_start)
     uint32_t t0;
