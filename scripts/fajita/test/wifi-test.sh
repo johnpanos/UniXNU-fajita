@@ -8,6 +8,8 @@
 #   scripts/fajita/test/bg.sh start wifi NAME --max 1500 scripts/fajita/test/wifi-test.sh all
 #   scripts/fajita/test/wifi-test.sh power modem link        # a subset
 #   WIFI_NO_BUILD=1 scripts/fajita/test/wifi-test.sh scan    # reuse the last .cache/fajita-out-wifi image
+#   FAJITA_OUT=DIR WIFI_NO_BUILD=1 WIFI_HOLD=1 scripts/fajita/test/wifi-test.sh ...   # any prebuilt image (an A/B variant) with
+#                                                            # the PSK push and stage checks (DIR has payload.img + boot.img)
 #
 # Stages (each maps to a fajita-wifi=<N> depth and a pass check):
 #   power     fajita-wifi=1  regulators/clocks mapped and read (FW1, RMB readable, modem not yet booted)
