@@ -792,9 +792,21 @@ filesystem). `tools/crash/dsc-disasm.py IMAGE OFFSET [N] [--back M]` disassemble
 
 After the fix there are no WebKit CRASH rows; the Networking, WebContent and GPU services stay up, idle in their run loops.
 
-Open (next blocker): after tapping a favorite, MobileSafari's main thread hangs (the tab button no longer responds, the page stays black).
-spindump (`session.sh run /usr/sbin/spindump -notarget 1 20 -stdout`) shows the main thread in a `dispatch_sync` onto
-`com.apple.SafariShared.WBSHistoryServiceStore`, whose block waits on a semaphore for a reply that never comes, and a
-`root.utility-qos` block waiting too. Without `com.apple.fairplayd.H2` disabled, an `ACAccountStoreReply` thread is also stuck sending to
-launchd for `com.apple.fairplayd.versioned` (fairplayd.H2 is not running); disabling it with `sheng-disable-jobs=com.apple.fairplayd.H2`
-removes that thread but not the hang.
+Second blocker, the Safari hang (fixed 2026-10-26): after tapping a favorite MobileSafari's main thread blocked (spindump:
+`dispatch_sync` onto `com.apple.SafariShared.WBSHistoryServiceStore`, whose block waits for an XPC reply). The reply comes from the
+`com.apple.Safari.History` job (`/System/Library/LaunchDaemons/com.apple.Safari.History.plist`, Mach service
+`com.apple.Safari.History.Service`) and that job's Program is `/System/Cryptexes/App/usr/libexec/com.apple.Safari.History`.
+`/System/Cryptexes/App` and `/System/Cryptexes/OS` on the OS volume are symlinks to `/private/preboot/Cryptexes/{App,OS}`, and
+`/private/preboot` is empty here: the board mounts OS and SystemOS (SystemOS as the union at `/`) but not the 10 MiB `Cryptex1,AppOS`
+image (`087-86715-047.dmg`: Safari.History, webbookmarksd, passwordbreachd, webinspectord, safarifetcherd, webpushd,
+AuthenticationServicesAgent, SafariBookmarksSyncAgent). launchd cannot start those jobs, so lookups of their Mach services never return.
+`com.apple.fairplayd.H2` (the iPhone X label; the list had the iPad's `.A2`) did the same to an AccountStore thread.
+Fix: `package/BootWatchdogPolicy.c` adds the nine Cryptex-program jobs and `fairplayd.H2` to the `sheng-lite` disable list (already on),
+so their lookups fail at once; the policy buffer grew to 4096. `scripts/fajita/test/cryptex-jobs.sh` (held session) lists the jobs whose
+program is under /System/Cryptexes. Proper fix, not done: publish AppOS as a third window (board.toml `[userdata] windows`,
+build-fajita-verified-root.py, NativeUfs) and mount it at `/private/preboot/Cryptexes/App`; the files are decmpfs type 14 (LZBITMAP), so a
+host-side extraction into the Data seed is not an option without an LZBITMAP decoder. Result: Safari stays responsive, apple.com loads over
+Wi-Fi (padlock, title "iPhone Duo - Apple", tab switcher shows the page), no CRASH rows.
+
+Open (next blocker): the page content is black (the tab thumbnail shows white stripes/black). The services are up and idle, the page loaded; the
+web content layers are not composited correctly (WebContent/GPU-process IOSurface backing stores seen by backboardd). Not investigated.
