@@ -18,7 +18,8 @@ extern "C" {
 #define WQR_PORT_CTRL 0xfffffffeu
 #define WQR_MAX_PORTS 16
 #define WQR_MAX_LOCAL_SRV 8
-#define WQR_MAX_REMOTE_SRV 32
+// The phone's modem announces 32+ services (33 with wlfw): the old 32-entry table silently dropped wlfw's NEW_SERVER.
+#define WQR_MAX_REMOTE_SRV 128
 #define WQR_MAX_FLOWS 16
 #define WQR_TXQ 64
 #define WQR_FLOW_HIGH 10u
@@ -59,6 +60,7 @@ typedef struct wqrtr {
     struct {uint8_t *p; size_t len;} txq[WQR_TXQ];
     unsigned txq_head, txq_count;
     uint32_t rx_pkts, tx_pkts, dropped, bad;
+    uint32_t remote_full;         // NEW_SERVERs that found the remote table full (the event is still delivered)
     struct {uint32_t src_node, src_port, dst_port, size; uint8_t head[12];} drop_log[8];   // the first packets to unbound ports
     unsigned ndrop_log;
 } wqrtr;
