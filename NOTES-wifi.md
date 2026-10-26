@@ -1,5 +1,226 @@
 # fajita Wi-Fi: WCN3990 on SDM845 under UniXNU (iOS 16.7.16)
 
+## HANDOFF (Wi-Fi agent, Sonnet, 2026-10-25): read this first
+
+Everything below is on `ios16-port` (branch `wifi-sonnet`, worktree `../UniXNU-fajita-wifi2`), behind `fajita-wifi=N` /
+`fajita-net=usb` (both default off: the default boot is unchanged; the default build links). The next agent (Opus) starts here.
+
+### Definition of done (user requirement, via the lead)
+
+On the iOS side this must work **fully as a Wi-Fi network device**: visible in Settings > Wi-Fi, scanning and joining
+networks through iOS's own stack (wifid, CoreWiFi, the IO80211 family), not a generic `en0`. Two main tasks follow from that:
+
+1. **The iOS interface must be an IO80211-family interface that wifid accepts** (IO80211Family / Skywalk in 20H392). Survey
+   below (read-only, from the kernelcache); the dyld-cache/CoreWiFi side is not surveyed yet.
+2. **The real `/usr/sbin/wifid` has to run.** Today `fjdbg-agent` stands in for wifid: it is run as the `com.apple.wifid`
+   launchd KeepAlive job through the boot-time addon union mount over `/usr/sbin` (`usb-debug=3`, kern_exec.c) and answers
+   CoreWiFi's XPC endpoints with empty replies (`package/usb-debug-tools/fjdbg-agent.c`, "launchd runs this agent as the
+   com.apple.wifid job"). Move the agent to another launchd job (its own label/plist) so that wifid is the real binary.
+
+The BSD `en0` over USB (below) is the stepping stone that proves iOS's IP stack, not the end state.
+
+### What exists and where it stands
+
+| Piece | State | Code |
+|---|---|---|
+| Modem (MSS) boot, `fajita-wifi>=2` | **works on the phone** | `drivers/FajitaWifi/WifiMss.[ch]`, `package/FajitaWifiModem.cpp` |
+| `fajita_wifi_msa_assign` / `_release` (HLOS <-> MSS_MSA+WLAN) | written, host-tested; **not exercised** (needs wlfw) | `FajitaWifiModem.cpp`, `WifiMss.c` ops |
+| Modem services: GLINK, QRTR, pd-mapper, TFTP (wlanmdsp.mbn), rmtfs | **work on the phone** | `WifiGlink`, `WifiQrtr`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` |
+| wlfw handshake (QMI service 0x45) | **blocked: the service never appears** | `WifiWlfw` (host-tested, never reached) |
+| WCN3990 CE/HTC | host-tested (earlier rounds) | `WifiCe`, `WifiHtc`, `WifiSnoc` |
+| WMI-TLV (init, ready, scan, vdev, peer, keys, mgmt tx) | written, host-tested against Linux struct layouts | `WifiWmi.[ch]`, `tests/t_wmi.c` |
+| Station MLME (scan table, auth, assoc, peer assoc, vdev up, 4-way, keys) | written, host-tested with a simulated AP+target | `WifiMlme.[ch]`, `tests/t_mlme.c` |
+| HTT data path (setup, in-order rx, native-wifi tx) | written, host-tested | `WifiHtt.[ch]`, `tests/t_htt.c` |
+| BSD ifnet `en0` over the USB NET channel | **works on the phone** (DHCP + ping + CFNetwork GET) | `package/FajitaNet.cpp` |
+| Kernel glue WMI/MLME/HTT <-> HTC/CE <-> `fajita_net_*` (stage 6/7) | **not written** | see "Next steps" |
+| apps_smmu glue for the WLAN SIDs | **not written**; design below | |
+| IO80211 interface + real wifid | **not started** (definition of done) | |
+
+Host tests: `python3 scripts/check-fajita-wifi-host.py` (6144 checks, 0 failures at this commit). Kernel compile check:
+`python3 scripts/check-fajita-wifi-kernel.py [UNIT]`. ABI constants/layouts are generated from Linux v6.16
+(`tools/wifi/gen-ath10k-abi.py /home/john/src/ref/linux`).
+
+### Modem boot (stage 2): design and results
+
+Port of `qcom_q6v5_mss.c` (sdm845, MBA self-auth path) over an ops table (`wmss_ops`), so the host tests drive the exact same
+code against a simulated modem that enforces the ordering constraints (`tests/t_mss.c`: failure injected at every op index,
+17 behavioural faults, the real 28-segment modem image). Sequence (rows `FWM <n> <step> rc val us`): AOSS QMP `load_state`
+-> RPMh ARC votes (mx, cx, mss; levels are indices into the cmd-db level table) -> GCC branch clocks (iface, snoc_axi, bus,
+mem/boot_rom, gpll0_mss, mnoc_axi, prng) -> PDC modem sync reset + AOSS CC MSS_RESTART -> QDSP6SS sleep clock + BOOT FSM ->
+RMB handshake with the MBA -> metadata authenticated -> 28 segments (125 MB) copied in about 0.5 s -> MPSS authenticated ->
+SMP2P ready bit -> late `handover` bit (arrives only after stage-3 services answer). Every failure path returns memory to HLOS
+(SCM `assign_mem`), restores clocks and ARC votes as found, drops load_state and halts the AXI ports.
+
+Facts learned the hard way:
+- SMP2P items: **428 is the AP's outbound, 435 is the modem's**; "slave-kernel" bits: fatal 0, ready 1, handover 2, stop-ack 3,
+  shutdown-ack 7. (Roles were swapped in the first attempt: the modem never found its peer.)
+- The metadata buffer must sit inside the MBA carveout (`meta_off` 0x100000): a buffer from XNU's pool gave an intermittent
+  SoC reset during the meta-assign step.
+- Never survey modem registers after boot (SError panic). The survey runs only before boot or on failure.
+- Result row: `FW2 modem up: pbl1 mba2 meta3 seg28 auth4 ready1 handover0 (11649 ms)` then `FWM live 21 handover rc 0 val 6`.
+  Steps: assign-mpss/mba ~2 ms each, q6-boot-fsm 75 ms, meta-auth 8 ms, segments 526 ms, mpss-auth 900 ms, ready at 1.64 s.
+
+### GLINK / QRTR / services: results and fixes
+
+GLINK v1 over SMEM, IPCRTR channel opens, QRTR hello, **19 QMI services announced**
+(`FW3 ... servers 42,2b,f,33,15,18,17,16,24,31,36,11,4a,1002,22,29,37,e4,32`: no 0x45).
+- wlanmdsp.mbn (3035876 B) is served in full over tqftpserv-style TFTP (`FW4 pdr 5 tftp rrq11 wrq3 2964kB err3 ...`; mcfg
+  digests and all paths exist; the only ENOENTs are `ota_firewall/ruleset` and the first `mcfg.tmp`). It took three fixes:
+  OACK format (no extra NUL after blksize), WRQ echoes the modem's `tsize`, and the GLINK **remote intent table** (16 x 128 B
+  slots were full when a large grant arrived: now 64 slots with eviction of a smaller idle intent; `t_glink_full_intents`
+  reproduces it).
+- rmtfs: `open8 iov7 sect7434 wr-refused0` (reads served from the EFS backup, writes refused).
+- Extra channels the modem opens: `glink_ssr` (we ack it; `fajita-wifi-ssr`, default on), `SSM_RTR_MODEM_APPS`,
+  `apr_voice_svc`, `apr_apps2`, `LOOPBACK_CTL_MPSS`.
+
+### The open problem: wlfw (0x45) never appears
+
+After handover and the TFTP fetch of wlanmdsp.mbn the modem goes quiet; 150+ s of waiting never shows service 0x45.
+`FW5 wlfw idle ind0 cap chip=0 board=0 fw=0 msa0 ... fw_ready0`; no QRTR drops, GLINK `err4` constant, no SMP2P fatal bit.
+
+**Tried (all with the exact rows above, none changed the outcome):**
+1. Correct SMP2P roles/bits; ready and handover seen.
+2. WCN3990 rails and RF clock voted from the AP (`fajita-wifi-rails=1`, `WIFI_EXTRA_ARGS`): `FWM rails-on ldoa5 800 mV`,
+   `ldoa7 1800`, `ldoa17 1304`, `ldoa25 3312`, `ldoa23 3312`, `rfclka2`; read-back `ldoa5@40f00 800mV en1 mode7 ...
+   rfclka2@4c400 en1`. (cmd-db shows the rails off at boot; VRM offsets: voltage +0, enable +4, mode +8, HPM = 7. The very
+   first attempt wrote enable to +0: a 1 mV garbage vote, harmless, cleared by reboot.)
+3. `glink_ssr` open/ack.
+4. TFTP/GLINK fixes above (so wlanmdsp.mbn is fully delivered: the PD *is* started and loaded).
+5. LFN theory for the mcfg paths: ruled out (plain 8.3 names).
+6. Request-history logging (`FW4 tftp-req` history with `E<code>` markers, `FW3d` remote intents, `FW3t` GLINK command trace,
+   `FW3c` channel list, `FW3q` QRTR drops).
+
+**Open candidates NOT yet tried (from the lead):**
+- (a) pd-mapper answers `tms/pdr_enabled` with **0 domains**. Should it report PDR enabled / the wlan PD domain
+  (`msm/modem/wlan_pd`, instance id) so the modem registers the PD with the AP's servreg locator?
+- (b) Does the wlan PD wait for a servreg/PDR **indication registration** (qcom_pdr `register_listener`, servreg-locator
+  `get_domain_list`/`register_listener`, `pd_state` indications) from the AP before it publishes wlfw?
+- (c) **MSA region initial permissions**: `qcom,msa-fixed-perm` or not on this board? The MSA/WLAN region might need to be
+  assigned to MSS_MSA+WLAN *before* the PD starts (`fajita_wifi_msa_assign` exists but only runs after wlfw's msa_info).
+Other ideas: ack/answer the other GLINK channels (`SSM_RTR_MODEM_APPS`, `apr_*`), SSCTL (service 0x2b is announced: the AP
+side `ssctl` shutdown/get-id interplay), check the modem's `qmi 0x1002` / `0x4a` services for a wlan hint, compare the QRTR
+service table against a Linux boot of the same board (pmOS on fajita is the reference; only on a failed capture per the mandate).
+
+Test commands: `scripts/fajita/test/wifi-test.sh modem link servers wlfw` (stages), `WIFI_MSS_DRY=1` (read-only survey),
+`WIFI_EXTRA_ARGS="fajita-wifi-rails=1"`, boot args `fajita-wifi=N`, `fajita-wifi-ssr`, `fajita-wifi-blk=N` (TFTP block cap),
+`kcmd wifimss [rows|survey|stop|poll]`, `kcmd wifi ...`. Rows: `FW2` modem, `FWM` modem steps/live/smp2p/rails, `FW3*`
+GLINK/QRTR, `FW4` services, `FW5` wlfw.
+
+### WMI-TLV, MLME and HTT (host-tested only)
+
+All three are freestanding, non-blocking, ops-table driven, and checked against sizeof/offsetof of the Linux structs. The
+simulated target in `t_mlme.c` runs the whole connect: scan table from beacons (rssi = snr - 95), RSN check (CCMP/PSK/no
+required PMF), vdev start -> peer create -> open-system auth -> assoc (legacy rates + own RSNE) -> peer assoc -> vdev up ->
+4-way (WifiWpa) -> PTK+GTK install -> peer authorize. HTT: VERSION_REQ -> FRAG_DESC_BANK_CFG, RX_RING_CFG (64-bit ring, rx
+desc offsets of `htt_rx_desc_v2`, 128-entry ring, 63 buffers posted), AGGR_CFG v2; in-order rx indication -> Ethernet II;
+tx = native-wifi frame in a per-id buffer + 44-byte txbuf + 72-byte fragment descriptor, two-fragment CE gather without HTC.
+
+### Next steps for the kernel glue (nothing of this is written)
+
+1. Once wlfw gives FW_READY: `whtc_init` on `wce`; connect WMI and HTT services (`whtc_connect(WHTC_SVC_HTT_DATA_MSG)`),
+   route CE5 to `h->htt_direct`; `wwmi_rx` on the WMI endpoint; on SERVICE_READY `wwmi_init_cmd` (set `w->num_msdu_desc` equal to
+   `whtt_cfg.max_tx`), on READY `wmlme_start`, `wwmi_scan_chan_list` (`wmlme_channels`), then `whtt_start` once HTC is started.
+2. HTT `tx_sg` op = `wce_send(..., gather=1)` + `wce_send(..., gather=0)` on the HTT upload pipe with `wce_send_revert` on
+   failure; control messages via `whtc_send`; `dma_alloc` from the `wdma` arena; the arena must cover rings, 64 x 2 KB rx
+   buffers, tx buffers (max_tx x 2 KB), 44/72-byte per-id areas, and WMI host-memory chunks (size from SERVICE_READY).
+3. `whtt_ops.rx` -> EAPOL (ethertype 0x888e) to `wmlme_eapol_rx`, everything else to `fajita_net_input`; `fajita_net_set_backend`
+   -> `whtt_tx(vdev, bssid, frame, len, protect)` with `protect` set once the PTK is installed (`wmlme` state CONNECTED/KEYS done);
+   `wmlme_ops.eapol_tx` -> `whtt_tx(..., protect=0)`.
+4. MLME key completion: on WCN3990 the install-key completion may arrive as the HTT `SEC_IND` (ath10k completes
+   `install_key_done` there) instead of the WMI event: `whtt_ops.sec_ind` exists; check that `wmlme` does not wait on the WMI
+   event only.
+5. SSID from the boot arg `fajita-wifi-ssid=`, PSK read at run time from `/private/var/ngpu/wifi.psk` (credentials file on the
+   laptop: `~/.config/unixnu/wifi-kittycorner`, mode 600; never commit or print the PSK; `wifi-test.sh` passes it at run time).
+6. Add `WifiWmi.c WifiMlme.c WifiHtt.c` to `STACK` in `scripts/build-fajita-wifi.py` (they are host-only today) and keep the
+   default build linking before every push.
+
+### apps_smmu glue (design; not written)
+
+The WLAN subsystem masters are SIDs **0x40 and 0x41** on apps_smmu. Program them with **exact SMRs** (mask 0, ID = SID), in a free
+context bank (**banks 5..36 are free**), with the precondition that `(sCR0 & 0x407) == 0x406` (set by the existing survey
+`scripts/fajita/test/smmu-survey.py` / the NativeUfs-style SMMU kit `kits/ArmSmmu4K` in the stack worktree). Map **only the
+DMA arena** through a 4 KB-granule table (non-cacheable table walks, IOVAs below 4 GiB, S1 bypass off for those two SIDs).
+Order: build tables -> context bank (TTBR0, TCR, MAIR, SCTLR.M) -> S2CR (CBNDX) -> SMR (VALID) for 0x40 then 0x41 -> only then
+`wlan_enable`/CE bring-up; tear down in reverse and invalidate TLB (`TLBIALL` + `TLBSYNC`). Transactions outside the arena
+must fault (check `CB_FSR`) rather than pass.
+
+### The iOS network interface: what is done and what iOS does with it
+
+**Deviation from the original spec:** I did not reconstruct the IONetworkingFamily vtables (IOEthernetController subclass)
+from the kernelcache: with XNU source available, a BSD ifnet is a few hundred lines (as `bsd/net/if_fake.c`) and works
+today; the IOKit route needs days of reverse engineering of the stripped 20H392 kernelcache and, per the user requirement
+above, the real target is an IO80211 interface anyway.
+
+`package/FajitaNet.cpp` (`fajita-net=usb`, with `usb-net=1`): `ifnet_allocate_extended` Ethernet interface `en0` (IFT_ETHER, MAC
+02:fa:6a:17:4e:02, MTU 1500), `ether_demux`/`ifnet_input` on its own thread, transmit through `fajita_usbnet_send` (the USB NET
+channel of the other agent, bridged to passt on the laptop). `kcmd net` prints counters. Test: `scripts/fajita/test/net-test.sh ios`
+(builds `--test usb-net=1 fajita-net=usb`; reuse one `FAJITA_OUT` so the plugin builds incrementally).
+
+iOS ships **no ifconfig, ipconfig or ping**: `package/usb-debug-tools/fjnet.c` (built by `scripts/fajita/build-usbdbg-agent.sh` to
+`.cache/fajita-inputs/fjnet`, pushed by net-test.sh) provides `show IF`, `dhcp IF`, `sc [REGEX]` (SCDynamicStore keys, resolved with
+dlsym because the SDK marks them unavailable), `http URL` (CFNetwork GET) and `ping IP`.
+
+Phone result (PASS, `net-test.sh ios`): `en0 attached`; `fjnet dhcp en0` -> lease 192.168.0.183 gw 192.168.0.1 through passt;
+ping 3/3; CFNetwork GET `http://192.168.0.1:8099/` (the laptop, via passt's gateway mapping) -> HTTP 200, 784 bytes.
+Findings that matter for the definition of done:
+- configd **sees** a bare BSD en0 (`State:/Network/Interface` lists lo0, en0, utun0; `State:/Network/Interface/en0/IPv4`
+  mirrors the address once one is set) but does **not** start DHCP on it: after 12 s up, no inet address, no
+  `State:/Network/Service/...` for en0 (only utun0 has one), no `State:/Network/Global/IPv4`, `Global/DNS` empty.
+- `http://example.com/` through CFNetwork fails with POSIX error 50 (ENETDOWN): most likely the missing primary service/DNS,
+  not tested separately.
+- Conclusion: a bare BSD interface is not enough for iOS to manage the link; configd/IPConfiguration need a service (preferences
+  or wifid-driven) bound to the interface. That supports the IO80211 requirement.
+
+### IO80211 survey (read-only, kernelcache 20H392, `strings` of `.cache/ipsw/20H392/kernelcache.decompressed`)
+
+What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7.internal`):
+- Bundles: `com.apple.iokit.IO80211Family`, `com.apple.iokit.IOSkywalkFamily`, `com.apple.iokit.IONetworkingFamily` (1.5.0),
+  `com.apple.driver.AppleBCMWLANCore` (+`AppleBCMWLANCoreV3`, `AppleBCMWLANBusInterfacePCIe`), `com.apple.driver.AppleOLYHAL`.
+  AppleBCMWLANCore's personalities (`AppleBCMWLAN PCIe`/`SDIO`) match providers `AppleBCMWLANBusInterfacePCIe`/`SDIO` with
+  `IOMatchCategory WiFiDriver`, `IOResourceMatch` on a resource, and libraries IO80211Family, IOSkywalkFamily, IONetworkingFamily.
+  The Broadcom driver is the template to imitate: its provider is a bus-interface nub, so our driver needs its own nub/provider.
+- IO80211Family classes: `IO80211Controller` (its `start` logs "Aborting WiFi init by boot-arg"), `IO80211Interface`,
+  `IO80211SkywalkInterface`, `IO80211InfraInterface`, `IO80211VirtualInterface` (+Namer/Role), `IO80211P2P*`, `IO80211NAN*`,
+  `IO80211Peer`/`PeerManager`, `IO80211ScanManager`, `IO80211LinkRecovery`, `IO80211LinkQualityMonitor`, `IO80211TrafficMonitor`,
+  `IO80211CommandGate`/`CommandQueue`/`WorkQueue`, `IO80211Band`/`Channel*`/`CountryCode`/`SSID`/`BSSID`, `IO80211Buffer*`
+  (`IO80211DataStream`, `IO80211NetworkPacket`), `IO80211FlowQueue*`.
+- User clients wifid/CoreWiFi talk through: `IO80211APIUserClient`, `IO80211AsyncEventUserClient`, `IO80211IOUCEventPipe`,
+  `IONetworkUserClient`, `IONetworkStackUserClient`, plus `AppleBCMWLANUserClient`; entitlements checked by the family:
+  `com.apple.private.corewifi`, `.corewifi.internal`, `.corewifi.readonly`, `com.apple.private.corewifi-xpc`.
+- Skywalk side: `IOSkywalkNetworkInterface`, `IOSkywalkEthernetInterface`, `IOSkywalkLegacyEthernetInterface`,
+  `IOSkywalkNetworkController`, `IOSkywalk{Tx,Rx}{Submission,Completion}Queue`, `IOSkywalkPacketBufferPool`, `IOSkywalkNetworkBSDClient`;
+  the Broadcom driver uses `AppleBCMWLANPCIeSkywalk*` queues and `AppleBCMWLANIO80211APSTAInterface` for the AP/STA interface.
+  `IOUserEthernetController`/`IOUserEthernetInterface` (DriverKit) also exist.
+- The command surface is the **APPLE80211_IOC_*** table: 418 names in the kernelcache (337 outside AWDL), e.g. SSID, BSSID,
+  CHANNEL, SCAN_REQ/SCAN_REQ_MULTIPLE/SCAN_RESULT/ABORT_SCAN, ASSOCIATE/ASSOCIATE_RESULT/DISASSOCIATE/REASSOCIATE,
+  AUTH_TYPE, CIPHER_KEY, RSN_IE/RSN_CONF, CUR_PMK/PMK_CACHE, CURRENT_NETWORK, STATE, RSSI, NOISE, RATE/TX_RATE/RX_RATE,
+  OP_MODE, PHY_MODE, POWER/POWERSAVE, COUNTRY_CODE, SUPPORTED_CHANNELS/CHANNELS_INFO, HW_ADDR, CARD_CAPABILITIES,
+  DRIVER_VERSION, HARDWARE_VERSION, LINK_CHANGED_EVENT_DATA, BSSID blacklist, ROAM*, BGSCAN*, VIRTUAL_IF_CREATE/DELETE,
+  COMPANION_SKYWALK_IF_CREATE. wifid's `IO80211InterfaceWifidEnumeratedInfra` / `IO80211InterfaceWiFiPrimary` properties mark
+  the primary infrastructure interface. The classic transport is the `SIOCSA80211`/`SIOCGA80211` interface ioctl pair plus
+  the async event user client (not verified on 20H392: confirm from IO80211Family's `performCommand`/`apple80211Request`).
+- Not surveyed yet: the dyld-cache side (CoreWiFi, wifid's own IOKit calls, `IO80211Interface` registry properties it requires),
+  and the exact vtable layouts (needed for a subclass the way NativeHidInput reconstructs one: see
+  `scripts/build-native-legacy-display.py` for the capstone-based, instruction-qualified address method and
+  `OriginalHidEventLayout.h` for what a generated layout looks like).
+
+### Main tasks for the next agent
+
+1. **wlfw**: work the open candidates (a)(b)(c) above; this blocks every on-air step.
+2. **IO80211 interface that wifid accepts** (definition of done 1): survey CoreWiFi/wifid in the dyld cache and the family's
+   user-client protocol, then write a native driver (IO80211Controller + an IO80211 interface, backend = the HTT path or, first,
+   the USB NET channel) the way NativeHidInput reconstructs IOKit vtables; add IO80211Family/IOSkywalkFamily/IONetworkingFamily to
+   the prelink roots as needed.
+3. **Real wifid** (definition of done 2): move `fjdbg-agent` off the `com.apple.wifid` job/union mount to its own launchd job.
+4. The kernel glue and SMMU glue above, then `wifi-test.sh` stages beyond `wlfw` (scan, assoc, dhcp, ping).
+
+### Deviations and housekeeping
+
+- ifnet `en0` instead of an IOEthernetController (see above).
+- Process notes: merge `origin/ios16-port` before each build/phone run; explicit `git add`; a full `scripts/fajita/build.sh --test`
+  must link before pushing kernel-side changes; the phone is shared (global lock in cycle.sh; end sessions by name,
+  `session.sh end NAME`; `to-fastboot.sh` if left in iOS); long jobs via `scripts/fajita/test/bg.sh`.
+
 ## Current state (keep this updated; a restart starts here)
 
 Round 8 (lead): a USB network transport, so a future iOS network interface can be tested against this laptop. The
