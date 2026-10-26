@@ -118,7 +118,9 @@ COUNTERS = [('latch_n', 'fajita_dpu_latch_n', 0, 4), ('vsync_n', 'fajita_dpu_vsy
             ('reclaimed', 'native_gop_gpu_reclaimed', 0, 8), ('retire_lost', 'native_legacy_retire_lost', 0, 4),
             ('flips_requested', 'fajita_dpu_flips', 0, 4), ('flips_latched', 'fajita_dpu_flips', 1, 4),
             ('flips_refused', 'fajita_dpu_flips', 2, 4), ('scanned_writes', 'fajita_dpu_flips', 3, 4),
-            ('gpu_fallbacks', 'native_legacy_gpu_fallbacks', 0, 4), ('copies', 'native_legacy_copy_n', 0, 8)]
+            ('gpu_fallbacks', 'native_legacy_gpu_fallbacks', 0, 4), ('copies', 'native_legacy_copy_n', 0, 8),
+            ('slot_busy', 'native_adreno_submit_backpressure', 0, 4), ('ring_full', 'native_adreno_submit_backpressure', 1, 4),
+            ('peak_jobs', 'native_adreno_submit_backpressure', 2, 4)]
 
 
 def counters():

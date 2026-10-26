@@ -2,11 +2,12 @@
 # gfx-suite.sh RUN [SCENE...]: the graphics suite on the held session (session.sh start, or wifi-test.sh with WIFI_HOLD=1 for the web
 # scenes): each scene's motion measured frame by frame on the panel's timeline (gfx-scene.py), its GPU, CPU and clocks, a screenshot
 # at its rest points, and the stability counters; one report: $FAJITA_WORK/gfx/RUN/report.txt (+ report.tsv, metrics.json).
-#   gfx-suite.sh ab RUN ENV_A ENV_B [ROUNDS]   A/B two gpu-env files in this boot (backboardd restarted per variant, as gpu-ab.sh),
+#   gfx-suite.sh ab RUN ENV_A ENV_B [ROUNDS [SCENE...]]   A/B two gpu-env files in this boot (backboardd restarted per variant, as gpu-ab.sh),
 #                                              ROUNDS times interleaved; RUN-a1, RUN-b1, ... and the comparison in RUN-ab.txt
 # Scenes (default all): home applib settings calendar maps web-hn web-wiki web-apple web-heavy (web-*: Wi-Fi up). Apps with real
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
+# WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -21,10 +22,10 @@ usage() { sed -n 2,13p "$0"; exit 2; }
 
 if [ "$1" = ab ]; then
   [ $# -ge 4 ] || usage
-  R=$2 A=$3 B=$4 N=${5:-1}
+  R=$2 A=$3 B=$4 N=${5:-1}; shift 5 2>/dev/null || shift $#
   for i in $(seq 1 $N); do
-    ENV=$A $0 $R-a$i || echo "gfx-suite: !! $R-a$i failed"
-    ENV=$B $0 $R-b$i || echo "gfx-suite: !! $R-b$i failed"
+    ENV=$A $0 $R-a$i "$@" || echo "gfx-suite: !! $R-a$i failed"
+    ENV=$B $0 $R-b$i "$@" || echo "gfx-suite: !! $R-b$i failed"
   done
   for i in $(seq 1 $N); do python3 -I $BOARD/tools/gpu/gfx-report.py --compare $W/gfx/$R-a$i $W/gfx/$R-b$i; done | tee $W/gfx/$R-ab.txt
   exit 0
@@ -72,10 +73,46 @@ import json,sys; json.dump(dict(run='$RUN', board='$(git -C $BOARD rev-parse --s
   env=[l for l in open('$ENVF').read().split('\n') if l], backboardd='${BBPID:-}', scenes='$SCENES'), open('$O/meta.json','w'))"
 LOG0=$(wc -l < $LOGF 2>/dev/null || echo 0)
 
+# 2b. The same start every run (boot-to-boot noise): a warm-up (WARMUP=1, default: home swipes and the App Library once, not
+# measured), then a settle check: up to SETTLE_MAX (90) s until no process but the render server uses over SETTLE_CPU (25) % of a
+# core over 3 s and the hottest tsens is under SETTLE_TEMP (65) C. The start state (temperature, GPU level, the busiest processes, the
+# CPU clocks) goes to start.txt and the report's header; a run that never settled says so.
+if [ "${WARMUP:-1}" = 1 ]; then
+  $TD/home-page1.sh >/dev/null 2>&1
+  for d in left right left right; do T=10 $H kcmd touch swipe $d >/dev/null 2>&1; sleep 1.2; done
+  $TD/home-page1.sh --applib >/dev/null 2>&1; $TD/home-page1.sh >/dev/null 2>&1
+fi
+settled=0; t0=$(date +%s)
+while [ $(( $(date +%s) - t0 )) -lt ${SETTLE_MAX:-90} ]; do
+  cpu=$(T=20 $SS run $NGPU cpu 3 2>/dev/null); gov=$(T=10 $H kcmd gpu gov 2>/dev/null | head -1)
+  busy=$(echo "$cpu" | awk '/%  [0-9]+ /{n=$4; if(n!="backboardd" && n!~/^ngpu-metal/ && $2+0>m){m=$2+0; w=n}} END{printf "%d %s", m, w}')
+  temp=$(echo "$gov" | grep -o "max [0-9.]* C" | grep -o "[0-9]*" | head -1)
+  echo "[$(date +%T)] settle: busiest other process ${busy:-?}% | ${temp:-?} C | $gov" >> $O/start.txt
+  [ "${busy%% *}" -lt ${SETTLE_CPU:-25} ] && [ "${temp:-99}" -lt ${SETTLE_TEMP:-65} ] && { settled=1; break; }
+done
+echo "$cpu" | sed -n 1,10p >> $O/start.txt
+log "start: $([ $settled = 1 ] && echo settled || echo "NOT settled after ${SETTLE_MAX:-90} s") | $(tail -1 $O/start.txt | cut -c1-60) | $(grep settle: $O/start.txt | tail -1 | cut -d'|' -f1-2 | cut -c12-)"
+python3 -I -c "
+import json; m=json.load(open('$O/meta.json')); m['settled']=$settled
+m['start']=[l for l in open('$O/start.txt') if 'settle:' in l][-1].split('settle: ')[-1].strip()[:140]; json.dump(m,open('$O/meta.json','w'))" 2>/dev/null
+
 # 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
 scene() {   # scene NAME CPU-PROCS STEP...
   local name=$1 procs=$2; shift 2
   python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "$@" 2>&1 | tee -a $O/suite.log
+  # A background process that took over BUSY_PCT (40) % of a core in the scene's last CPU windows and still does: sample it now
+  # (proc-sample.sh, 3 s) into SCENE-sample-NAME.txt, so a daemon spinning beside the scene is named with its stacks (SAMPLE=0: off).
+  [ "${SAMPLE:-1}" = 1 ] || return 0
+  for b in $(python3 -I -c "
+import json,sys
+r=json.load(open('$O/$name.json')); own=set('$procs'.split(','))|{'kernel_task','SpringBoard','launchd'}
+seen={}
+for c in r.get('cpu',[])[-2:]:
+    for p in c['procs']:
+        if p['name'] not in own and not p['name'].startswith(('ngpu-metal','fjsurface')) and p['ms']/c['ms']*100>${BUSY_PCT:-40}: seen[p['name']]=1
+print(' '.join(seen))" 2>/dev/null); do
+    timeout 100 $TD/proc-sample.sh $b 3 > $O/$name-sample-$b.txt 2>&1 && log "$name: $b was busy: sampled ($O/$name-sample-$b.txt)"
+  done
 }
 home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1; }
 open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
