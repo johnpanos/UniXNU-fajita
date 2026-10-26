@@ -9,8 +9,8 @@ Round 3 (stack above a booted modem; the modem boot itself is the user's). Workt
 | Layer | Code | Host test | Status |
 | --- | --- | --- | --- |
 | 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
-| 2 GLINK over SMEM | | | next |
-| 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | | | |
+| 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
+| 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | | | next |
 | 4 wlfw client | | | |
 | 5 ath10k CE/HTC/WMI | | | |
 | 6 iOS Ethernet + WPA2 + DHCP | | | |

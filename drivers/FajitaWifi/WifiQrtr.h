@@ -71,8 +71,8 @@ typedef struct {uint16_t cmd, param1; uint32_t param2;} glink_msg_hdr;
 void glink_cmd(uint8_t out[8], uint16_t cmd, uint16_t param1, uint32_t param2);
 // OPEN: header + name (NUL-terminated), padded to 8. param2 = name_len (incl NUL). Returns bytes or -1.
 long glink_open(uint8_t *buf, size_t cap, uint16_t lcid, const char *name);
-// INTENT advertise: id, lcid, count=1, size, liid (20 bytes).
-void glink_intent(uint8_t out[20], uint16_t lcid, uint32_t size, uint32_t liid);
+// INTENT advertise: id, lcid, count=1, size, liid (16 bytes).
+void glink_intent(uint8_t out[16], uint16_t lcid, uint32_t size, uint32_t liid);
 // TX_DATA header (16 bytes): cmd, lcid, iid, chunk_size, left_size. Caller appends the payload, padded to 8.
 void glink_tx_data_hdr(uint8_t out[16], int cont, uint16_t lcid, uint32_t iid, uint32_t chunk_size, uint32_t left_size);
 // Parse the 8-byte command header at the front of an rx buffer.

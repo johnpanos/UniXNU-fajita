@@ -19,7 +19,7 @@ uint8_t *t_slurp(const char *path, size_t *len)
     fclose(f); *len = n; return b;
 }
 
-#define T_LAYERS(X) X(smem)
+#define T_LAYERS(X) X(smem) X(glink)
 #define DECL(n) void t_##n(void);
 T_LAYERS(DECL)
 

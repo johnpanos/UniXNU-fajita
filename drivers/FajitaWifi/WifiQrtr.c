@@ -89,13 +89,14 @@ long glink_open(uint8_t *buf, size_t cap, uint16_t lcid, const char *name)
     return (long)total;
 }
 
-void glink_intent(uint8_t out[20], uint16_t lcid, uint32_t size, uint32_t liid)
+void glink_intent(uint8_t out[16], uint16_t lcid, uint32_t size, uint32_t liid)
 {
+    // qcom_glink_advertise_intent: struct command {id, lcid, count, size, liid}, 16 bytes; the receiver reads
+    // 8 + count * 8 and advances by that, so no padding may follow.
     wr16(out, GLINK_CMD_INTENT); wr16(out + 2, lcid);
     wr32(out + 4, 1);          // count
     wr32(out + 8, size);
     wr32(out + 12, liid);
-    wr32(out + 16, 0);         // pad to 20 (count struct: size,iid pairs; one here)
 }
 
 void glink_tx_data_hdr(uint8_t out[16], int cont, uint16_t lcid, uint32_t iid, uint32_t chunk_size, uint32_t left_size)

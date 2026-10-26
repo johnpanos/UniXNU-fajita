@@ -24,7 +24,7 @@ WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-de
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
 # The stack above a booted modem (SMEM/SMP2P, GLINK, QRTR services, wlfw, ath10k, WPA2), host-tested in tests/test_stack.c.
-STACK = ['WifiSmem.c']
+STACK = ['WifiSmem.c', 'WifiGlink.c']
 INCLUDES = ['-I', str(KIT), '-I', str(WIFI), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 
