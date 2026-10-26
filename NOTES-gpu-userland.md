@@ -701,11 +701,53 @@ conditions, no network): resting screens 0, u4, d4 differ by 468-476 px over 8 (
 The kickOnce blank branch's early returns (console base vs bootMapping) were checked: nothing rewrites the console base (flips are done in
 the DPU), and those returns leave `transferred` clear, so they cannot latch the queue. With flips a blank frame is filled into the boot
 buffer while the DPU may show another one, which is cosmetic.
-Still open: why backboardd's render thread crashed. QuartzCore +0x7f0c0 dereferences (+0x308) the unchecked NULL result of QuartzCore
-+0x203e28 (called with 0, 0, 0, flags 0x22413, 2), most likely an allocation that failed under memory pressure while browsing. There is no
-symbolizer for the cache here yet.
+Why backboardd's render thread crashed: see the next section (a lost GPU device, not memory pressure).
 Tools: `compositor-restart.sh [ROUNDS]` (prints the hand-off counters per round), `lock-cycles.sh [CYCLES] [IDLE_S]`, `kvar.py SYMBOL[:BYTES]`
 (kernel globals by symbol over the hub, '*' patterns), `fjbundle --kill SIG NAME|PID`.
+
+## backboardd crash while browsing: the render server's device was lost (fixed 2026-10-26)
+
+The crash (user-hn-freeze, `CRASH p55 backboardd sig11 PC1ce7ef0c0 ... F308 +464ec000`), symbolized with `tools/crash/dsc-sym.py` (new: the
+cache's `.symbols` nlist table plus each image's export trie, under a second):
+- PC QuartzCore +0x7f0c0 is `CA::OGL::AsynchronousDispatcher::renderer() +0x80`, on the dispatcher's own thread (`thread_body`, `tick`,
+  `display_timer_callback`). On first use it builds a renderer: `_CAMetalContextCreate` (= `MTLCreateSystemDefaultDevice()`; a nil device is
+  checked), then `CA::OGL::new_metal_context(device, 0, 0, 0, 0x22413, 2, label)` (QuartzCore +0x203e28), whose result is stored and then
+  dereferenced unchecked (`ldrh w8, [x21, #0x308]`).
+- With no queue or share context given, `new_metal_context` returns NULL after `x_log("Failed to create MTLCommandQueue")` when
+  `[device newCommandQueue]` is nil (its only other NULL is a failed 0xf10-byte calloc).
+- The plugin's `newCommandQueue` (NativeBridgeMetalFrontend.mm) answered nil silently when `nmb_queue_new` failed, and the runtime's
+  `new_command_queue` fails only on a lost device.
+
+Why the device was lost (diagnostic stack 3275c3c, browse-soak.sh, session-084814): on the second page (en.wikipedia.org) backboardd's
+PF row went to `gpu-failed 3`, every later command buffer was refused (`P0 commandBuffer refused: command buffer: DeviceLost`, 33k problems
+in a minute), and the runtime's messenger row read **`W submit: no free job slot (VK_ERROR_DEVICE_LOST)`**. That is Turnip's darwin backend,
+`darwin_submit_chunk`: the kernel has one ring and eight job slots for every client (backboardd, com.apple.WebKit.GPU and WebContent all
+run Turnip), and a submission that finds them taken gets `kIOReturnBusy`. Turnip then waited on this process's oldest fence, from a list
+(`dw.inflight`) that was never pruned, so the wait returned at once and its 64 tries took microseconds, and it declared the device lost.
+Web pages' GPU work filling the slots was enough. The device stays lost; the screen kept showing the last frame, and the next time the
+async dispatcher built a renderer, backboardd crashed. The user's MEM rows (free4K under 5000 at 131-141 s) were a coincidence of that
+run; session-084814 had 655k pages available. Two more things hid it: release Mesa gives `vk_device_set_lost`'s text only to debug-utils
+messengers (none in mesa.log), and Mesa opens mesa.log with "w", so the restarted render server erased it.
+
+Fix (stack 43c46a6, patches/mesa/turnip-darwin-kmd.patch): Busy (no job slot) and NoResources (no ring space) are transient. The submission
+retries with a 50 us..1 ms backoff until it goes in, and only 5 s without a slot loses the device (the fence waits' bound for a hung GPU).
+The first wait and each new longest one over 20 ms are a Mesa warning, and every device loss of the backend is also `mesa_loge`'d
+(`darwin_lost`). Stack 3275c3c (NativeMetal 8f6babe) adds the diagnostics: a refused `newCommandQueue` and command buffers that fail on the
+GPU side are problem lines with the runtime's reason (first eight each), counted on a new `PF problems N queues-refused N gpu-failed N`
+telemetry row, and the previous render server's mesa.log is kept as mesa.log.prev.
+
+Proof (board b13ceaa, stack 43c46a6, Wi-Fi build, session-090939): `browse-soak.sh 15` (HN, HN page 2, two wikipedia articles,
+apple.com, apple.com/iphone, scrolled down and back each), 44 pages in 15 min: backboardd crashes 0, `gpu-failed 0`, problems stayed at 6
+(the startup "no device answer" lines). The unfixed diagnostic build lost the device on page 2. The only crashes in both runs are
+com.apple.Safari.History's sig6 (an ObjC exception in SafariCore, a separate issue).
+No direct count of the waits survived: the fixed run left no mesa.log (Mesa may filter the warning at its default level), so the evidence
+is the unfixed build losing its device on page 2 against 44 clean pages. Surfacing a slot-wait count on a telemetry row would need a path
+from Turnip to the frontend.
+No regression (board b13ceaa --test, no network, session-092646): fps.sh home motion 55.2 [45.3-57.8], App Library motion 50.9 [39.1-59.3]
+(window 43.0/45.2, 36.3); settings-scroll.sh bbfix against corr/dfix: resting screens 0 and d4 differ by 1011 px at max diff 10 (under the
+threshold) and by 75 px; the mid-scroll steps differ only in scroll offset (u4 checked by eye: the same list, about 80 px further on).
+Tools: `browse-soak.sh MINUTES [URL...]` (FJB=the pushed fjbundle; one line per page: new CRASH rows, PF row, newest problem),
+`tools/crash/dsc-sym.py [--slide HEX] ADDR...` / `--image SUBSTR OFF...` / `--grep RE`.
 
 ## Handoff (2026-10-25, GPU perf round 3, end of the phone stretch)
 
