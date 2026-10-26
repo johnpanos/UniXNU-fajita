@@ -33,12 +33,14 @@ void read_random(void *buffer, unsigned int numBytes);
 
 namespace {
 struct Region {OSSharedPtr<IOMemoryMap> keep; uintptr_t va = 0;};
-bool mapRegion(uint64_t phys, uint64_t length, Region &region)
+// cache: kIOMapInhibitCache = Device-nGnRE (registers); kIOMapWriteCombineCache = Normal non-cacheable (the DMA arena: memcpy,
+// bzero's DC ZVA and unaligned accesses fault on Device memory).
+bool mapRegion(uint64_t phys, uint64_t length, Region &region, IOOptionBits cache = kIOMapInhibitCache)
 {
     if (region.va) return true;
     IODeviceMemory *memory = IODeviceMemory::withRange(phys, length);
     if (!memory) return false;
-    region.keep = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
+    region.keep = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | cache), OSNoRetain);
     memory->release();
     region.va = region.keep ? static_cast<uintptr_t>(region.keep->getVirtualAddress()) : 0;
     return region.va != 0;
@@ -153,6 +155,7 @@ uint32_t smmuFaults()
     return *reinterpret_cast<volatile uint32_t *>(smmu + (pages + unsigned(gSmmuBank)) * 4096 + 0x58);
 }
 
+uint32_t ioRdRaw(uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
 // ---- wdev ops ----
 uint32_t ioRd(void *, uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
 void ioWr(void *, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t *>(gMem.va + off) = v;}
@@ -189,14 +192,17 @@ extern "C" int fajita_wifi_dev_start(void)
     gStarted = true;
     if (!gLock) gLock = IOLockAlloc();
     if (!arenaHeld()) {row(8, "FW6 arena %llx+%llx not held (phys-reserve)", FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE); return -1;}
-    if (!mapRegion(FW_WLAN_MEMBASE, FW_WLAN_MEMBASE_SIZE, gMem) || !mapRegion(FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE, gArena)) {
+    if (!mapRegion(FW_WLAN_MEMBASE, FW_WLAN_MEMBASE_SIZE, gMem) || !mapRegion(FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE, gArena, kIOMapWriteCombineCache)) {
         row(8, "FW6 map failed (membase %d arena %d)", gMem.va != 0, gArena.va != 0);
         return -2;
     }
     const int s = smmuBypassWlan();
     note("FW6 smmu sid %x/%x rc %d slot %d bank %d", FW_WLAN_SMMU_SID, FW_WLAN_SMMU_MASK, s, gSmmuSlot, gSmmuBank);
     if (s) {row(8, "FW6 smmu FAILED rc %d", s); return -3;}
+    note("FW6 arena %llx+%llx at %lx (normal non-cacheable), membase at %lx", FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE, (unsigned long)gArena.va, (unsigned long)gMem.va);
     bzero(reinterpret_cast<void *>(gArena.va), FW_WLAN_DMA_SIZE);
+    __asm__ volatile("dsb sy" ::: "memory");
+    note("FW6 arena zeroed; CE0 sr_size %x ctrl1 %x intr %x", ioRdRaw(0x240000 + 0x08), ioRdRaw(0x240000 + 0x18), ioRdRaw(0x24c000));
     const wdev_ops ops = {nullptr, devNow, devRandom, devRx, devLink, devLog, devAlloc, devFree};
     const wce_io io = {nullptr, ioRd, ioWr, ioBarrier};
     IOLockLock(gLock);
