@@ -40,6 +40,8 @@ void fajita_wifi_stack(unsigned stage) __attribute__((weak));
 // FajitaWifiLower.cpp: the read-only survey of SMEM/SMP2P, the cmd-db ARCs and AOSS QMP (fajita-wifi-ro=1, kcmd wifi).
 void fajita_wifi_lower(void) __attribute__((weak));
 void fajita_wifi_lower_kcmd(void) __attribute__((weak));
+// FajitaWifiLower.cpp: the AP side of the AOSS QMP link-up (fajita-wifi-qmp=1; FWQ rows, kcmd wifi qmp). No message.
+void fajita_wifi_qmp(void) __attribute__((weak));
 }
 
 namespace {
@@ -146,6 +148,9 @@ void worker(void *, wait_result_t) {
     PE_parse_boot_argn("fajita-wifi-ro", &ro, sizeof ro);
     if (ro && fajita_wifi_lower) fajita_wifi_lower();
     else if (fajita_wifi_lower_kcmd) fajita_wifi_lower_kcmd();
+    unsigned qmp = 0;
+    PE_parse_boot_argn("fajita-wifi-qmp", &qmp, sizeof qmp);
+    if (qmp && fajita_wifi_qmp) fajita_wifi_qmp();
     const bool reserved = reserveCheck();
     if (gStage >= 2 && !reserved) {
         Out r(fajita_wifi_rows[2], sizeof fajita_wifi_rows[2]);

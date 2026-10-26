@@ -9,34 +9,41 @@
 //   - cmd-db (fajita_rpmh_lookup): the addresses and ARC level tables of cx.lvl, mx.lvl, mss.lvl, and their current
 //     values through an RPMh READ request on an idle apps TCS (fajita_rpmh_send with msgid read: no vote is sent).
 //   - AOSS QMP message RAM at 0x0c300000: magic, version, link/channel states of both ends (no doorbell, no message).
+// The one exception, behind `fajita-wifi-qmp=1` (default off): the AP side of the AOSS QMP link-up, qcom_aoss.c qmp_open
+// (drivers/FajitaWifi/WifiQmp.c): the mcore link and channel words and the acks of the AOSS ones, and the apss_shared
+// doorbell bit 0. No mailbox message is written. "FWQ ..." rows, one per step; `kcmd wifi qmp` shows the state.
 // Rows "FWR ..." go to IOLog (and BootLog) and to a text buffer kcmd wifi prints. `kcmd wifi snap` copies those readable
 // SMEM ranges into a RAM buffer for scripts/fajita/test/smem-snap.py, so the host tests can run the parser on real data.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
+#include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
 #include "FajitaWifiBoard.h"
 extern "C" {
 #include "WifiSmem.h"
+#include "WifiQmp.h"
 int fajita_rpmh_lookup(const char *name, uint32_t *addr, uint8_t *aux, unsigned *auxLen) __attribute__((weak));
 int fajita_rpmh_send(unsigned n, const uint32_t (*cmd)[3], uint32_t *resp) __attribute__((weak));
 typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out, size_t cap);
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help) __attribute__((weak));
 void fajita_wifi_lower(void);
 void fajita_wifi_lower_kcmd(void);
+void fajita_wifi_qmp(void);
 }
 
 namespace {
 struct Region {OSSharedPtr<IOMemoryMap> keep; uintptr_t va = 0;};
-bool mapRegion(uint64_t phys, uint64_t length, Region &region)
+bool mapRegion(uint64_t phys, uint64_t length, Region &region, bool writable = false)
 {
     if (region.va) return true;
     IODeviceMemory *memory = IODeviceMemory::withRange(phys, length);
     if (!memory) return false;
-    region.keep = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | kIOMapInhibitCache | kIOMapReadOnly), OSNoRetain);
+    region.keep = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | kIOMapInhibitCache | (writable ? 0 : kIOMapReadOnly)),
+                                           OSNoRetain);
     memory->release();
     region.va = region.keep ? static_cast<uintptr_t>(region.keep->getVirtualAddress()) : 0;
     return region.va != 0;
@@ -44,9 +51,15 @@ bool mapRegion(uint64_t phys, uint64_t length, Region &region)
 inline uint32_t rd32(uintptr_t a) {return *reinterpret_cast<volatile uint32_t *>(a);}
 
 Region gSmem, gAoss;
+Region gAossRw, gIpc;   // fajita-wifi-qmp=1 only: the writable message RAM and the apss_shared doorbell page
 IOLock *gLock;
 char gText[6144];   // every FWR row of the last survey, '\n'-separated
 size_t gTextLen;
+char gQmpText[1536];   // the FWQ rows of the last QMP link-up
+size_t gQmpTextLen;
+char *gSink = gText;   // where rowEnd appends
+size_t *gSinkLen = &gTextLen;
+size_t gSinkCap = sizeof gText;
 uint8_t *gSnap;     // kcmd wifi snap
 uint32_t gSnapCrc;
 
@@ -67,11 +80,11 @@ void rowAdd(const char *fmt, ...)
 void rowEnd()
 {
     IOLog("fajita-wifi: %s\n", gRow);
-    if (gTextLen + gRowLen + 2 < sizeof gText) {
-        memcpy(gText + gTextLen, gRow, gRowLen);
-        gTextLen += gRowLen;
-        gText[gTextLen++] = '\n';
-        gText[gTextLen] = 0;
+    if (*gSinkLen + gRowLen + 2 < gSinkCap) {
+        memcpy(gSink + *gSinkLen, gRow, gRowLen);
+        *gSinkLen += gRowLen;
+        gSink[(*gSinkLen)++] = '\n';
+        gSink[*gSinkLen] = 0;
     }
     rowStart();
 }
@@ -201,6 +214,95 @@ void surveyAoss()
     }
 }
 
+// ---- AOSS QMP link-up (fajita-wifi-qmp=1), the AP side of qcom_aoss.c qmp_open ----
+uint32_t qRd(void *, uint32_t off)
+{
+    const uint32_t v = rd32(gAossRw.va + off);
+    __asm__ volatile("dsb ld" ::: "memory");   // readl: rmb after the load
+    return v;
+}
+void qWr(void *, uint32_t off, uint32_t v)
+{
+    __asm__ volatile("dsb st" ::: "memory");   // writel: wmb before the store
+    *reinterpret_cast<volatile uint32_t *>(gAossRw.va + off) = v;
+}
+void qKick(void *)
+{
+    // qcom-apcs-ipc-mailbox: writel(BIT(chan), base + offset); apss_shared chan 0 = aoss_qmp.
+    __asm__ volatile("dsb st" ::: "memory");
+    *reinterpret_cast<volatile uint32_t *>(gIpc.va + FW_APSS_IPC_OFFSET) = 1u << FW_APSS_IPC_AOSS;
+}
+uint64_t qNow(void *) {uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000;}
+void qRelax(void *) {IODelay(50);}   // polled: the AOSS doorbell interrupt (SPI 389) is not used
+const wqmp_io kQmpIo = {qRd, qWr, qKick, qNow, qRelax, nullptr};
+wqmp_result gQmp;
+bool gQmpRan;
+
+void qmpSink(bool on)
+{
+    if (on) {gQmpTextLen = 0; gQmpText[0] = 0; gSink = gQmpText; gSinkLen = &gQmpTextLen; gSinkCap = sizeof gQmpText;}
+    else {gSink = gText; gSinkLen = &gTextLen; gSinkCap = sizeof gText;}
+}
+// FWQ state: both ends' link/channel words, as `kcmd wifi qmp` and the end of the link-up show them.
+void qmpStateFmt(const wqmp_desc &d)
+{
+    rowAdd("FWQ state ap link %s/ack %s ch %s/ack %s | aoss link %s/ack %s ch %s/ack %s | magic %08x v%u mbox %x+%x => %s",
+           wqmp_state_name(d.mcore_link), wqmp_state_name(d.mcore_link_ack), wqmp_state_name(d.mcore_ch),
+           wqmp_state_name(d.mcore_ch_ack), wqmp_state_name(d.ucore_link), wqmp_state_name(d.ucore_link_ack),
+           wqmp_state_name(d.ucore_ch), wqmp_state_name(d.ucore_ch_ack), d.magic, d.version, d.mcore_mbox_off,
+           d.mcore_mbox_size, wqmp_is_up(&d) ? "UP" : "down");
+}
+void qmpStateRow(const wqmp_desc &d) {qmpStateFmt(d); rowEnd();}
+bool qmpMap()
+{
+    return mapRegion(FW_AOSS_QMP_PHYS, FW_AOSS_QMP_SIZE, gAossRw, true) && mapRegion(FW_APSS_SHARED_PHYS, 0x1000, gIpc, true);
+}
+void qmpOpen()
+{
+    qmpSink(true);
+    rowStart();
+    if (!qmpMap()) {rowAdd("FWQ map FAILED"); rowEnd(); qmpSink(false); return;}
+    wqmp_desc d;
+    wqmp_read(&kQmpIo, &d);
+    rowAdd("FWQ open (qcom_aoss qmp_open, doorbell apss_shared %u, timeout %u us per wait)", FW_APSS_IPC_AOSS, WQMP_TIMEOUT_US);
+    rowEnd();
+    qmpStateRow(d);
+    const int rc = wqmp_open(&kQmpIo, 0, &gQmp);
+    gQmpRan = true;
+    for (unsigned i = 0; i < gQmp.nsteps; ++i) {
+        const wqmp_step &s = gQmp.step[i];
+        rowAdd("FWQ %u %s rc %d val %x (%s) %u us", s.step, wqmp_step_name(s.step), s.rc, s.value, wqmp_state_name(s.value),
+               s.elapsed_us);
+        rowEnd();
+    }
+    wqmp_read(&kQmpIo, &d);
+    rowAdd("FWQ done rc %d kicks %u mcore mbox %x+%x (no message sent)", rc, gQmp.kicks, gQmp.mbox_off, gQmp.mbox_size);
+    rowEnd();
+    qmpStateRow(d);
+    qmpSink(false);
+}
+size_t qmpShow(char *out, size_t cap)
+{
+    // Read through the read-only map unless the link-up mapped the writable one.
+    const bool rw = gAossRw.va != 0;
+    if (!rw && !mapRegion(FW_AOSS_QMP_PHYS, FW_AOSS_QMP_SIZE, gAoss)) return snprintf(out, cap, "wifi qmp: map failed\n");
+    wqmp_desc d;
+    uint32_t *w = &d.magic;
+    for (unsigned i = 0; i < sizeof d / 4; ++i) w[i] = rd32((rw ? gAossRw.va : gAoss.va) + 4 * i);
+    rowStart();
+    qmpStateFmt(d);   // formatted, not logged
+    int at = snprintf(out, cap, "%s\n%s", gRow,
+                      gQmpRan ? "" : "(no link-up this boot: fajita-wifi-qmp=1 runs it)\n");
+    rowStart();
+    if (at > 0 && size_t(at) < cap && gQmpRan) {
+        const size_t n = gQmpTextLen < cap - size_t(at) - 1 ? gQmpTextLen : cap - size_t(at) - 1;
+        memcpy(out + at, gQmpText, n);
+        at += int(n);
+        out[at] = 0;
+    }
+    return at > 0 ? (size_t(at) < cap ? size_t(at) : cap) : 0;
+}
+
 void survey()
 {
     gTextLen = 0;
@@ -286,7 +388,9 @@ size_t kcmdWifi(const char *args, size_t len, char *out, size_t cap)
     if (!strncmp(a, "rows", 4)) n = rows(from, out, cap);
     else if (!strncmp(a, "ro", 2)) {survey(); n = rows(from, out, cap);}
     else if (!strncmp(a, "snap", 4)) n = snap(out, cap);
-    else n = snprintf(out, cap, "usage: wifi ro [FROM] (re-run the read-only survey) | rows [FROM] | snap (SMEM copy for readv)\n");
+    else if (!strncmp(a, "qmp", 3)) n = qmpShow(out, cap);
+    else n = snprintf(out, cap, "usage: wifi ro [FROM] (re-run the read-only survey) | rows [FROM] | snap (SMEM copy for readv)"
+                                " | qmp (AOSS QMP link/channel state)\n");
     IOLockUnlock(gLock);
     return n < cap ? n : cap;
 }
@@ -297,7 +401,7 @@ extern "C" void fajita_wifi_lower_kcmd(void)
 {
     if (!gLock) gLock = IOLockAlloc();
     if (fajita_usbdbg_register_kcmd)
-        fajita_usbdbg_register_kcmd("wifi", kcmdWifi, "Wi-Fi lower layers, read-only: wifi ro [FROM] | rows [FROM] | snap");
+        fajita_usbdbg_register_kcmd("wifi", kcmdWifi, "Wi-Fi lower layers, read-only: wifi ro [FROM] | rows [FROM] | snap | qmp");
 }
 
 // The fajita-wifi worker, with fajita-wifi-ro=1: one survey at boot.
@@ -307,5 +411,15 @@ extern "C" void fajita_wifi_lower(void)
     if (!gLock) return;
     IOLockLock(gLock);
     survey();
+    IOLockUnlock(gLock);
+}
+
+// The fajita-wifi worker, with fajita-wifi-qmp=1: the AP side of the AOSS QMP link-up, once (FWQ rows).
+extern "C" void fajita_wifi_qmp(void)
+{
+    fajita_wifi_lower_kcmd();
+    if (!gLock) return;
+    IOLockLock(gLock);
+    qmpOpen();
     IOLockUnlock(gLock);
 }

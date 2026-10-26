@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Host tests for the fajita Wi-Fi stack above a booted modem: SMEM/SMP2P, GLINK over SMEM, QRTR and the AP services
-// (pd-mapper, TFTP, rmtfs), the wlfw client, the ath10k CE/HTC/WMI path and the WPA2 supplicant. Built and run by
+// (pd-mapper, TFTP, rmtfs), the wlfw client, the ath10k CE/HTC/WMI path, the WPA2 supplicant and the AOSS QMP link-up. Built and run by
 // scripts/check-fajita-wifi-host.py (ASan/UBSan). Usage: test_stack [modem-partition.img [efs-backup-dir [board-2.bin [smem-snapshot.bin]]]]
 #include "tcheck.h"
 #include <stdlib.h>
@@ -32,7 +32,7 @@ void t_tfree_all(void)
     while (t_nallocs) free(t_allocs[--t_nallocs]);
 }
 
-#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw) X(ce) X(wpa)
+#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw) X(ce) X(wpa) X(qmp)
 #define DECL(n) void t_##n(void);
 T_LAYERS(DECL)
 
