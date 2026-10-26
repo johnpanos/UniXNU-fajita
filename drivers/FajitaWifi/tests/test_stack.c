@@ -32,7 +32,7 @@ void t_tfree_all(void)
     while (t_nallocs) free(t_allocs[--t_nallocs]);
 }
 
-#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw) X(ce) X(wpa) X(qmp) X(mss) X(wmi) X(mlme) X(htt) X(dev)
+#define T_LAYERS(X) X(smem) X(glink) X(qrtr) X(wlfw) X(ce) X(wpa) X(qmp) X(mss) X(wmi) X(mlme) X(htt) X(dev) X(sae)
 #define DECL(n) void t_##n(void);
 T_LAYERS(DECL)
 
