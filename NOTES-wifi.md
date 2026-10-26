@@ -763,3 +763,38 @@ backup. Keep every run unattended and self-recovering (`--test`, autoreset + wat
 - The boot-addon change to carry kernel-only firmware entries (modem/mba/board, ~36 MB compressed) touches the shared
   GPU addon path; keep it additive + default-off and clear it with the lead/GPU agent before committing.
 - iOS option (a) IO80211 remains research; (b) IOEthernetController is the first target.
+
+## 9. Safari: WebKit XPC services crashed at launch (fixed 2026-10-26)
+
+Symptom: Safari opens; tapping a favorite gives a blank page, and every `com.apple.WebKit.Networking` / `WebContent` process dies
+at once: `CRASH ... sig11 ... E92000005 F8` (NULL + 8 read in CoreFoundation, called from WebKit +0x1e6dac).
+
+Cause (not a sandbox, entitlement or environment problem): the service entry point does
+`CFBundleGetFunctionPointerForName(CFBundleGetBundleWithIdentifier(CFSTR("com.apple.WebKit")), CFSTR("WebContentServiceInitializer"))`
+(and the Networking/GPU twins). `CFBundleGetBundleWithIdentifier` returned NULL because CFBundle never read WebKit.framework's
+Info.plist: `readdir` of `/System/Library/Frameworks/WebKit.framework` (and JavaScriptCore.framework) failed with EINVAL.
+SystemOS (the cryptex, `disk2s1`) is mounted as a union over the OS volume. When the upper directory is exhausted, getdirentries
+traverses to the lower directory (`lookup_traverse_union`), and the OS volume has a non-directory at that path, so the traversal
+handed a non-directory to `getdirentries64` (EINVAL; getattrlistbulk: ENOTDIR). Directories that exist only in one layer read fine, which is
+why UIKit, CFNetwork and Foundation worked.
+
+Fix: `ios16/patches/xnu-8796/zzx-union-readdir-lower-nondir.patch` makes `lookup_traverse_union` return ENOENT ("no lower directory",
+the ordinary end of a union directory) when the lower object is not a directory. One place, so getdirentries, getdirentriesattr and
+getattrlistbulk all end at the upper entries. (Keep it out of vfs_attrlist.c/vfs_syscalls.c: build-xnu-4k-baseline.sh re-applies
+patches idempotently by reverse-checking, and editing lines of native-union-getattrlistbulk.patch breaks that check.)
+
+Tools: `package/usb-debug-tools/fjbundle.c` (built by `scripts/fajita/build-usbdbg-agent.sh`, push with `session.sh push`; push a changed
+build to a NEW name on the phone, an overwritten path ran the old binary):
+`session.sh run /usr/sbin/fjbundle /System/Library/Frameworks/WebKit.framework/WebKit com.apple.WebKit WebContentServiceInitializer`
+(prints `CFBundleGetBundleWithIdentifier = 0x0` when broken), `fjbundle --ls DIR...`, `fjbundle --stat PATH...` (open, getdirentries64 results,
+filesystem). `tools/crash/dsc-disasm.py IMAGE OFFSET [N] [--back M]` disassembles a shared-cache image at an offset from a CRASH row
+(`-` as the image takes an absolute unslid address; `--data` dumps words); `tools/crash/dsc-addr.py` maps the row's addresses first.
+
+After the fix there are no WebKit CRASH rows; the Networking, WebContent and GPU services stay up, idle in their run loops.
+
+Open (next blocker): after tapping a favorite, MobileSafari's main thread hangs (the tab button no longer responds, the page stays black).
+spindump (`session.sh run /usr/sbin/spindump -notarget 1 20 -stdout`) shows the main thread in a `dispatch_sync` onto
+`com.apple.SafariShared.WBSHistoryServiceStore`, whose block waits on a semaphore for a reply that never comes, and a
+`root.utility-qos` block waiting too. Without `com.apple.fairplayd.H2` disabled, an `ACAccountStoreReply` thread is also stuck sending to
+launchd for `com.apple.fairplayd.versioned` (fairplayd.H2 is not running); disabling it with `sheng-disable-jobs=com.apple.fairplayd.H2`
+removes that thread but not the hang.
