@@ -228,7 +228,7 @@ say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
 # Wait for the deepest requested stage's pass row (the link and the services come up seconds after FW3/FW4 first log),
 # or a row that says it will not get there.
 declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers n[0-9]' [4]='FW4 pdr [1-9][0-9]*\(more[0-9]+ cut[0-9]+\) tftp busy[0-9]+ rrq[1-9]'
-                     [5]='FW5 wlfw (enabled|failed)' [6]='FW7 scan #[0-9]+ (scan-done|failed)|FW6 dev failed|FW6 .*FAILED' [7]='FW7 mlme (connected|failed)' )
+                     [5]='FW5 wlfw (enabled|failed)' [6]='FW7 scan #[0-9]+ (scan-done|failed)|FW6 dev failed|FW6 .*FAILED' [7]='FW7 mlme connected|FW7 connect #3 ' )
 done_re=${DONE_RE[$maxN]}
 for s in "${want[@]}"; do [ "$s" = lower ] && [ "$maxN" = 1 ] && done_re='FWR aoss '; done   # the survey's last row
 for s in "${want[@]}"; do [ "$s" = qmp ] && [ "$maxN" = 1 ] && done_re='FWQ done'; done        # after the survey
