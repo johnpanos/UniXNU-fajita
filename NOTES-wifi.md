@@ -259,6 +259,9 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
 - **TODO before done (lead): apps_smmu translating bank.** SIDs 0x40/0x41 are on a *bypass* bank (the chip can DMA
   anywhere). Replace with a stage-1 translating context bank that maps only the arena (the handoff's design) and check
   CB_FSR stays clear.
+- **TODO before done (lead): credentials from iOS, not a file.** `/private/var/ngpu/wifi.psk` is the passphrase in plain
+  text on the Data volume (bring-up only). Once wifid drives the join, the passphrase must come through iOS's own path
+  (wifid / keychain via the IO80211 associate request) and the file and its push in wifi-test.sh must go.
 - kcmd `wifidev [state|scan [SSID]|connect|bss]`; rows FW6 (row 8, device), FW7 scan (row 9), FW3 MODEM FATAL (row 10),
   FW7 link (row 11).
 - Test: `scripts/fajita/test/wifi-test.sh modem link servers wlfw scan` (via bg.sh; reuse FAJITA_OUT).
