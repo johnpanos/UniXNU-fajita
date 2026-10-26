@@ -10,6 +10,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOInterruptEventSource.h>
+#include <IOKit/IOUserClient.h>
 #include <kern/clock.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/IOPMpowerState.h>
@@ -60,6 +61,25 @@ extern "C" int fajita_dpu_vsync_attach(void (*vsync)(void *,uint64_t),void *cont
 // [0] events delivered, [1] sent to a client, [2] no client, [3] coalesced (more than one interrupt per action), [4] attach result + 100,
 // [5] the last interval in us.
 extern "C" {volatile uint32_t native_legacy_hw_vsync[8];}
+// The panel's present timeline (package/FajitaDpu.cpp, fajita-fb-flip): the mach time of every VIG0 flip latch. Weak: other boards.
+extern "C" volatile uint64_t fajita_dpu_latch_ring[2048] __attribute__((weak));
+extern "C" volatile uint32_t fajita_dpu_latch_n __attribute__((weak));
+// Frame info (fajita-frame-info, default 1): the keys the display reports per presented frame, in the order supportedFrameInfo
+// (selector 74) enumerates them, and what was sent: [0] notifications, [1] clients they went to, [2] send failures, [3] frames with no
+// client registered.
+extern "C" {volatile uint32_t native_legacy_frame_info[4];}
+static const char *const kFrameInfoKeys[]={"Presentation_time","Vbl_FrameTime"};
+// IOUserClient's async send is protected; the original family's own senders call it from its user client. Never instantiated.
+struct NativeFrameInfoSend : public IOUserClient {
+    static IOReturn send(OSAsyncReference64 reference,io_user_reference_t *args,UInt32 count) {
+        return sendAsyncResult64WithOptions(reference,kIOReturnSuccess,args,count,kIOUserNotifyOptionCanDrop);
+    }
+};
+static bool frameInfoEnabled() {
+    static int on=-1;
+    if(on<0){unsigned v=1;PE_parse_boot_argn("fajita-frame-info",&v,sizeof v);on=v!=0;}
+    return on;
+}
 extern "C" uint64_t mach_continuous_time(void);
 // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
 // either way (no compression is implemented), so the bytes are the same.
@@ -186,6 +206,38 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         if(IOInterruptEventSource *source=d->hwVsync)source->interruptOccurred(nullptr,nullptr,0);
     }
     static void hwVsyncFired(OSObject *owner,IOInterruptEventSource *,int count) {static_cast<NativeLegacyDisplay *>(owner)->hwVsyncTick(count);}
+    // Frame info (selector 74's keys, below), as the panel's own displays report each presented frame: the render server's display
+    // timer locks its phase and period to Presentation_time (QuartzCore IOMFBServer::frame_info_callback -> IOMFBDisplay::add_timing).
+    // Without it the timer ran free against the panel, at the family's 1/60 s. Sent on this work loop (the family's command gate's,
+    // which registers the type-3 notification clients) at the first rd_ptr after a new flip latched, to every client registered for
+    // frame info (the family's per-type client queue 3; each node's OSAsyncReference64 at +0x18, its next at +0, as the original
+    // vsync sender walks queue 5). The arguments are IOMobileFramebuffer's FrameInfoNotifyFunc's: the key mask with bit 31 (each
+    // value as two 32-bit halves), the frame's number, then the values in key order (mach times).
+    uint32_t frameInfoLatches=0;
+    void sendFrameInfo(uint64_t vblInterval) {
+        if(!frameInfoEnabled() || !&fajita_dpu_latch_n || !&fajita_dpu_latch_ring)return;
+        const uint32_t n=fajita_dpu_latch_n;
+        if(n==frameInfoLatches || !n)return;
+        frameInfoLatches=n;
+        const uint64_t presented=fajita_dpu_latch_ring[(n-1)%2048];
+        uint32_t generation=0;memcpy(&generation,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_COMPLETED_GENERATION,4);
+        const uint64_t values[2]={presented,vblInterval};
+        io_user_reference_t args[2+2*2];
+        args[0]=0x80000000ull|((1u<<2)-1);args[1]=generation;
+        for(unsigned i=0;i<2;++i){args[2+2*i]=values[i]&0xffffffffull;args[3+2*i]=values[i]>>32;}
+        native_legacy_frame_info[0]=native_legacy_frame_info[0]+1;
+        const void *node=nullptr;memcpy(&node,reinterpret_cast<const unsigned char *>(this)+NATIVE_LEGACY_FRAME_INFO_CLIENTS,sizeof node);
+        if(!node){native_legacy_frame_info[3]=native_legacy_frame_info[3]+1;return;}
+        for(unsigned guard=0;node && guard<16;++guard) {
+            const unsigned char *bytes=reinterpret_cast<const unsigned char *>(node);
+            if(bytes[0x74]) {
+                OSAsyncReference64 reference;memcpy(reference,bytes+0x18,sizeof reference);
+                const IOReturn sent=NativeFrameInfoSend::send(reference,args,2+2*2);
+                if(sent)native_legacy_frame_info[2]=native_legacy_frame_info[2]+1;else native_legacy_frame_info[1]=native_legacy_frame_info[1]+1;
+            }
+            memcpy(&node,bytes,sizeof node);
+        }
+    }
     void hwVsyncTick(int count) {
         native_legacy_hw_vsync[0]=native_legacy_hw_vsync[0]+1;
         if(count>1)native_legacy_hw_vsync[3]=native_legacy_hw_vsync[3]+1;
@@ -193,6 +245,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         const uint64_t interval=hwLast && stamp>hwLast?(stamp-hwLast)/(count>0?(uint64_t)count:1):vsyncInterval;
         hwLast=stamp;
         {uint64_t ns=0;absolutetime_to_nanoseconds(interval,&ns);native_legacy_hw_vsync[5]=(uint32_t)(ns/1000);}
+        sendFrameInfo(interval);
         if(!vsyncWanted()){native_legacy_hw_vsync[2]=native_legacy_hw_vsync[2]+1;return;}
         native_legacy_vsync_notify(this,stamp,mach_continuous_time(),interval);
         native_legacy_hw_vsync[1]=native_legacy_hw_vsync[1]+1;
@@ -674,9 +727,16 @@ public:
         *count=0;*mask=0;bzero(key,64);return kIOReturnUnsupported;
     }
 #else
-    IOReturn supportedFrameInfo(uint32_t,uint32_t *count,char *key) override {
+    // fajita-frame-info (default on): the keys sendFrameInfo reports, by index; the render server asks for its frame-info keys only when
+    // this answers (QuartzCore EAGLServer: IOMobileFramebufferSupportedFrameInfo, then the type-3 run loop source and the callback).
+    IOReturn supportedFrameInfo(uint32_t index,uint32_t *count,char *key) override {
         if(!count || !key)return kIOReturnBadArgument;
-        *count=0;bzero(key,64);return kIOReturnUnsupported;
+        bzero(key,64);
+        if(!frameInfoEnabled() || !&fajita_dpu_latch_n){*count=0;return kIOReturnUnsupported;}
+        *count=(uint32_t)(sizeof kFrameInfoKeys/sizeof *kFrameInfoKeys);
+        if(index>=*count)return kIOReturnBadArgument;
+        strlcpy(key,kFrameInfoKeys[index],64);
+        return kIOReturnSuccess;
     }
 #endif
     IOReturn newUserClient(task_t task,void *security,UInt32 type,IOUserClient **client) override {
