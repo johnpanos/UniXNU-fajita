@@ -275,6 +275,16 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
   .cache/mnt/os20H392/root into the boot addon with scripts/fajita/addon-put.py; trusted by cdhash). Phone: pid 42 = real
   wifid (7.3 MB RSS, ppid 1), pid 87 = agent (ppid 42, own session), channel works, WiFiCloudAssetsXPCService and
   wifianalyticsd start, lock screen normal. Default boots unchanged.
+- **iOS's own network stack over the radio (fajita-wifi-iokit=1, on the phone, 2026-10-26):** `package/FajitaWifiIOKit.cpp`
+  publishes our own minimal classes with the names configd tests for (IONetworkingFamily/IO80211Family are not in this
+  kernel; no Apple layout): `IONetworkStack` (+ `IONetworkStackUserClient` accepting IOConnectSetCFProperties naming
+  commands) at FajitaNet start, then `IO80211Controller` (IOMACAddress) with `IO80211Interface` -> `IOEthernetInterface` ->
+  `IONetworkInterface` (BSD Name en0, IOInterfaceType 6, prefix/unit, IOBuiltin, IOPrimaryInterface) once en0 attaches.
+  Result: NetworkInterfaces.plist `('en0', 'IEEE80211')`, a network service for en0, en0 UP with **192.168.0.84 from iOS's
+  own IPConfiguration** (no fjnet), `State:/Network/Global/IPv4` PrimaryInterface en0 / Router 192.168.0.1, IPv6, DNS from
+  DHCP, **CFNetwork GET http://example.com/ -> 200 by name**, and the lock screen clock set from the network. Without the
+  IONetworkStack object InterfaceNamer never names anything ("No network stack object"). Not yet: the Wi-Fi status icon /
+  Settings (wifid does not see the interface).
 - wifid's IOKit side (strings): Apple80211.framework (Apple80211Open/BindToInterfaceWithParams/ScanAsync/AssociateAsync/
   EventMonitoringInit2 ...), IOServiceAddMatchingNotification on **IO80211SkywalkInterface**, the **IO80211APIUserClient**,
   `_SCNetworkInterfaceCreateWithIONetworkInterfaceObject`. Next: what Apple80211 sends through the user client (dyld cache
