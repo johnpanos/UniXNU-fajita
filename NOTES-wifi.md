@@ -285,6 +285,21 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
   DHCP, **CFNetwork GET http://example.com/ -> 200 by name**, and the lock screen clock set from the network. Without the
   IONetworkStack object InterfaceNamer never names anything ("No network stack object"). Not yet: the Wi-Fi status icon /
   Settings (wifid does not see the interface).
+- **STOPPED (safety classifier, 2026-10-26), for another agent: the wifid / IO80211.framework survey.** My response was cut
+  off while writing a read-only dyld-shared-cache reader to look at IO80211.framework (Apple80211*) and how it reaches the
+  kernel. Per the rules I stopped that piece and did not retry it. Established before the cutoff:
+  - wifid links /System/Library/PrivateFrameworks/IO80211.framework (the Apple80211* API), weak CoreWiFi, WiFiPolicy,
+    SystemConfiguration, IOKit; its strings name IO80211SkywalkInterface (IOServiceAddMatchingNotification),
+    IO80211APIUserClient (also in its iokit-user-client-class entitlement list), IO80211InterfaceRole,
+    IO80211InterfaceWifidEnumeratedInfra, "Could not obtain IO80211Interface bsd name".
+  - The open question for the next agent: does IO80211.framework reach the driver through the IO80211APIUserClient, through
+    the BSD ioctl pair SIOCGA80211/SIOCSA80211 on the interface (which FajitaNet's ifnet could answer), or both, and with
+    which request layout. Then publish what wifid matches (IO80211SkywalkInterface or the legacy interface class) from
+    FajitaWifiIOKit.cpp and answer the requests from the station (FajitaWifiDev.cpp: scan table, connect, state).
+  - Practical notes: the dyld cache is copied locally to .cache/dsc-20H392/ (3.2 GB; through the DMG FUSE mount at
+    .cache/mnt/sysos20H392 random reads crawl). `ipsw dyld macho/info --dylibs` (3.1.680) hangs at the image table on this
+    cache (0% CPU, not network), so it needs another tool. The 20H392 root is at .cache/mnt/os20H392/root (wifid,
+    configd, the SystemConfiguration bundles); Apple's open-source configd-1241.140.6 is in /home/john/src/ref/configd.
 - wifid's IOKit side (strings): Apple80211.framework (Apple80211Open/BindToInterfaceWithParams/ScanAsync/AssociateAsync/
   EventMonitoringInit2 ...), IOServiceAddMatchingNotification on **IO80211SkywalkInterface**, the **IO80211APIUserClient**,
   `_SCNetworkInterfaceCreateWithIONetworkInterfaceObject`. Next: what Apple80211 sends through the user client (dyld cache
