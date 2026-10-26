@@ -105,6 +105,12 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
   a regression.
 - Check your own diagnostics first: debug stops, `boot-progress` and probe arguments in the kit can be the cause of a "hang".
 
+**Never drop silently.**
+- A fixed-size table, queue or buffer that runs out must count the overflow and log it loudly (one log line the first time,
+  plus a counter in the stage's status row), never discard quietly. A 32-entry QRTR server table dropped the modem's 33rd
+  announcement (wlfw) without a trace, and Wi-Fi bring-up chased the wrong causes for hours.
+- The same goes for unknown messages, parse failures and refused requests: count them per kind and show the counts.
+
 **Never commit blobs.**
 - Apple material (IPSW contents, kernelcaches, the SDK, frameworks, trust caches, screenshots of the iOS UI) and Qualcomm firmware
   stay in `.cache/`.
