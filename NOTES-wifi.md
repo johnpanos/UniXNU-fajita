@@ -833,7 +833,9 @@ The list on the phone is the add-on's, copied at boot (`/System/Library/Extensio
 Proof (session-032805, Wi-Fi up, Safari defaults with the GPU process): apple.com drawn (`.cache/webpaint/safari-apple-fixed.png`);
 with the GPU process off (WebContent drawing, session-031744) example.com and apple.com draw too, and scroll; there the probe's census showed
 the w30r tiles at nz1000 (non-zero words per mille) against nz0 in the sessions before the fix. fps.sh unchanged: home motion 54.7 [50.0-57.2], App Library motion
-51.8 [42.0-58.4]. Still open, separate: a one-pixel dark line at some tile seams with WebContent drawing (GPU process off); product images
+51.8 [42.0-58.4]. settings-scroll.sh against the same image with only `ngpu-metal` listed (FAJITA_GPU_CLIENTS, Wi-Fi up, corr/wpbase2 vs
+corr/webpaint): the resting screens 0, u4, d4 match (0 px over 8); the in-between drag steps differ by their scroll offset only (8-37 px).
+Still open, separate: a one-pixel dark line at some tile seams with WebContent drawing (GPU process off); product images
 on apple.com are missing (image decode, not the tiles); the tab overview's background is pink.
 
 Tools: `package/usb-debug-tools/fjsurface.c` (built by build-usbdbg-agent.sh): `--cg w30r|BGRA` draws with CoreGraphics into a new surface
