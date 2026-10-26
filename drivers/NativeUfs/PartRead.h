@@ -206,8 +206,9 @@ static void registerOnce ()
 }
 }  // namespace partread
 
-// In-kernel read-only access (rmtfs). Returns 1 with the partition's LUN/first/blocks, 0 if absent or off.
-extern "C" int native_ufs_part_find (const char *name, uint8_t *lun, uint64_t *first, uint64_t *blocks)
+// In-kernel read-only access (rmtfs, the modem firmware). Returns 1 with the partition's LUN/first/blocks and GPT attributes
+// (attr may be null; A/B: bit 50 is the active slot), 0 if absent or off.
+extern "C" int native_ufs_part_find (const char *name, uint8_t *lun, uint64_t *first, uint64_t *blocks, uint64_t *attr)
 {
   if (!partread::enabled () || !partread::gLock || !gHost.ready || !name) return 0;
   partread::Part p;
@@ -218,6 +219,7 @@ extern "C" int native_ufs_part_find (const char *name, uint8_t *lun, uint64_t *f
   if (lun) *lun = p.lun;
   if (first) *first = p.first;
   if (blocks) *blocks = p.last - p.first + 1;
+  if (attr) *attr = p.attr;
   return 1;
 }
 

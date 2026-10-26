@@ -206,6 +206,61 @@ extern "C" int fajita_bus_set(unsigned peakMBps) {
     return int(fajita_bus_state[3]);
 }
 
+// For other board code (FajitaWifiProbe.cpp: the modem's cx/mx/mss ARC votes): cmd-db's address of resource `name` (up to 8
+// characters, e.g. "mss.lvl") and up to *auxLen bytes of its aux data (an ARC's u16 voltage levels). 0 on success.
+extern "C" int fajita_rpmh_lookup(const char *name, uint32_t *addr, uint8_t *aux, unsigned *auxLen) {
+    IODeviceMemory *m = IODeviceMemory::withRange(kCmdDbBase, kCmdDbSize);
+    if (!m) return -12;
+    OSSharedPtr<IOMemoryMap> map(m->map(kIOMapAnywhere | kIOMapInhibitCache | kIOMapReadOnly), OSNoRetain);
+    m->release();
+    if (!map) return -12;
+    uint8_t *db = static_cast<uint8_t *>(IOMallocData(kCmdDbSize));
+    if (!db) return -12;
+    const volatile uint32_t *src = reinterpret_cast<const volatile uint32_t *>(map->getVirtualAddress());
+    for (uint32_t i = 0; i < kCmdDbSize / 4; ++i) {const uint32_t w = src[i]; memcpy(db + 4 * i, &w, 4);}
+    enum {kHeader = 8, kRscHdr = 16, kSlaves = 8, kData = 8 + 16 * 8 + 8, kEntry = 24};
+    int result = -2;
+    char want[8] = {};
+    strncpy(want, name, sizeof want);
+    if (db[4] == 0xdb && db[5] == 0x30 && db[6] == 0x03 && db[7] == 0x0c) {
+        for (unsigned i = 0; i < kSlaves && result; ++i) {
+            const uint8_t *h = db + kHeader + kRscHdr * i;
+            const unsigned slave = le16(h), header = le16(h + 2), data = le16(h + 4), count = le16(h + 6);
+            if (!slave) break;
+            for (unsigned j = 0; j < count; ++j) {
+                const size_t at = size_t(kData) + header + size_t(j) * kEntry;
+                if (at + kEntry > kCmdDbSize) break;
+                const uint8_t *e = db + at;
+                if (memcmp(e, want, 8)) continue;
+                *addr = le32(e + 16);
+                const size_t len = le16(e + 20), off = size_t(kData) + data + le16(e + 22);
+                unsigned n = 0;
+                if (aux && auxLen && off + len <= kCmdDbSize) {n = len < *auxLen ? unsigned(len) : *auxLen; memcpy(aux, db + off, n);}
+                if (auxLen) *auxLen = n;
+                result = 0;
+                break;
+            }
+        }
+    }
+    IOFreeData(db, kCmdDbSize);
+    return result;
+}
+
+// One AMC request of n (<= 16) {msgid, addr, data} commands over the apps RSC, serialised with the bus votes. Returns the TCS
+// used, -1 none idle, -2 no completion within 100 ms, -19 before the bus code is up. resp (may be null) gets read responses.
+extern "C" int fajita_rpmh_send(unsigned n, const uint32_t (*cmd)[3], uint32_t *resp) {
+    if (!gLock || !n || n > 16) return -19;
+    IOLockLock(gLock);
+    if (!gRsc) {
+        IODeviceMemory *m = IODeviceMemory::withRange(kRscBase, 0x10000);
+        if (m) {gRsc = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain); m->release();}
+    }
+    uint32_t st[16] = {}, us = 0;
+    const int t = gRsc ? send(n, cmd, st, resp, &us) : -12;
+    IOLockUnlock(gLock);
+    return t;
+}
+
 // Called by FajitaCpuFreq.cpp's sheng_cpufreq_poll (the boot progress monitor, once a second): the first call after IOKit is up
 // registers the kcmd and sends the boot vote.
 extern "C" void fajita_bus_poll(void) {
