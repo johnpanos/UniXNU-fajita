@@ -52,6 +52,8 @@ int fajita_net_input(const void *frame, size_t len);
 void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len), void *ctx);
 // The interface's MAC (before it attaches): fajita-net=wifi uses the station's.
 void fajita_net_set_mac(const uint8_t mac[6]);
+// FajitaWifiIOKit.cpp (fajita-wifi-iokit=1): the IOKit view of en0 that configd needs (IO80211Controller + IO80211Interface)
+int fajita_wifi_iokit_publish(const char *bsd_name, unsigned unit, const uint8_t mac[6]);
 // [0] ifnet attached, [1] frames in, [2] frames out, [3] dropped in, [4] dropped out, [5] backend errors
 volatile uint32_t fajita_net_state[8];
 }
@@ -257,6 +259,7 @@ void worker(void *, wait_result_t)
     if (!attach()) {IOLog("fajita-net: ifnet attach failed\n"); return;}
     if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("net", kcmdNet, "fajita-net interface counters");
     IOLog("fajita-net: en0 attached (%s), mac %02x:%02x:%02x:%02x:%02x:%02x\n", mode, gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
+    if (!strcmp(mode, "wifi")) fajita_wifi_iokit_publish("en0", 0, gMac);
     thread_t t = nullptr;
     if (kernel_thread_start(rxThread, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
 }
