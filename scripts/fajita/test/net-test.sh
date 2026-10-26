@@ -89,8 +89,8 @@ stage_usbnet() {
   else verdict usbnet FAIL "see above and $RES"; fi
 }
 
-# The iOS network interface (package/FajitaNet.cpp, fajita-net=usb): the BSD interface en0 over the NET channel. iOS itself runs
-# DHCP (configd's IPConfiguration: `ipconfig set en0 DHCP`) and the ping through passt on this laptop.
+# The iOS network interface (package/FajitaNet.cpp, fajita-net=usb): the BSD interface en0 over the NET channel. DHCP and ping through passt on this laptop,
+# with package/usb-debug-tools/fjnet.c (iOS ships no ifconfig/ipconfig/ping).
 stage_ios() {
   local ok=1 con b o ip gw
   if [ -n "${NET_NO_BUILD:-}" ] && [ -f "$OUT/payload.img" ]; then say "build: reusing $OUT"
@@ -109,22 +109,19 @@ stage_ios() {
   for _ in $(seq 1 50); do grep -q 'usbnet bridge: phone' "$RES/ios-bridge.txt" 2>/dev/null && break; sleep 0.2; done
   grep -a 'fajita-net' "$con" 2>/dev/null | tail -3 | while read -r r; do say "  log: $r"; done
   grep -aq 'fajita-net: en0 attached' "$con" 2>/dev/null || { ok=0; say "  en0 was not attached (fajita-net: rows above)"; }
-  o=$("$TD/session.sh" run /sbin/ifconfig en0 2>&1); say "  ifconfig en0: $(echo "$o" | tr '\n' ' ')"
-  echo "$o" | grep -q 'en0' || ok=0
-  "$TD/session.sh" run /usr/sbin/ipconfig set en0 DHCP > "$RES/ios-ipconfig.txt" 2>&1
-  for _ in $(seq 1 30); do
-    ip=$("$TD/session.sh" run /usr/sbin/ipconfig getifaddr en0 2>/dev/null | grep -E '^([0-9]+\.){3}[0-9]+' | head -1)
-    [ -n "$ip" ] && break; sleep 1
-  done
-  say "  DHCP lease on en0: ${ip:-none}"
+  local FJN=/private/var/ngpu/sbin/fjnet
+  [ -x "$ROOT/.cache/fajita-inputs/fjnet" ] || "$TD/../build-usbdbg-agent.sh" "$ROOT/.cache/fajita-inputs/fjdbg-agent" >/dev/null 2>&1
+  "$TD/session.sh" push "$ROOT/.cache/fajita-inputs/fjnet" $FJN >/dev/null 2>&1 || { ok=0; say "  push fjnet failed"; }
+  o=$("$TD/session.sh" run $FJN show en0 2>&1); say "  show en0: $(echo "$o" | tr '\n' ' ')"
+  echo "$o" | grep -q 'link' || ok=0
+  o=$("$TD/session.sh" run $FJN dhcp en0 2>&1); say "  dhcp: $(echo "$o" | tr '\n' ' ')"
+  ip=$(echo "$o" | sed -n 's/^lease \([0-9.]*\) gw .*/\1/p'); gw=$(echo "$o" | sed -n 's/^lease .* gw \([0-9.]*\)$/\1/p')
   [ -n "$ip" ] || ok=0
-  gw=$("$TD/session.sh" run /usr/sbin/netstat -rn 2>/dev/null | awk '$1=="default"{print $2; exit}')
-  say "  default gateway: ${gw:-none}"
-  if [ -n "${gw:-}" ]; then
-    o=$("$TD/session.sh" run /sbin/ping -c 3 -t 5 "$gw" 2>&1); say "  ping $gw: $(echo "$o" | tail -3 | tr '\n' ' ')"
-    echo "$o" | grep -qE '[1-3] packets received|, [1-9][0-9]*(\.[0-9]+)?% packet loss|0\.0% packet loss' || ok=0
-    echo "$o" | grep -q '0.0% packet loss' || ok=0
+  if [ -n "${gw:-}" ] && [ "$gw" != 0.0.0.0 ]; then
+    o=$("$TD/session.sh" run $FJN ping "$gw" 3 2>&1); say "  ping $gw: $(echo "$o" | tail -2 | tr '\n' ' ')"
+    echo "$o" | grep -q '^3/3 received' || ok=0
   else ok=0; fi
+  say "  show en0 after: $("$TD/session.sh" run $FJN show en0 2>&1 | tr '\n' ' ')"
   say "  kcmd net: $("$TD/session.sh" call kcmd net 2>&1 | head -1)"
   kill -TERM "$b" 2>/dev/null; wait "$b" 2>/dev/null
   grep -E 'dhcp|icmp|arp' "$RES/ios-bridge.txt" | head -12 | while read -r r; do say "  bridge: $r"; done
