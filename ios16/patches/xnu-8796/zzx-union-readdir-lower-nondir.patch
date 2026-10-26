@@ -1,0 +1,38 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -10393,7 +10393,11 @@
+ 		vnode_t uvp;
+ 
+ 		if (lookup_traverse_union(vp, &uvp, &context) == 0) {
+-			if (vnode_ref(uvp) == 0) {
++			if (uvp->v_type != VDIR) {
++				/* The lower layer holds a non-directory here (the OS volume has symlinks where the SystemOS cryptex
++				 * has directories): it adds no entries, so this is the end of the directory, not EINVAL. */
++				vnode_put(uvp);
++			} else if (vnode_ref(uvp) == 0) {
+ 				fp_set_data(fp, uvp);
+ 				fp->fp_glob->fg_offset = 0;
+ 				vnode_rele(vp);
+@@ -10724,7 +10728,10 @@
+ 		} else {                                                // Empty buffer
+ 			vnode_t uvp;
+ 			if (lookup_traverse_union(vp, &uvp, ctx) == 0) {
+-				if (vnode_ref_ext(uvp, fp->fp_glob->fg_flag & O_EVTONLY, 0) == 0) {
++				if (uvp->v_type != VDIR) {
++					/* A lower non-directory adds no entries: end of directory (see getdirentries_common). */
++					vnode_put(uvp);
++				} else if (vnode_ref_ext(uvp, fp->fp_glob->fg_flag & O_EVTONLY, 0) == 0) {
+ 					fp_set_data(fp, uvp);
+ 					fp->fp_glob->fg_offset = 0; // reset index for new dir
+ 					count = savecount;
+--- a/bsd/vfs/vfs_attrlist.c
++++ b/bsd/vfs/vfs_attrlist.c
+@@ -4293,7 +4293,7 @@
+ 		}
+ 		/* No corresponding lower directory is ordinary end-of-directory;
+ 		 * other failures must not silently hide lower entries. */
+-		if (union_error != ENOENT) {
++		if (union_error != ENOENT && union_error != ENOTDIR) {   /* a lower non-directory adds no entries */
+ 			error = union_error;
+ 		}
+ 	}
