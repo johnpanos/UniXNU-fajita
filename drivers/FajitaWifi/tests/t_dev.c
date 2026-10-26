@@ -184,7 +184,8 @@ static void t_dev_bringup(void)
     CHECK(g->htt_ver_req == 1 && g->htt_setup_msgs == 3 && g->d.htt.state == WHTT_READY);   // FRAG_DESC_BANK, RX_RING_CFG, AGGR_CFG
     const int init = find_cmd(g, WA_WMI_TLV_INIT_CMDID), rd = find_cmd(g, WA_WMI_TLV_PDEV_SET_REGDOMAIN_CMDID);
     const int chl = find_cmd(g, WA_WMI_TLV_SCAN_CHAN_LIST_CMDID), vdev = find_cmd(g, WA_WMI_TLV_VDEV_CREATE_CMDID);
-    CHECK(init == 0 && rd > init && chl > rd && vdev > chl);
+    const int pmf = find_cmd(g, WA_WMI_TLV_PDEV_SET_PARAM_CMDID);
+    CHECK(init == 0 && pmf > init && rd > pmf && chl > rd && vdev > chl);
     CHECK(g->d.dma.used <= g->d.dma.size && g->d.dma.used < (4u << 20));   // fits the phone's arena with room to spare
     // a scan sees the network
     CHECK(wdev_scan(&g->d, "KittyCorner") == 0);

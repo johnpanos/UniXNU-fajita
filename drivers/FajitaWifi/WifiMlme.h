@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "WifiWmi.h"
 #include "WifiWpa.h"
+#include "WifiSae.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,7 +36,9 @@ typedef struct {
     uint16_t capab, beacon_int;
     uint8_t rates[WMLME_MAX_RATES]; uint8_t n_rates;   // supported + extended, as sent (basic flag bit kept)
     uint8_t rsn[WMLME_RSN_MAX]; uint8_t rsn_len;       // the whole RSN element (id, length, body); 0 = open
-    int rsn_ok;                             // CCMP pairwise + group, PSK, no required PMF
+    int rsn_ok;                             // CCMP pairwise + group, AKM PSK or SAE (wmlme_rsn_akm)
+    uint8_t akm;                            // the AKM we would use: WWPA_AKM_SAE when offered, else WWPA_AKM_PSK; 0 = none
+    uint8_t pmf;                            // the AP's RSN capabilities: 0 no PMF, 1 capable (MFPC), 2 required (MFPR)
     int ht;                                 // advertises HT (the connect still uses legacy rates)
     uint32_t seen_ms; int probe_resp;
 } wmlme_bss;
@@ -75,6 +78,12 @@ typedef struct wmlme {
     uint16_t seq;
     uint8_t own_rsne[24];
     wwpa_supp supp;
+    // WPA3-Personal (SAE authentication): the exchange, the anti-clogging token, the password until the PWE is derived
+    wsae sae;
+    unsigned akm, pmf;                      // of this association (pmf: PMF in use)
+    int sae_step;                           // 0 commit sent, 1 confirm sent
+    uint8_t sae_token[WSAE_TOKEN_MAX]; unsigned sae_token_len;
+    uint32_t sae_commits, sae_confirms, sae_tokens, sae_status;
     int keys_sent, ptk_installed, authorized, vdev_started;
     uint32_t key_events;
     // management buffers
@@ -108,8 +117,11 @@ const char *wmlme_state_name(unsigned state);
 // Frame helpers (exposed for the tests and the data path)
 // Parse a beacon / probe response (the frame from the 802.11 header on) into b; 0 or WMLME_ERR_PROTO.
 int wmlme_parse_beacon(const uint8_t *f, uint32_t len, wmlme_bss *b);
-// The RSN element checks: CCMP pairwise and group, PSK AKM, PMF not required. Returns 1 if usable.
+// The RSN element checks: CCMP pairwise and group, AKM SAE or PSK. Returns 1 if usable.
 int wmlme_rsn_usable(const uint8_t *rsn, unsigned len);
+// The AKM we would use with this RSN element (WWPA_AKM_SAE preferred, WWPA_AKM_PSK, 0 = unusable) and its PMF capabilities
+// (*pmf 0 none, 1 capable, 2 required). PSK with PMF required is accepted (the firmware does 802.11w).
+unsigned wmlme_rsn_akm(const uint8_t *rsn, unsigned len, unsigned *pmf);
 
 #ifdef __cplusplus
 }

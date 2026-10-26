@@ -27,7 +27,9 @@ typedef struct {
     const char *ssid, *pass;
     uint16_t freq;
     unsigned crowd;             // extra BSSes the target reports in a scan
-    int ap_rsn_flags;           // 0 plain WPA2-PSK/CCMP; 1 PMF required; 2 TKIP group
+    int ap_rsn_flags;           // 0 plain WPA2-PSK/CCMP; 1 PMF required; 2 TKIP group; 3 WPA3-Personal (SAE only, PMF required)
+    int ap_sae_token;           // SAE: answer the first commit with status 76 and an anti-clogging token
+    wsae ap_sae; int ap_sae_up, ap_token_sent, ap_sae_confirmed; unsigned ap_sae_commits, ap_sae_confirms, ap_sae_bad;
     int ap_ignore_auth, ap_auth_status, ap_assoc_status, ap_no_m1, ap_resend_m3, ap_drop_key_complete;
     uint8_t pmk[32], anonce[32], snonce[32], gtk[16];
     wwpa_ptk ptk; int have_ptk; uint64_t replay;
@@ -106,6 +108,7 @@ static uint32_t beacon(sim *s, uint8_t *f, const uint8_t *bssid, const char *ssi
         uint8_t r[24] = {1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0};
         if (rsn_flags == 2) r[5] = 2;                  // group cipher TKIP
         if (rsn_flags == 1) r[18] = 0xc0;              // MFPR | MFPC
+        if (rsn_flags == 3) {r[17] = 8; r[18] = 0xcc;}   // AKM SAE, MFPC | MFPR (KittyCorner's element)
         at += put_ie(f + at, 48, r, 20);
     }
     (void)s;
@@ -139,7 +142,7 @@ static void ap_m1(sim *s)
 {
     wwpa_key k;
     memset(&k, 0, sizeof k);
-    k.eapol_version = 2; k.info = WWPA_KI_VER_HMAC_SHA1_AES | WWPA_KI_PAIRWISE | WWPA_KI_ACK; k.key_len = 16; k.replay = ++s->replay;
+    k.eapol_version = 2; k.info = (s->ap_rsn_flags == 3 ? 0 : WWPA_KI_VER_HMAC_SHA1_AES) | WWPA_KI_PAIRWISE | WWPA_KI_ACK; k.key_len = 16; k.replay = ++s->replay;
     memcpy(k.nonce, s->anonce, 32);
     ap_send_eapol(s, &k);
 }
@@ -148,6 +151,8 @@ static void ap_m3(sim *s, uint64_t replay)
     uint8_t kd[64];
     unsigned at = 0;
     uint8_t rsne[22] = {48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0};
+    if (s->ap_rsn_flags == 1) rsne[20] = 0xc0;
+    if (s->ap_rsn_flags == 3) {rsne[19] = 8; rsne[20] = 0xcc;}
     memcpy(kd, rsne, 22); at = 22;
     kd[at++] = 0xdd; kd[at++] = 0x16; kd[at++] = 0x00; kd[at++] = 0x0f; kd[at++] = 0xac; kd[at++] = 0x01;
     kd[at++] = 0x01 | 0x04; kd[at++] = 0;              // key id 1, tx
@@ -159,17 +164,72 @@ static void ap_m3(sim *s, uint64_t replay)
     wwpa_key k;
     memset(&k, 0, sizeof k);
     k.eapol_version = 2;
-    k.info = WWPA_KI_VER_HMAC_SHA1_AES | WWPA_KI_PAIRWISE | WWPA_KI_INSTALL | WWPA_KI_ACK | WWPA_KI_MIC | WWPA_KI_SECURE | WWPA_KI_ENC_DATA;
+    k.info = (s->ap_rsn_flags == 3 ? 0 : WWPA_KI_VER_HMAC_SHA1_AES) | WWPA_KI_PAIRWISE | WWPA_KI_INSTALL | WWPA_KI_ACK | WWPA_KI_MIC | WWPA_KI_SECURE | WWPA_KI_ENC_DATA;
     k.key_len = 16; k.replay = replay;
     memcpy(k.nonce, s->anonce, 32);
     k.data = wrapped; k.data_len = (uint16_t)(at + 8);
     qent e;
     const long n = wwpa_key_build(&k, e.d, sizeof e.d);
     CHECK(n > 0);
-    wwpa_key_sign(s->ptk.kck, e.d, (size_t)n);
+    if (s->ap_rsn_flags == 3) {uint8_t mic[16]; wwpa_key_mic_cmac(s->ptk.kck, e.d, (size_t)n, mic); memcpy(e.d + 81, mic, 16);}
+    else wwpa_key_sign(s->ptk.kck, e.d, (size_t)n);
     e.len = (uint32_t)n;
     enqueue(s, e.d, e.len, 1);
     ++s->eapol_sent;
+}
+static int ap_verify(sim *s, const uint8_t *f, uint32_t len)
+{
+    if (s->ap_rsn_flags != 3) return wwpa_key_verify(s->ptk.kck, f, len);
+    uint8_t mic[16];
+    if (len < 99 || wwpa_key_mic_cmac(s->ptk.kck, f, len, mic)) return -1;
+    return memcmp(mic, f + 81, 16) ? -1 : 0;
+}
+static void sim_rng(void *c, uint8_t *o, uint32_t n) {(void)c; static uint32_t x = 0x5eed; for (uint32_t i = 0; i < n; ++i) {x = x * 1664525u + 1013904223u; o[i] = (uint8_t)(x >> 24);}}
+// SAE at the AP: a commit for each station commit (status 76 + token first, if asked), a confirm for a valid station confirm
+static void ap_sae_auth(sim *s, const uint8_t *f, uint32_t flen)
+{
+    uint8_t resp[24 + 6 + 140];
+    memset(resp, 0, 24);
+    resp[0] = 0xb0; memcpy(resp + 4, kMac, 6); memcpy(resp + 10, s->bssid, 6); memcpy(resp + 16, s->bssid, 6);
+    const unsigned alg = f[24] | f[25] << 8, seq = f[26] | f[27] << 8;
+    CHECK(alg == 3);
+    const uint8_t *body = f + 30;
+    uint32_t blen = flen - 30;
+    if (seq == 1) {
+        ++s->ap_sae_commits;
+        if (s->ap_sae_token && !s->ap_token_sent) {
+            s->ap_token_sent = 1;
+            w16(resp + 24, 3); w16(resp + 26, 1); w16(resp + 28, 76);
+            resp[30] = 19; resp[31] = 0;
+            memcpy(resp + 32, "TOKEN123", 8);
+            ev_mgmt(s, resp, 40, s->freq, 55);
+            return;
+        }
+        if (s->ap_sae_token) {   // the commit carries the token between the group and the scalar
+            CHECK(blen == 98 + 8 && !memcmp(body + 2, "TOKEN123", 8));
+            uint8_t tmp[98];
+            memcpy(tmp, body, 2); memcpy(tmp + 2, body + 10, 96);
+            memcpy((uint8_t *)body, tmp, 98);   // (the frame buffer is ours to reuse)
+            blen = 98;
+        }
+        if (!s->ap_sae_up) {CHECK(wsae_init(&s->ap_sae, s->bssid, kMac, (const uint8_t *)s->pass, strlen(s->pass), sim_rng, NULL) == 0); s->ap_sae_up = 1;}
+        if (wsae_process_commit(&s->ap_sae, body, blen)) {++s->ap_sae_bad; return;}
+        w16(resp + 24, 3); w16(resp + 26, 1); w16(resp + 28, 0);
+        const long n = wsae_write_commit(&s->ap_sae, NULL, 0, resp + 30, sizeof resp - 30);
+        CHECK(n == 98);
+        ev_mgmt(s, resp, (uint32_t)(30 + n), s->freq, 55);
+        return;
+    }
+    if (seq == 2) {
+        ++s->ap_sae_confirms;
+        if (!s->ap_sae_up || wsae_check_confirm(&s->ap_sae, body, blen)) {++s->ap_sae_bad; return;}   // a wrong password: silence
+        memcpy(s->pmk, s->ap_sae.pmk, 32);
+        s->ap_sae_confirmed = 1;
+        w16(resp + 24, 3); w16(resp + 26, 2); w16(resp + 28, 0);
+        const long n = wsae_write_confirm(&s->ap_sae, resp + 30, sizeof resp - 30);
+        CHECK(n == 34);
+        ev_mgmt(s, resp, (uint32_t)(30 + n), s->freq, 55);
+    }
 }
 static void ap_eapol_from_sta(sim *s, const uint8_t *f, uint32_t len)
 {
@@ -177,15 +237,16 @@ static void ap_eapol_from_sta(sim *s, const uint8_t *f, uint32_t len)
     if (wwpa_key_parse(f, len, &k)) return;
     if (!s->have_ptk) {                                   // M2
         memcpy(s->snonce, k.nonce, 32);
-        CHECK(wwpa_ptk_derive(s->pmk, s->bssid, kMac, s->anonce, s->snonce, 16, &s->ptk) == 0);
+        if (s->ap_rsn_flags == 3) CHECK(wwpa_ptk_derive_sha256(s->pmk, s->bssid, kMac, s->anonce, s->snonce, 16, &s->ptk) == 0);
+        else CHECK(wwpa_ptk_derive(s->pmk, s->bssid, kMac, s->anonce, s->snonce, 16, &s->ptk) == 0);
         s->have_ptk = 1;
-        if (wwpa_key_verify(s->ptk.kck, f, len)) {++s->m2_bad; s->have_ptk = 0; return;}
+        if (ap_verify(s, f, len)) {++s->m2_bad; s->have_ptk = 0; return;}
         // the station's RSNE in M2 is the one it associated with
         ++s->m2_ok;
         ap_m3(s, ++s->replay);
         return;
     }
-    if (!wwpa_key_verify(s->ptk.kck, f, len) && (k.info & WWPA_KI_SECURE)) {          // M4
+    if (!ap_verify(s, f, len) && (k.info & WWPA_KI_SECURE)) {          // M4
         ++s->m4_ok;
         if (s->ap_resend_m3) ap_m3(s, ++s->replay);   // an AP that retransmits M3 after M4 was lost
     }
@@ -230,7 +291,12 @@ static int tsend(void *c, const void *buf, uint32_t len)
         const unsigned sub = f[0] & 0xfc;
         CHECK(!memcmp(f + 4, s->bssid, 6) && !memcmp(f + 10, kMac, 6) && !memcmp(f + 16, s->bssid, 6));
         uint8_t resp[100];
-        if (sub == 0xb0) {
+        if (sub == 0xb0 && s->ap_rsn_flags == 3) {
+            ++s->ap_auth_rx;
+            uint8_t fr[300];
+            memcpy(fr, f, flen < sizeof fr ? flen : sizeof fr);
+            ap_sae_auth(s, fr, flen);
+        } else if (sub == 0xb0) {
             ++s->ap_auth_rx;
             memcpy(s->auth_body, f + 24, 6);
             if (!s->ap_ignore_auth) {
@@ -279,7 +345,7 @@ static int teapol_tx(void *c, const uint8_t dst[6], const uint8_t *f, uint32_t l
     ap_eapol_from_sta(s, f, len);
     return 0;
 }
-static void trandom(void *c, uint8_t *out, uint32_t n) {(void)c; for (uint32_t i = 0; i < n; ++i) out[i] = (uint8_t)(0x40 + i);}
+static void trandom(void *c, uint8_t *out, uint32_t n) {(void)c; static uint32_t x = 0x40; for (uint32_t i = 0; i < n; ++i) {x = x * 1103515245u + 12345u; out[i] = (uint8_t)(x >> 16);}}   // SAE needs real variety (qr/qnr, rand, mask)
 static uint32_t tnow(void *c) {return ((sim *)c)->now;}
 static void tstate(void *c, unsigned st, unsigned reason)
 {
@@ -336,7 +402,7 @@ static void t_mlme_beacons(void)
     CHECK(wmlme_parse_beacon(f, n, &b) == 0 && b.ssid_len == 11 && !memcmp(b.ssid, "KittyCorner", 11) && !memcmp(b.bssid, kAp, 6));
     CHECK(b.beacon_int == 100 && b.capab == 0x0431 && b.n_rates == 12 && b.rsn_len == 22 && b.rsn_ok && !b.ht && !b.probe_resp);
     n = beacon(s, f, kAp, "KittyCorner", 1, 1, 1);
-    CHECK(wmlme_parse_beacon(f, n, &b) == 0 && b.probe_resp && !b.rsn_ok);                 // PMF required
+    CHECK(wmlme_parse_beacon(f, n, &b) == 0 && b.probe_resp && b.rsn_ok && b.pmf == 2 && b.akm == WWPA_AKM_PSK);   // PMF required: the firmware does 802.11w
     n = beacon(s, f, kAp, "KittyCorner", 1, 2, 0);
     CHECK(wmlme_parse_beacon(f, n, &b) == 0 && !b.rsn_ok);                                  // TKIP group
     n = beacon(s, f, kAp, "OpenNet", 0, 0, 0);
@@ -510,9 +576,9 @@ static void t_mlme_failures(void)
     CHECK(s->m.state == WMLME_ASSOCIATED);
     advance(s, 2000);
     CHECK(s->m.state == WMLME_FAILED && s->m.reason == WMLME_REASON_KEYS);
-    // PMF required / TKIP group: refused up front
+    // TKIP group: refused up front
     s = new_sim("KittyCorner", "hunter22hunter");
-    s->ap_rsn_flags = 1;
+    s->ap_rsn_flags = 2;
     wmlme_start(&s->m); wmlme_scan(&s->m, NULL, 0); pump(s);
     CHECK(wmlme_connect(&s->m, "KittyCorner", "hunter22hunter") == WMLME_ERR_NOTSUP && s->m.reason == WMLME_REASON_UNSUPPORTED);
     // key install events never come (a quiet target): the port opens after the wait, as ath10k's 3 s wait would end
@@ -565,6 +631,44 @@ static void t_mlme_hexpsk(void)
     t_tfree_all();
 }
 
+// WPA3-Personal: SAE commit/confirm (with and without an anti-clogging token), the AKM-8 handshake, PMF on the peer
+static void t_mlme_sae(void)
+{
+    for (int token = 0; token < 2; ++token) {
+        sim *s = new_sim("KittyCorner", "hunter22hunter");
+        s->ap_rsn_flags = 3;
+        s->ap_sae_token = token;
+        CHECK(wmlme_start(&s->m) == 0 && wmlme_scan(&s->m, NULL, 0) == 0);
+        pump(s);
+        const wmlme_bss *b = wmlme_find(&s->m, "KittyCorner");
+        CHECK(b && b->rsn_ok && b->akm == WWPA_AKM_SAE && b->pmf == 2);
+        CHECK(wmlme_connect(&s->m, "KittyCorner", "hunter22hunter") == 0);
+        pump(s);
+        CHECK(s->m.state == WMLME_CONNECTED && s->ap_sae_confirmed && s->ap_sae_bad == 0);
+        CHECK(s->m.sae_commits == 1u + (unsigned)token && s->m.sae_confirms == 1 && s->m.sae_tokens == (unsigned)token);
+        CHECK(s->m2_ok == 1 && s->m4_ok == 1 && s->key_cmds == 2);
+        // the association request carries RSNE AKM 8 with MFPC | MFPR
+        static const uint8_t want[22] = {48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 8, 0xc0, 0};
+        int found = 0;
+        for (uint32_t i = 0; i + 22 <= s->assoc_len; ++i) found |= !memcmp(s->assoc_body + i, want, 22);
+        CHECK(found);
+        // the peer is associated with PMF
+        const uint8_t *pa = nth_cmd(s, WA_WMI_TLV_PEER_ASSOC_CMDID, 0);
+        CHECK(pa && (r32(pa + 8 + 4 + 8 + 8) & WA_WMI_TLV_PEER_PMF));
+        const uint8_t *k1 = nth_cmd(s, WA_WMI_TLV_VDEV_INSTALL_KEY_CMDID, 0);
+        CHECK(k1 && !memcmp(k1 + 8 + 92 + 4, s->ptk.tk, 16));
+    }
+    // a wrong password: the AP stays silent after the confirm; the station gives up
+    sim *s = new_sim("KittyCorner", "hunter22hunter");
+    s->ap_rsn_flags = 3;
+    wmlme_start(&s->m); wmlme_scan(&s->m, NULL, 0); pump(s);
+    CHECK(wmlme_connect(&s->m, "KittyCorner", "not-the-password") == 0);
+    pump(s);
+    for (int i = 0; i < 6 && s->m.state != WMLME_FAILED; ++i) advance(s, 1100);
+    CHECK(s->m.state == WMLME_FAILED && s->m.reason == WMLME_REASON_AUTH && s->ap_sae_bad >= 1 && !s->ap_sae_confirmed);
+    t_tfree_all();
+}
+
 void t_mlme(void)
 {
     RUN(t_mlme_beacons);
@@ -572,4 +676,5 @@ void t_mlme(void)
     RUN(t_mlme_connect);
     RUN(t_mlme_failures);
     RUN(t_mlme_hexpsk);
+    RUN(t_mlme_sae);
 }

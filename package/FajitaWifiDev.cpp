@@ -14,6 +14,10 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
+#include <sys/vnode.h>
+#include <sys/fcntl.h>
+#include <sys/uio.h>
+#include <sys/kauth.h>
 
 #include "FajitaWifiBoard.h"
 extern "C" {
@@ -57,6 +61,9 @@ int gSmmuSlot = -1, gSmmuBank = -1;
 volatile int gReqScan;      // kcmd -> poll loop
 char gReqSsid[33];
 unsigned gScans, gLastLink, gLinkReason;
+unsigned gStage, gConnects;   // fajita-wifi=N: 7 connects to fajita-wifi-ssid with the pushed passphrase
+uint64_t gConnectAt;
+int gConnectRc = 1;
 uint64_t gScanAt;
 
 void row(unsigned i, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -156,6 +163,22 @@ uint32_t smmuFaults()
 }
 
 uint32_t ioRdRaw(uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
+// The passphrase pushed by wifi-test.sh (never in a boot argument, never logged): /private/var/ngpu/wifi.psk, one line.
+int readPsk(char *out, size_t cap)
+{
+    vfs_context_t ctx = vfs_context_kernel();
+    vnode_t vp = NULLVP;
+    if (vnode_open("/private/var/ngpu/wifi.psk", FREAD, 0, 0, &vp, ctx) || !vp) return -2;
+    int resid = 0;
+    const int err = vn_rdwr(UIO_READ, vp, (caddr_t)out, (int)cap - 1, 0, UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid,
+                            vfs_context_proc(ctx));
+    vnode_close(vp, FREAD, ctx);
+    if (err) {bzero(out, cap); return -5;}
+    size_t n = cap - 1 - (size_t)resid;
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ')) --n;
+    out[n] = 0;
+    return n ? int(n) : -22;
+}
 // ---- wdev ops ----
 uint32_t ioRd(void *, uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
 void ioWr(void *, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t *>(gMem.va + off) = v;}
@@ -233,6 +256,7 @@ extern "C" int fajita_wifi_dev_start(void)
     IOLockUnlock(gLock);
     note("FW6 start rc %d ce intr %08x", r, wce_intr_summary(&gDev.ce));
     if (r) {row(8, "FW6 wdev_start FAILED rc %d", r); return -4;}
+    PE_parse_boot_argn("fajita-wifi", &gStage, sizeof gStage);
     {   // fajita-wifi-ssid: scan for it as soon as the device runs
         char ssid[33] = {0};
         if (PE_parse_boot_arg_str("fajita-wifi-ssid", ssid, sizeof ssid) && ssid[0]) {strlcpy(gReqSsid, ssid, sizeof gReqSsid); gReqScan = 1;}
@@ -245,7 +269,27 @@ extern "C" void fajita_wifi_dev_poll(void)
     if (!gStarted || !gLock) return;
     IOLockLock(gLock);
     wdev_poll(&gDev);
-    if (gDev.state == WDEV_RUNNING && gReqScan && gDev.mlme.state != WMLME_SCANNING) {
+    // fajita-wifi>=7: join the target once the scan has seen it (3 tries, 10 s apart; a failed try rescans first)
+    if (gStage >= 7 && gDev.state == WDEV_RUNNING && gReqSsid[0] && gConnects < 3 && nowMs64() - gConnectAt > 10000 &&
+        (gDev.mlme.state == WMLME_SCAN_DONE || gDev.mlme.state == WMLME_FAILED)) {
+        if (gDev.mlme.state == WMLME_FAILED && gConnects) {gReqScan = 1; gConnectAt = nowMs64() - 5000;}   // rescan, then retry
+        else if (wmlme_find(&gDev.mlme, gReqSsid)) {
+            char psk[128];
+            const int pl = readPsk(psk, sizeof psk);
+            if (pl > 0) {
+                ++gConnects;
+                gConnectAt = nowMs64();
+                gConnectRc = wdev_connect(&gDev, gReqSsid, psk);
+                note("FW7 connect #%u %s (psk %d chars, akm %u) rc %d", gConnects, gReqSsid, pl, wmlme_find(&gDev.mlme, gReqSsid)->akm, gConnectRc);
+            } else if (nowMs64() - gConnectAt > 10000) {
+                gConnectAt = nowMs64();
+                note("FW7 no passphrase yet (/private/var/ngpu/wifi.psk: %d)", pl);
+            }
+            bzero(psk, sizeof psk);
+        }
+    }
+    if (gDev.state == WDEV_RUNNING && gReqScan && gDev.mlme.state != WMLME_SCANNING &&
+        !(gDev.mlme.state >= WMLME_VDEV_START && gDev.mlme.state <= WMLME_CONNECTED)) {
         gReqScan = 0;
         ++gScans;
         gScanAt = nowMs64();
@@ -264,6 +308,12 @@ extern "C" void fajita_wifi_dev_poll(void)
             gDev.htt.state, gDev.htt.rx_frames, gDev.htt.tx_frames, gDev.dma.used, gDev.dma.size, ce.pipe[1].rx, ce.pipe[2].rx, ce.pipe[5].rx,
             ce.pipe[0].tx + ce.pipe[3].tx + ce.pipe[4].tx, smmuFaults());
         if (gScans) scanRow();
+        if (gConnects) {
+            const wmlme &m = gDev.mlme;
+            row(11, "FW7 link %s reason %u akm %u pmf %u sae commit%u confirm%u token%u status%u auth%u assoc%u eapol rx%u tx%u keys %u authorized %d aid %u",
+                wmlme_state_name(m.state), m.reason, m.akm, m.pmf, m.sae_commits, m.sae_confirms, m.sae_tokens, m.sae_status, m.auth_tx,
+                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid);
+        }
     }
     IOLockUnlock(gLock);
 }
@@ -284,6 +334,10 @@ size_t kcmdDev(const char *args, size_t, char *out, size_t cap)
         if (*a) {size_t k = 0; while (a[k] && a[k] != '\n' && k < 32) {gReqSsid[k] = a[k]; ++k;} gReqSsid[k] = 0;}
         gReqScan = 1;
         n = snprintf(out, cap, "wifidev: scan requested (target '%s'), state %s\n", gReqSsid, wdev_state_name(gDev.state));
+    } else if (!strncmp(a, "connect", 7)) {
+        gConnects = 0; gConnectAt = 0;
+        if (gStage < 7) gStage = 7;
+        n = snprintf(out, cap, "wifidev: connect to '%s' requested (passphrase from /private/var/ngpu/wifi.psk)\n", gReqSsid);
     } else if (!strncmp(a, "bss", 3)) {
         const wmlme &m = gDev.mlme;
         n = snprintf(out, cap, "wifidev: %u BSS (scan #%u, %s)\n", m.nbss, gScans, wmlme_state_name(m.state));
@@ -302,7 +356,7 @@ size_t kcmdDev(const char *args, size_t, char *out, size_t cap)
             }
         }
     } else {
-        n = snprintf(out, cap, "%s%s\n%s\n", gText, fajita_wifi_rows[8], fajita_wifi_rows[9]);
+        n = snprintf(out, cap, "%s%s\n%s\n%s\n", gText, fajita_wifi_rows[8], fajita_wifi_rows[9], fajita_wifi_rows[11]);
     }
     IOLockUnlock(gLock);
     return n < cap ? n : cap - 1;
@@ -316,5 +370,5 @@ extern "C" void fajita_wifi_dev_kcmd(void)
     if (done || !fajita_usbdbg_register_kcmd) return;
     done = true;
     if (!gLock) gLock = IOLockAlloc();
-    fajita_usbdbg_register_kcmd("wifidev", kcmdDev, "WCN3990 device: wifidev [state] | scan [SSID] | bss");
+    fajita_usbdbg_register_kcmd("wifidev", kcmdDev, "WCN3990 device: wifidev [state] | scan [SSID] | connect | bss");
 }

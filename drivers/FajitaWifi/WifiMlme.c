@@ -85,8 +85,9 @@ static const uint8_t *ie_find(const uint8_t *ies, uint32_t len, uint8_t id)
     return 0;
 }
 
-int wmlme_rsn_usable(const uint8_t *rsn, unsigned len)
+unsigned wmlme_rsn_akm(const uint8_t *rsn, unsigned len, unsigned *pmf)
 {
+    if (pmf) *pmf = 0;
     if (len < 2 || rsn[0] != IE_RSN || rsn[1] + 2u > len) return 0;
     const uint8_t *p = rsn + 2, *end = rsn + 2 + rsn[1];
     if (end - p < 2 || g16(p) != 1) return 0;
@@ -104,13 +105,16 @@ int wmlme_rsn_usable(const uint8_t *rsn, unsigned len)
     if (end - p < 2) return 0;
     n = g16(p);
     p += 2;
-    int psk = 0;
+    int psk = 0, sae = 0;
     if (end - p < (long)(4 * n)) return 0;
-    for (unsigned i = 0; i < n; ++i, p += 4) psk |= eq(p, oui, 3) && p[3] == 2;
-    if (!psk) return 0;
-    if (end - p >= 2 && (g16(p) & 0x40)) return 0;     // RSN capabilities: management frame protection required
-    return 1;
+    for (unsigned i = 0; i < n; ++i, p += 4) {psk |= eq(p, oui, 3) && p[3] == 2; sae |= eq(p, oui, 3) && p[3] == 8;}
+    unsigned caps = end - p >= 2 ? g16(p) : 0;
+    const unsigned mfp = caps & 0x40 ? 2u : caps & 0x80 ? 1u : 0u;   // MFPR (bit 6) / MFPC (bit 7)
+    if (pmf) *pmf = mfp;
+    return sae ? WWPA_AKM_SAE : psk ? WWPA_AKM_PSK : 0;
 }
+
+int wmlme_rsn_usable(const uint8_t *rsn, unsigned len) {return wmlme_rsn_akm(rsn, len, 0) != 0;}
 
 int wmlme_parse_beacon(const uint8_t *f, uint32_t len, wmlme_bss *b)
 {
@@ -133,7 +137,7 @@ int wmlme_parse_beacon(const uint8_t *f, uint32_t len, wmlme_bss *b)
     const uint8_t *x = ie_find(ies, ilen, IE_EXT_RATES);
     if (x) for (unsigned i = 0; i < x[1] && b->n_rates < WMLME_MAX_RATES; ++i) b->rates[b->n_rates++] = x[2 + i];
     const uint8_t *rsn = ie_find(ies, ilen, IE_RSN);
-    if (rsn && 2u + rsn[1] <= WMLME_RSN_MAX) {b->rsn_len = (uint8_t)(2 + rsn[1]); copy(b->rsn, rsn, b->rsn_len); b->rsn_ok = wmlme_rsn_usable(b->rsn, b->rsn_len);}
+    if (rsn && 2u + rsn[1] <= WMLME_RSN_MAX) {b->rsn_len = (uint8_t)(2 + rsn[1]); copy(b->rsn, rsn, b->rsn_len); unsigned pmf = 0; b->akm = (uint8_t)wmlme_rsn_akm(b->rsn, b->rsn_len, &pmf); b->pmf = (uint8_t)pmf; b->rsn_ok = b->akm != 0;}
     b->ht = ie_find(ies, ilen, IE_HT_CAP) != 0;
     return 0;
 }
@@ -256,9 +260,19 @@ static int mgmt_send(wmlme *m, uint8_t fc0, const uint8_t *body, uint32_t blen)
 
 static int send_auth(wmlme *m)
 {
-    uint8_t b[6] = {0, 0, 1, 0, 0, 0};    // open system, sequence 1, status success
     ++m->auth_tx;
-    return mgmt_send(m, FC_AUTH, b, sizeof b);
+    if (m->akm != WWPA_AKM_SAE) {
+        uint8_t b[6] = {0, 0, 1, 0, 0, 0};    // open system, sequence 1, status success
+        return mgmt_send(m, FC_AUTH, b, sizeof b);
+    }
+    // SAE (algorithm 3): Commit (sequence 1, with the anti-clogging token if the AP asked) or Confirm (sequence 2)
+    uint8_t b[6 + WSAE_COMMIT_LEN + WSAE_TOKEN_MAX];
+    b[0] = 3; b[1] = 0; b[2] = (uint8_t)(m->sae_step ? 2 : 1); b[3] = 0; b[4] = 0; b[5] = 0;
+    const long n = m->sae_step ? wsae_write_confirm(&m->sae, b + 6, sizeof b - 6)
+                               : wsae_write_commit(&m->sae, m->sae_token, m->sae_token_len, b + 6, sizeof b - 6);
+    if (n < 0) return (int)n;
+    if (m->sae_step) ++m->sae_confirms; else ++m->sae_commits;
+    return mgmt_send(m, FC_AUTH, b, (uint32_t)(6 + n));
 }
 
 static int send_assoc(wmlme *m)
@@ -290,7 +304,18 @@ int wmlme_connect(wmlme *m, const char *ssid, const char *pass)
     if (!b->rsn_ok) {set_state(m, WMLME_FAILED, WMLME_REASON_UNSUPPORTED); return WMLME_ERR_NOTSUP;}
     const size_t pl = slen(pass);
     m->have_pmk = 0;
-    if (pl == 64) {
+    m->akm = b->akm; m->pmf = b->pmf != 0;   // PMF whenever the AP is capable: we are
+    m->sae_step = 0; m->sae_token_len = 0; m->sae_status = 0;
+    {   // our RSN element: group CCMP, pairwise CCMP, the AKM, MFPC (+ MFPR when the AP requires it)
+        static const uint8_t base[22] = {48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0};
+        copy(m->own_rsne, base, sizeof base);
+        m->own_rsne[19] = (uint8_t)m->akm;
+        m->own_rsne[20] = (uint8_t)(b->pmf ? 0x80 | (b->pmf == 2 ? 0x40 : 0) : 0);
+    }
+    if (m->akm == WWPA_AKM_SAE) {
+        // SAE: the PWE now (the AP's MAC is known); the PMK comes out of the exchange
+        if (!pl || wsae_init(&m->sae, m->mac, b->bssid, (const uint8_t *)pass, pl, m->ops.random, m->ops.ctx)) return WMLME_ERR_INVAL;
+    } else if (pl == 64) {
         for (unsigned i = 0; i < 32; ++i) {
             const int h = hexval(pass[2 * i]), l = hexval(pass[2 * i + 1]);
             if (h < 0 || l < 0) return WMLME_ERR_INVAL;
@@ -299,11 +324,11 @@ int wmlme_connect(wmlme *m, const char *ssid, const char *pass)
     } else if (wwpa_psk(pass, pl, (const uint8_t *)ssid, slen(ssid), m->pmk)) {
         return WMLME_ERR_INVAL;
     }
-    m->have_pmk = 1;
+    m->have_pmk = m->akm != WWPA_AKM_SAE;
     m->target = *b;
     m->ssid_len = b->ssid_len; copy(m->ssid, b->ssid, b->ssid_len);
     m->retries = 0; m->keys_sent = m->ptk_installed = m->authorized = 0; m->key_events = 0; m->vdev_started = 0;
-    wwpa_supp_init(&m->supp, m->pmk, b->bssid, m->mac, m->own_rsne, 22, b->rsn, b->rsn_len);
+    if (m->have_pmk) wwpa_supp_init(&m->supp, m->pmk, b->bssid, m->mac, m->own_rsne, 22, b->rsn, b->rsn_len);
     // vdev start on the AP's channel, as ath10k_mac_op_assign_vif_chanctx does for a station
     wwmi_vdev_start_arg a;
     zero(&a, sizeof a);
@@ -350,7 +375,7 @@ static void assoc_done(wmlme *m, uint32_t aid)
     zero(&pa, sizeof pa);
     copy(pa.addr, m->target.bssid, 6);
     pa.vdev_id = m->vdev_id; pa.aid = aid;
-    pa.flags = WA_WMI_TLV_PEER_AUTH | WA_WMI_TLV_PEER_NEED_PTK_4_WAY;
+    pa.flags = WA_WMI_TLV_PEER_AUTH | WA_WMI_TLV_PEER_NEED_PTK_4_WAY | (m->pmf ? WA_WMI_TLV_PEER_PMF : 0);   // 802.11w in the firmware
     pa.caps = CAP_ESS | CAP_PRIVACY | (m->target.capab & (CAP_SHORT_PREAMBLE | CAP_SHORT_SLOT));
     pa.listen_intval = 1; pa.nss = 1;
     pa.phymode = m->target.freq < 3000 ? WA_MODE_11G : WA_MODE_11A;
@@ -371,7 +396,44 @@ static void mgmt_frame(wmlme *m, const wwmi_event *ev)
     const unsigned sub = f[0] & 0xfc;
     if (sub == FC_BEACON || sub == FC_PROBE_RESP) {scan_frame(m, ev); return;}
     if (!eq(f + 16, m->target.bssid, 6) || !eq(f + 4, m->mac, 6)) return;       // not our AP, not for us
-    if (sub == FC_AUTH && m->state == WMLME_AUTH) {
+    if (sub == FC_AUTH && m->state == WMLME_AUTH && m->akm == WWPA_AKM_SAE) {
+        if (len < 24 + 6 || g16(f + 24) != 3) return;
+        const unsigned seq = g16(f + 26), status = g16(f + 28);
+        const uint8_t *body = f + 30;
+        const uint32_t blen = len - 30;
+        m->sae_status = status;
+        if (seq == 1 && status == 76) {   // anti-clogging token required: group || token; commit again with it
+            if (blen < 2 || blen - 2 > WSAE_TOKEN_MAX || m->sae_step) {fail(m, WMLME_REASON_AUTH); return;}
+            m->sae_token_len = blen - 2;
+            copy(m->sae_token, body + 2, m->sae_token_len);
+            ++m->sae_tokens;
+            m->retries = 0;
+            arm(m);
+            if (send_auth(m)) fail(m, WMLME_REASON_SEND);
+            return;
+        }
+        if (status != 0) {fail(m, WMLME_REASON_AUTH); return;}
+        if (seq == 1) {   // the AP's Commit: validate, derive the keys, send our Confirm
+            if (m->sae_step) return;   // a retransmitted commit after ours was processed
+            if (wsae_process_commit(&m->sae, body, blen)) {fail(m, WMLME_REASON_AUTH); return;}
+            m->sae_step = 1;
+            m->retries = 0;
+            arm(m);
+            if (send_auth(m)) fail(m, WMLME_REASON_SEND);
+            return;
+        }
+        if (seq != 2 || !m->sae_step) return;
+        if (wsae_check_confirm(&m->sae, body, blen)) {fail(m, WMLME_REASON_AUTH); return;}
+        copy(m->pmk, m->sae.pmk, WWPA_PMK_LEN);
+        m->have_pmk = 1;
+        wsae_clear(&m->sae);
+        wwpa_supp_init(&m->supp, m->pmk, m->target.bssid, m->mac, m->own_rsne, 22, m->target.rsn, m->target.rsn_len);
+        wwpa_supp_set_akm(&m->supp, WWPA_AKM_SAE);
+        m->retries = 0;
+        set_state(m, WMLME_ASSOC, 0);
+        arm(m);
+        if (send_assoc(m)) fail(m, WMLME_REASON_SEND);
+    } else if (sub == FC_AUTH && m->state == WMLME_AUTH) {
         if (len < 24 + 6 || g16(f + 24) != 0 || g16(f + 26) != 2) return;
         if (g16(f + 28) != 0) {fail(m, WMLME_REASON_AUTH); return;}
         m->retries = 0;

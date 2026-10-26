@@ -196,6 +196,9 @@ static void step(wdev *d)
         if (d->htt.state == WHTT_FAILED) {fail(d, WHTT_ERR_PROTO); return;}
         if (d->htt.state != WHTT_READY) break;
         {   // ath10k_regd_update: the EEPROM regdomain, then the channels; ath10k_add_interface: the station vdev
+            // ath10k_start: PMF for QoS data (802.11w; KittyCorner requires PMF)
+            r = wwmi_pdev_set_param(&d->wmi, WA_WMI_TLV_PDEV_PARAM_PMF_QOS, 1);
+            if (r) {fail(d, r); return;}
             const uint32_t rd = d->wmi.eeprom_rd;
             r = wwmi_pdev_set_regdomain(&d->wmi, rd, rd, rd, 0x10 /* CTL_FCC */, 0x10);
             if (r) {fail(d, r); return;}
