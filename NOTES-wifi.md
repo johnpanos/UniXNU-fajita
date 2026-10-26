@@ -808,5 +808,18 @@ build-fajita-verified-root.py, NativeUfs) and mount it at `/private/preboot/Cryp
 host-side extraction into the Data seed is not an option without an LZBITMAP decoder. Result: Safari stays responsive, apple.com loads over
 Wi-Fi (padlock, title "iPhone Duo - Apple", tab switcher shows the page), no CRASH rows.
 
-Open (next blocker): the page content is black (the tab thumbnail shows white stripes/black). The services are up and idle, the page loaded; the
-web content layers are not composited correctly (WebContent/GPU-process IOSurface backing stores seen by backboardd). Not investigated.
+Open (next blocker, investigated 2026-10-26, not solved): Safari's page content is black although the page loads (padlock, title "Apple" /
+"Example Domain", back button live, tab switcher responsive). Findings:
+- Not the WebKit GPU process: `fjbundle --prefs com.apple.mobilesafari WebKit{,Experimental,Internal}UseGPUProcessFor{DOMRendering,CanvasRendering,Media,WebGL}Enabled=0`
+  (runs as uid 501 through cfprefsd; `=d` removes the key again) stops com.apple.WebKit.GPU from being spawned (spindump), and the live view is still black.
+  With it off the tab thumbnail was white once (apple.com), black for example.com; with it on the thumbnail had white stripes on black.
+- Not the GPU plugin's CPU-held shortcut: gpu-env `NGPU_CPU_HELD=0` (push to /private/var/ngpu/gpu-env, `ngpu-metal killall backboardd`) changes nothing.
+  (The phone's gpu-env was emptied and the Safari keys removed again afterwards.)
+- Not a sandbox refusal: minisandbox logs no refusal for any WebKit process; no CRASH rows; WebContent, Networking idle in their run loops.
+- The DOM exists (the URL bar's "On This Page (2 matches)" counts text of the page) and the loaded page's title and favicon reach Safari, so
+  WebContent loads and lays out; the pixels are black/empty in both the live view and WebKit's own snapshot (the tab thumbnail).
+  Open questions for the next person: does WebContent ever run a rendering update (display-link/CADisplayLink from the UI process,
+  RenderingUpdateScheduler), is its remote layer tree commit received (backing store IOSurface from WebContent to Safari to backboardd),
+  and do the IOSurface pages WebContent writes reach backboardd's import (the plugin logs `ngpu: import at iova ... unmapped (page now 0)`
+  during page loads: NativeAdrenoVm.cpp publishMapped, plugin area). Settings > General > About > Legal has no web view on this
+  iPhone model name, so no second WKWebView screen was found to compare.

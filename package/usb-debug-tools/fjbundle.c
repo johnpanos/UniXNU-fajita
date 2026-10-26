@@ -1,5 +1,6 @@
 // fjbundle --ls DIR...: list directories (iOS here has no ls); each prints its entry count and names.
 // fjbundle --stat PATH...: lstat/stat flags and open(2) results per path.
+// fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle: probe CFBundle's view of a framework, as WebKit's XPC service entry does it (CFBundleGetBundleWithIdentifier then
 // CFBundleGetFunctionPointerForName). Usage: fjbundle FRAMEWORK-BINARY-PATH BUNDLE-ID [SYMBOL]
 //   session.sh push .cache/fajita-inputs/fjbundle /private/var/ngpu/sbin/fjbundle
@@ -54,6 +55,19 @@ int main(int argc, char **argv) {
       if (fd >= 0) close(fd);
       if (fd2 >= 0) close(fd2);
     }
+    return 0;
+  }
+  if (argc >= 4 && !strcmp(argv[1], "--prefs")) {
+    if (setgid(501) || setuid(501)) { perror("setuid(501)"); return 1; }
+    CFStringRef app = CFStringCreateWithCString(NULL, argv[2], kCFStringEncodingUTF8);
+    for (int i = 3; i < argc; i++) {
+      char *eq = strchr(argv[i], '='); if (!eq) continue;
+      *eq = 0;
+      CFStringRef k = CFStringCreateWithCString(NULL, argv[i], kCFStringEncodingUTF8);
+      CFPreferencesSetAppValue(k, eq[1] == 'd' ? NULL : eq[1] == '1' ? kCFBooleanTrue : kCFBooleanFalse, app);
+      printf("%s %s = %c\n", argv[2], argv[i], eq[1]);
+    }
+    printf("synchronize: %d\n", CFPreferencesAppSynchronize(app));
     return 0;
   }
   if (argc < 3) { fprintf(stderr, "usage: fjbundle FRAMEWORK-BINARY BUNDLE-ID [SYMBOL]\n"); return 2; }
