@@ -1,0 +1,8 @@
+# /private/var/ngpu/ssh/etc/profile: bash's system profile on the fajita SSH dev mode (bash-fajita.patch points SYS_PROFILE here).
+export PATH=/private/var/ngpu/ssh/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# iOS ships no terminfo database: the add-on carries a few entries (xterm-256color, screen, tmux, vt100, ...).
+export TERMINFO=/private/var/ngpu/ssh/share/terminfo
+[ -e "$TERMINFO/${TERM:0:1}/$TERM" ] || export TERM=xterm-256color
+export HOME=${HOME:-/private/var/root} EDITOR=vi PAGER=more
+[ -f /private/var/ngpu/ssh/etc/bashrc ] && . /private/var/ngpu/ssh/etc/bashrc
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"

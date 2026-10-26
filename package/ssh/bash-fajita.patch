@@ -1,0 +1,25 @@
+diff -ru a/config-top.h b/config-top.h
+--- a/config-top.h
++++ b/config-top.h
+@@ -97,7 +97,7 @@
+ #define DEFAULT_BASHRC "~/.bashrc"
+ 
+ /* System-wide .bashrc file for interactive shells. */
+-/* #define SYS_BASHRC "/etc/bash.bashrc" */
++#define SYS_BASHRC "/private/var/ngpu/ssh/etc/bashrc"
+ 
+ /* System-wide .bash_logout for login shells. */
+ /* #define SYS_BASH_LOGOUT "/etc/bash.bash_logout" */
+diff -ru a/pathnames.h.in b/pathnames.h.in
+--- a/pathnames.h.in
++++ b/pathnames.h.in
+@@ -25,7 +25,8 @@
+ #define DEFAULT_HOSTS_FILE "/etc/hosts"
+ 
+ /* The default login shell startup file. */
+-#define SYS_PROFILE "/etc/profile"
++/* fajita: iOS has no /etc/profile; the SSH add-on ships its own */
++#define SYS_PROFILE "/private/var/ngpu/ssh/etc/profile"
+ 
+ /* The default location of the bash debugger initialization/startup file. */
+ #define DEBUGGER_START_FILE	"@DEBUGGER_START_FILE@"

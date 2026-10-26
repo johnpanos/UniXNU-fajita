@@ -1,0 +1,5 @@
+# /private/var/ngpu/ssh/etc/bashrc: interactive bash settings on the fajita SSH dev mode (SYS_BASHRC, bash-fajita.patch).
+[ -n "$PS1" ] || return 0
+PS1='\u@fajita:\w\$ '
+HISTFILE=/private/var/root/.bash_history HISTSIZE=5000
+alias ll='ls -la'

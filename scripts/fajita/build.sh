@@ -136,6 +136,19 @@ if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-wifid=1'; then
 else
   python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop fjdbg/ >/dev/null
 fi
+# fajita-ssh=1: the SSH dev mode (NOTES-devmode.md). The add-on tree from scripts/fajita/build-ssh.sh (.cache/fajita-inputs/ssh, rebuilt
+# here when missing) goes in as /private/var/ngpu/ssh; the USB debug agent's supervisor starts dropbear from it.
+SSH_IN=${FAJITA_SSH_IN:-$IN/ssh}
+if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-ssh=1'; then
+  [ -x "$SSH_IN/bin/dropbear" ] || "$BOARD/scripts/fajita/build-ssh.sh" | sed 's/^/  /'
+  [ -s "$SSH_IN/etc/authorized_keys" ] || say "!! fajita-ssh=1 with no authorized keys ($SSH_IN/etc/authorized_keys): nobody can log in"
+  mapfile -t SSH_FILES < <(cd "$SSH_IN" && find . -type f | sed 's#^\./##' | sort)
+  SSH_PUT=(); for f in "${SSH_FILES[@]}"; do m=644; [ -x "$SSH_IN/$f" ] && m=755; SSH_PUT+=("ssh/$f=$SSH_IN/$f:$m"); done
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop ssh/ "${SSH_PUT[@]}" | sed 's/^/  /'
+  say "ssh: ${#SSH_FILES[@]} files, $(grep -c . "$SSH_IN/etc/authorized_keys" 2>/dev/null || echo 0) authorized keys"
+else
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop ssh/ >/dev/null
+fi
 # The processes besides the render server that get their own GPU device (addons/NativeAdrenoMetal.clients, read by NativeAdrenoMetalPlugin.mm
 # listedClient; a listed process takes one of the three 170 MiB client windows, NativeAdrenoPublish.cpp kClientWindows, while its device
 # lives). WebKit draws its tiles through Metal: CoreGraphics renders the deep-colour backing stores (RGB10 'w30r' IOSurfaces, chosen for this
