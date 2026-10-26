@@ -71,6 +71,9 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Commit explicit paths (`git add PATH`), never `git commit -a`. In trees with submodules, `-a` silently reverts submodule pins
   (NativeAdreno, NativeMetal, metal2vulkan).
 - Bump a submodule pin in the same commit as the code that needs it.
+- Before pushing a change that touches the kernel (package/, drivers/, patches, board.toml, configs), run a full
+  `scripts/fajita/build.sh --test` from the commit and see it link ("done", rc 0). A per-unit compile check (check-fajita-wifi-kernel.py)
+  does not link: an unresolved weak reference once left ios16-port unbuildable for several commits without anyone noticing.
 - Push submodule and stack changes to the `johnpanos` forks. Ask before pushing to shared upstream repos (UniXNU org, DarwinBoot).
 
 **The phone is shared.**
