@@ -24,8 +24,8 @@ WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-de
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
 # The stack above a booted modem (SMEM/SMP2P, GLINK, QRTR services, wlfw, ath10k, WPA2), host-tested in tests/test_stack.c.
-KIT_UNITS = ['FajitaWifiStack.cpp', 'FajitaWifiLower.cpp']
-STACK = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiFat.c', 'WifiSnoc.c', 'WifiWlfw.c', 'WifiCe.c', 'WifiHtc.c', 'WifiWpa.c', 'WifiQmp.c']
+KIT_UNITS = ['FajitaWifiStack.cpp', 'FajitaWifiLower.cpp', 'FajitaWifiModem.cpp']
+STACK = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiFat.c', 'WifiSnoc.c', 'WifiWlfw.c', 'WifiCe.c', 'WifiHtc.c', 'WifiWpa.c', 'WifiQmp.c', 'WifiMss.c']
 INCLUDES = ['-I', str(KIT), '-I', str(WIFI), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 

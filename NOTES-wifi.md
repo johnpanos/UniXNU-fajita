@@ -127,7 +127,7 @@ wmi service ready, wmi init, wmi ready, htt rx ring refill, htt setup. DMA for t
 
 Round 3 (stack above a booted modem; the modem boot itself is the user's). Kernel hook: `FajitaWifiProbe.cpp` calls
 `fajita_wifi_stack(stage)` (FajitaWifiStack.cpp) for `fajita-wifi>=3` after stage 2; it never returns (one poll loop owns
-every protocol object). For the modem boot: `fajita_wifi_smp2p_bits(&v)` (inbound bits, ready = bit 2) and
+every protocol object). For the modem boot: `fajita_wifi_smp2p_bits(&v)` (inbound bits, ready = bit 1; the earlier constants were off by one) and
 `fajita_wifi_smp2p_set(mask, v)` (outbound stop bit 0). Compile check without a build: `scripts/check-fajita-wifi-kernel.py`.
 Notes for the phone run: TFTP offers at most blksize 8192 (GLINK fifo is 16 KiB; tqftpserv allows 65464) and the modem
 must accept the smaller OACK; stage 5 needs the boot side's `fajita_wifi_msa_assign(regions, n)` (weak; without it FW5 stops

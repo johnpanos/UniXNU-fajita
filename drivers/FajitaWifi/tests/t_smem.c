@@ -138,16 +138,16 @@ static void t_smp2p(void)
     uint32_t v = 9, ch = 9;
     CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && v == 0 && ch == 0);
     CHECK(wsmp2p_take(&ap, "nope", &v, &ch) == WSMEM_ERR_NOENT);
-    // The modem raises "ready" (bit 2) then "handover" (bit 3).
+    // The modem raises "ready" (bit 1) then "handover" (bit 2).
     const int k = kicks_ap;
     CHECK(wsmp2p_update(&mss, in, 1u << WSMP2P_MSS_READY, 1u << WSMP2P_MSS_READY) == 0 && kicks_ap == k + 1);
     CHECK(wsmp2p_update(&mss, in, 1u << WSMP2P_MSS_READY, 1u << WSMP2P_MSS_READY) == 0 && kicks_ap == k + 1);   // no change, no kick
     wsmp2p_irq(&ap);
-    CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && v == 4 && ch == 4);
+    CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && v == 2 && ch == 2);
     CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && ch == 0);
     wsmp2p_update(&mss, in, 1u << WSMP2P_MSS_HANDOVER, 1u << WSMP2P_MSS_HANDOVER);
     wsmp2p_irq(&ap);
-    CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && v == 0xc && ch == 8);
+    CHECK(wsmp2p_take(&ap, "slave-kernel", &v, &ch) == 0 && v == 0x6 && ch == 4);
     // The AP's stop bit reaches the modem.
     wsmp2p_update(&ap, out, 1u << WSMP2P_MSS_STOP, 1u << WSMP2P_MSS_STOP);
     wsmp2p_irq(&mss);

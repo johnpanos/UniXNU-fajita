@@ -26,6 +26,7 @@ enum {
 #define WQMP_STATE_DOWN 0xffff0000u   // GENMASK(31, 16)
 #define WQMP_MAGIC 0x4d41494cu        // "mail"
 #define WQMP_VERSION 1u
+#define WQMP_RAM_BYTES 0x400u         // the message RAM window (FW_AOSS_QMP_SIZE)
 #define WQMP_TIMEOUT_US 1000000u      // wait_event_timeout(..., HZ)
 
 enum {WQMP_OK = 0, WQMP_ERR_INVAL = -22, WQMP_ERR_TIMEDOUT = -60};
@@ -78,6 +79,15 @@ typedef struct {
 } wqmp_result;
 // qmp_open. timeout_us per wait (0 = WQMP_TIMEOUT_US). Returns WQMP_OK when the link and both channels are up.
 int wqmp_open(const wqmp_io *io, uint32_t timeout_us, wqmp_result *res);
+
+// qmp_send (qcom_aoss.c): the message, zero-padded to QMP_MSG_LEN (64) bytes, goes in 32-bit words to mbox_off + 4, then
+// the length (64) at mbox_off, read back, kick, and the AOSS consumes it by clearing the length word (waited for up to
+// timeout_us, 0 = WQMP_TIMEOUT_US; on a timeout the length word is cleared like qmp_send does). The link and channel must
+// be up (wqmp_open). Returns WQMP_OK, WQMP_ERR_INVAL (message of 64 bytes or more, or no mailbox) or WQMP_ERR_TIMEDOUT.
+#define WQMP_MSG_LEN 64u
+int wqmp_send(const wqmp_io *io, uint32_t mbox_off, uint32_t mbox_size, const char *msg, uint32_t timeout_us, uint32_t *elapsed_us);
+// The modem's load-state request (qcom_q6v5.c q6v5_load_state_toggle): "{class: image, res: load_state, name: modem, val: on}".
+int wqmp_load_state(const wqmp_io *io, uint32_t mbox_off, uint32_t mbox_size, const char *name, int on, uint32_t *elapsed_us);
 
 #ifdef __cplusplus
 }

@@ -94,3 +94,46 @@ close_link:
     record(res, WQMP_STEP_CLOSE, WQMP_ERR_TIMEDOUT, WQMP_STATE_DOWN, 0);
     return res->rc = WQMP_ERR_TIMEDOUT;
 }
+
+int wqmp_send(const wqmp_io *io, uint32_t mbox_off, uint32_t mbox_size, const char *msg, uint32_t timeout_us, uint32_t *elapsed_us)
+{
+    if (!timeout_us) timeout_us = WQMP_TIMEOUT_US;
+    if (elapsed_us) *elapsed_us = 0;
+    if (!msg || mbox_size < 4 + WQMP_MSG_LEN || mbox_off + 4 + WQMP_MSG_LEN > WQMP_RAM_BYTES) return WQMP_ERR_INVAL;
+    char buf[WQMP_MSG_LEN];
+    unsigned len = 0;
+    while (msg[len]) {if (len + 1 >= WQMP_MSG_LEN) return WQMP_ERR_INVAL; buf[len] = msg[len]; ++len;}
+    for (unsigned i = len; i < WQMP_MSG_LEN; ++i) buf[i] = 0;
+    // The message RAM only implements 32-bit accesses: little-endian words.
+    for (unsigned i = 0; i < WQMP_MSG_LEN; i += 4) {
+        const uint32_t w = (uint32_t)(uint8_t)buf[i] | (uint32_t)(uint8_t)buf[i + 1] << 8 | (uint32_t)(uint8_t)buf[i + 2] << 16 |
+                           (uint32_t)(uint8_t)buf[i + 3] << 24;
+        io->wr(io->ctx, mbox_off + 4 + i, w);
+    }
+    io->wr(io->ctx, mbox_off, WQMP_MSG_LEN);
+    (void)io->rd(io->ctx, mbox_off);   // read back the length to confirm the data reached the message RAM
+    io->kick(io->ctx);
+    const uint64_t t0 = io->now_us(io->ctx);
+    for (;;) {
+        const uint64_t dt = io->now_us(io->ctx) - t0;
+        if (io->rd(io->ctx, mbox_off) == 0) {if (elapsed_us) *elapsed_us = (uint32_t)dt; return WQMP_OK;}
+        if (dt >= timeout_us) {
+            io->wr(io->ctx, mbox_off, 0);   // clear the message from the buffer
+            if (elapsed_us) *elapsed_us = (uint32_t)dt;
+            return WQMP_ERR_TIMEDOUT;
+        }
+        io->relax(io->ctx);
+    }
+}
+
+int wqmp_load_state(const wqmp_io *io, uint32_t mbox_off, uint32_t mbox_size, const char *name, int on, uint32_t *elapsed_us)
+{
+    static const char head[] = "{class: image, res: load_state, name: ", mid[] = ", val: ";
+    char msg[WQMP_MSG_LEN];
+    unsigned n = 0;
+    const char *parts[4] = {head, name, mid, on ? "on}" : "off}"};
+    for (unsigned p = 0; p < 4; ++p)
+        for (const char *s = parts[p]; *s; ++s) {if (n + 1 >= WQMP_MSG_LEN) return WQMP_ERR_INVAL; msg[n++] = *s;}
+    msg[n] = 0;
+    return wqmp_send(io, mbox_off, mbox_size, msg, 0, elapsed_us);
+}

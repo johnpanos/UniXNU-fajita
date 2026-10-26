@@ -84,11 +84,13 @@ int wsmem_items(const wsmem *s, unsigned host, wsmem_item_fn fn, void *ctx);
 #define WSMP2P_RESTART_DONE_BIT 0
 #define WSMP2P_RESTART_ACK_BIT 1
 // The modem's inbound bits (sdm845.dtsi mss_pil interrupts-extended) and the outbound stop bit (qcom,smem-states).
-#define WSMP2P_MSS_WDOG 0
-#define WSMP2P_MSS_FATAL 1
-#define WSMP2P_MSS_READY 2
-#define WSMP2P_MSS_HANDOVER 3
-#define WSMP2P_MSS_STOP_ACK 7
+// Bit numbers in the "slave-kernel" word: sdm845.dtsi lists wdog (a GIC SPI), then <&modem_smp2p_in 0> fatal, 1 ready, 2 handover,
+// 3 stop-ack and 7 shutdown-ack (an earlier version of these constants was shifted by one: ready is bit 1, mask 0x2).
+#define WSMP2P_MSS_FATAL 0
+#define WSMP2P_MSS_READY 1
+#define WSMP2P_MSS_HANDOVER 2
+#define WSMP2P_MSS_STOP_ACK 3
+#define WSMP2P_MSS_SHUTDOWN_ACK 7
 #define WSMP2P_MSS_STOP 0
 
 typedef struct {

@@ -315,7 +315,7 @@ void row(unsigned i, const char *fmt, ...)
 }
 }  // namespace
 
-// For the modem boot (stage 2): the modem's SMP2P inbound bits (WSMP2P_MSS_READY = bit 2, HANDOVER 3, FATAL 1), 0 once
+// For the modem boot (stage 2): the modem's SMP2P inbound bits (WSMP2P_MSS_READY = bit 1, HANDOVER 2, FATAL 0, STOP_ACK 3), 0 once
 // present, negative while SMEM/SMP2P are not up or the modem has not allocated its item. Polls; safe to call repeatedly.
 extern "C" int fajita_wifi_smp2p_bits(uint32_t *value)
 {
@@ -334,6 +334,44 @@ extern "C" int fajita_wifi_smp2p_set(uint32_t mask, uint32_t value)
     const int r = smp2pUp() ? wsmp2p_update(&gSmp2p, gSmp2pOut, mask, value) : -1;
     IOLockUnlock(gInitLock);
     return r;
+}
+
+// The firmware files of the modem partition (image/mba.mbn, image/modem.mdt, image/modem.bNN), read-only, for the stage-2 modem
+// boot (FajitaWifiModem.cpp). The last file opened is remembered so that a big file read in pieces is looked up once.
+namespace {
+struct FwOpen {char path[48]; wfat_file f; bool valid;} gFwOpen;
+int fwOpen(const char *path, wfat_file *out)
+{
+    if (!fatUp()) return -19;
+    if (gFwOpen.valid && !strncmp(gFwOpen.path, path, sizeof gFwOpen.path)) {*out = gFwOpen.f; return 0;}
+    wfat_file f;
+    if (wfat_open(&gFat, path, &f) || f.dir) return -2;
+    strlcpy(gFwOpen.path, path, sizeof gFwOpen.path);
+    gFwOpen.f = f;
+    gFwOpen.valid = true;
+    *out = f;
+    return 0;
+}
+}
+extern "C" int fajita_wifi_fw_size(const char *path, uint32_t *size)
+{
+    if (!gInitLock) gInitLock = IOLockAlloc();
+    IOLockLock(gInitLock);
+    wfat_file f;
+    const int rc = fwOpen(path, &f);
+    if (!rc) *size = f.size;
+    IOLockUnlock(gInitLock);
+    return rc;
+}
+extern "C" long fajita_wifi_fw_read(const char *path, uint32_t off, void *dst, uint32_t len)
+{
+    if (!gInitLock) gInitLock = IOLockAlloc();
+    IOLockLock(gInitLock);
+    wfat_file f;
+    long rc = fwOpen(path, &f);
+    if (!rc) rc = wfat_read(&gFat, &f, off, dst, len);
+    IOLockUnlock(gInitLock);
+    return rc;
 }
 
 // Stage 3 (SMEM + GLINK + QRTR) and 4 (the AP services); never returns while the modem link is serviced.

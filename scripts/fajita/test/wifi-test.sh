@@ -17,7 +17,9 @@
 #   qmp       fajita-wifi=1  AOSS QMP link-up, AP side (fajita-wifi-qmp=1, qcom_aoss.c qmp_open; no message is sent):
 #                            every FWQ step rc 0, the link and both channels up and acked (FWQ state => UP), and
 #                            kcmd wifi qmp reports the same afterwards
-#   modem     fajita-wifi=2  MSS remoteproc up (MBA auth, mpss segments, AUTH_COMPLETE, SMP2P ready)
+#   modem     fajita-wifi=2  MSS remoteproc up (WifiMss.c = qcom_q6v5_mss.c: load_state, RPMh votes, clocks, resets, SCM
+#                            assignment, MBA, modem.mdt metadata + segments, AUTH_COMPLETE, SMP2P ready, handover); the FW2
+#                            row and the FWM step rows. WIFI_MSS_DRY=1 reads the MSS registers only (fajita-wifi-mss-dry=1).
 #   link      fajita-wifi=3  SMEM + GLINK + QRTR; the modem announces its QMI servers
 #   servers   fajita-wifi=4  AP-side pd-mapper / tqftpserv / rmtfs answer the modem
 #   wlfw      fajita-wifi=5  the wlfw handshake completes, FW_READY
@@ -70,6 +72,7 @@ build() {
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
   for s in "${want[@]}"; do [ "$s" = lower ] && args+=(fajita-wifi-ro=1); done   # the read-only survey (FWR rows)
   for s in "${want[@]}"; do [ "$s" = qmp ] && args+=(fajita-wifi-qmp=1); done     # the AOSS QMP link-up (FWQ rows)
+  [ -n "${WIFI_MSS_DRY:-}" ] && args+=(fajita-wifi-mss-dry=1)   # modem stage: map and read the MSS registers only, write nothing
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
   FAJITA_OUT=$OUT FAJITA_AUTORESET=${WIFI_AUTORESET:-900} "$TD/../build.sh" --test --skip-plugin "${args[@]}" \
@@ -166,7 +169,11 @@ evaluate() {
       echo "$k" | grep -q '=> UP' || ok=0
       if [ "$ok" = 1 ]; then verdict qmp PASS "AOSS QMP link and both channels up"
       else verdict qmp FAIL "AOSS QMP link-up incomplete (see above)"; fi ;;
-    modem) check_from_log modem 'FW2 .*auth[1-9].*ready' 'MSS did not reach AUTH_COMPLETE + ready' ;;
+    modem)
+      grep -aE 'FWM |FW2 ' "$CON" 2>/dev/null | sed 's/^.*fajita-wifi: //' | awk '!seen[$0]++' | head -70 | while read -r r; do say "  $r"; done
+      local k; k=$($HUB call --timeout "$HUBT" kcmd wifimss rows 2>/dev/null | grep -a 'FW2 ' | tail -1)
+      [ -n "$k" ] && say "  kcmd wifimss: $k"
+      check_from_log modem 'FW2 modem up: .*auth4 ready1' 'MSS did not reach AUTH_COMPLETE + ready (the FW2/FWM rows above say where it stopped and unwound)' ;;
     link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers ([0-9a-f]+,)*45(,|$| )' \
              'no GLINK/QRTR link with wlfw (0x45) announced'
            layers ;;

@@ -10,7 +10,7 @@
 
 #define UP WQMP_STATE_UP
 #define DOWN WQMP_STATE_DOWN
-enum {F_NONE, F_DEAD, F_NO_LINK_ACK, F_NO_CH, F_NO_CH_ACK};
+enum {F_NONE, F_DEAD, F_NO_LINK_ACK, F_NO_CH, F_NO_CH_ACK, F_NO_CONSUME};
 
 typedef struct {
     uint32_t w[0x400 / 4];
@@ -22,6 +22,7 @@ typedef struct {
     unsigned kicks, writes, bad_writes, mbox_writes;
     struct {char op; uint32_t off, v;} log[64];
     unsigned nlog;
+    char msg[65]; uint32_t msg_len; unsigned msgs;
 } sim;
 
 static uint32_t s_rd(void *c, uint32_t off) {sim *s = c; return s->w[off / 4];}
@@ -64,6 +65,10 @@ static void aoss_serve(sim *s)
              && s->fault != F_NO_CH_ACK)
         W(WQMP_MCORE_CH_ACK) = UP;
     if (W(WQMP_MCORE_CH) == DOWN && W(WQMP_MCORE_CH_ACK) == UP) {W(WQMP_MCORE_CH_ACK) = DOWN; W(WQMP_UCORE_CH) = DOWN;}
+    // qmp_send: a message in the mcore mailbox (length word at 0x128) is consumed by clearing the length.
+    if (W(0x128 / 4 * 4) != 0 && s->fault != F_NO_CONSUME) {
+        memcpy(s->msg, &W(0x12c), 64); s->msg_len = W(0x128); ++s->msgs; W(0x128) = 0;
+    }
 #undef W
 }
 static void s_relax(void *c)
@@ -88,6 +93,7 @@ static void sim_init(sim *s, int fault, unsigned latency)
     s->w[WQMP_MCORE_CH / 4] = DOWN; s->w[WQMP_MCORE_CH_ACK / 4] = DOWN;
     s->w[WQMP_MCORE_MBOX_SIZE / 4] = 0x2d8; s->w[WQMP_MCORE_MBOX_OFF / 4] = 0x128;
     for (unsigned o = 0x3c; o < 0x400; o += 4) s->w[o / 4] = 0xa5a5a5a5u;   // mailboxes: must stay untouched
+    s->w[0x128 / 4] = 0;   // the mcore mailbox's length word: no message pending
 }
 static wqmp_io sim_io(sim *s) {wqmp_io io = {s_rd, s_wr, s_kick, s_now, s_relax, s}; return io;}
 
@@ -119,7 +125,7 @@ static void t_qmp_open_sequence(void)
         for (unsigned i = 0; i < s.nlog && i < sizeof want / sizeof want[0]; ++i)
             CHECK(s.log[i].op == want[i].op && s.log[i].off == want[i].off && s.log[i].v == want[i].v);
         CHECK(s.kicks == 3 && r.kicks == 3 && s.bad_writes == 0 && s.mbox_writes == 0);
-        for (unsigned o = 0x3c; o < 0x400; o += 4) if (s.w[o / 4] != 0xa5a5a5a5u) {CHECK(!"mailbox touched"); break;}
+        for (unsigned o = 0x3c; o < 0x400; o += 4) if (o != 0x128 && s.w[o / 4] != 0xa5a5a5a5u) {CHECK(!"mailbox touched"); break;}
         CHECK(r.mbox_off == 0x128 && r.mbox_size == 0x2d8);
         CHECK(r.nsteps == 8);
         for (unsigned i = 0; i < r.nsteps; ++i) CHECK(r.step[i].step == i && r.step[i].rc == 0);
@@ -178,8 +184,50 @@ static void t_qmp_bad_desc(void)
     }
 }
 
+// qmp_send: 64 zero-padded bytes as 32-bit words at mbox + 4, then the length (64) at mbox, a kick, wait for 0.
+static void t_qmp_send(void)
+{
+    sim s; sim_init(&s, F_NONE, 3);
+    wqmp_io io = sim_io(&s);
+    wqmp_result r;
+    CHECK(wqmp_open(&io, 0, &r) == WQMP_OK);
+    for (unsigned o = 0x3c; o < 0x400; o += 4) s.w[o / 4] = 0xa5a5a5a5u;
+    s.w[0x128 / 4] = 0;
+    s.nlog = 0; s.kicks = 0;
+    uint32_t us = 0;
+    CHECK(wqmp_load_state(&io, r.mbox_off, r.mbox_size, "modem", 1, &us) == WQMP_OK);
+    CHECK(s.msgs == 1 && s.msg_len == 64 && s.kicks == 1);
+    CHECK(!strcmp(s.msg, "{class: image, res: load_state, name: modem, val: on}"));
+    CHECK(s.w[0x128 / 4] == 0 && us >= 300);
+    // the zero padding is written too (the whole 64 bytes)
+    for (unsigned i = strlen(s.msg); i < 64; ++i) CHECK(s.msg[i] == 0);
+    // the data words come before the length word, and nothing outside the mailbox is touched
+    CHECK(s.log[s.nlog - 2].op == 'k' || s.log[s.nlog - 1].op == 'k');
+    unsigned len_at = 0, last_data = 0;
+    for (unsigned i = 0; i < s.nlog; ++i) if (s.log[i].op == 'w') {if (s.log[i].off == 0x128) len_at = i; else if (s.log[i].off > 0x128) last_data = i;}
+    CHECK(len_at > last_data);
+    CHECK(wqmp_load_state(&io, r.mbox_off, r.mbox_size, "modem", 0, NULL) == WQMP_OK && !strcmp(s.msg, "{class: image, res: load_state, name: modem, val: off}"));
+    // a message that does not fit, a mailbox that is too small, a window overrun
+    char big[80]; memset(big, 'x', 79); big[79] = 0;
+    CHECK(wqmp_send(&io, 0x128, 0x2d8, big, 0, NULL) == WQMP_ERR_INVAL);
+    memset(big, 'x', 64); big[64] = 0;
+    CHECK(wqmp_send(&io, 0x128, 0x2d8, big, 0, NULL) == WQMP_ERR_INVAL);
+    memset(big, 'x', 63); big[63] = 0;
+    CHECK(wqmp_send(&io, 0x128, 0x2d8, big, 0, NULL) == WQMP_OK && s.msg[62] == 'x' && s.msg[63] == 0);
+    CHECK(wqmp_send(&io, 0x128, 8, "a", 0, NULL) == WQMP_ERR_INVAL);
+    CHECK(wqmp_send(&io, 0x3d0, 0x2d8, "a", 0, NULL) == WQMP_ERR_INVAL);
+    CHECK(wqmp_send(&io, 0x128, 0x2d8, NULL, 0, NULL) == WQMP_ERR_INVAL);
+    // an AOSS that never consumes it: a timeout, and the length word is cleared again
+    sim d; sim_init(&d, F_NO_CONSUME, 0);
+    wqmp_io dio = sim_io(&d);
+    CHECK(wqmp_open(&dio, 0, &r) == WQMP_OK);
+    CHECK(wqmp_send(&dio, r.mbox_off, r.mbox_size, "{x}", 20000, &us) == WQMP_ERR_TIMEDOUT && us >= 20000 && d.w[0x128 / 4] == 0);
+    CHECK(d.msgs == 0);
+}
+
 void t_qmp(void)
 {
+    RUN(t_qmp_send);
     RUN(t_qmp_phone_state);
     RUN(t_qmp_open_sequence);
     RUN(t_qmp_timeouts);

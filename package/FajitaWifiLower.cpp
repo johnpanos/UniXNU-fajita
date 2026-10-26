@@ -33,6 +33,7 @@ int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, cons
 void fajita_wifi_lower(void);
 void fajita_wifi_lower_kcmd(void);
 void fajita_wifi_qmp(void);
+int fajita_wifi_qmp_load_state(const char *name, int on);
 }
 
 namespace {
@@ -303,6 +304,34 @@ size_t qmpShow(char *out, size_t cap)
     return at > 0 ? (size_t(at) < cap ? size_t(at) : cap) : 0;
 }
 
+// The modem's load-state request (q6v5_load_state_toggle) for the stage-2 boot: opens the link first when it is not up
+// (qmp_open), then qmp_send. Rows FWQ ... go to the QMP text. 0 on success.
+int qmpLoadState(const char *name, int on)
+{
+    qmpSink(true);
+    int rc = -5;
+    do {
+        rowStart();
+        if (!qmpMap()) {rowAdd("FWQ map FAILED"); rowEnd(); rc = -12; break;}
+        wqmp_desc d;
+        wqmp_read(&kQmpIo, &d);
+        if (!wqmp_is_up(&d)) {
+            const int o = wqmp_open(&kQmpIo, 0, &gQmp);
+            gQmpRan = true;
+            rowAdd("FWQ open rc %d kicks %u", o, gQmp.kicks);
+            rowEnd();
+            wqmp_read(&kQmpIo, &d);
+            if (o || !wqmp_is_up(&d)) {rc = -110; break;}
+        }
+        uint32_t us = 0;
+        rc = wqmp_load_state(&kQmpIo, d.mcore_mbox_off, d.mcore_mbox_size, name, on, &us);
+        rowAdd("FWQ load_state %s %s rc %d %u us", name, on ? "on" : "off", rc, us);
+        rowEnd();
+    } while (0);
+    qmpSink(false);
+    return rc;
+}
+
 void survey()
 {
     gTextLen = 0;
@@ -412,6 +441,16 @@ extern "C" void fajita_wifi_lower(void)
     IOLockLock(gLock);
     survey();
     IOLockUnlock(gLock);
+}
+
+// Stage 2 (FajitaWifiModem.cpp): AOSS QMP load_state for the modem, "{class: image, res: load_state, name: modem, val: on|off}".
+extern "C" int fajita_wifi_qmp_load_state(const char *name, int on)
+{
+    if (!gLock) gLock = IOLockAlloc();
+    IOLockLock(gLock);
+    const int rc = qmpLoadState(name, on);
+    IOLockUnlock(gLock);
+    return rc;
 }
 
 // The fajita-wifi worker, with fajita-wifi-qmp=1: the AP side of the AOSS QMP link-up, once (FWQ rows).

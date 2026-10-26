@@ -42,6 +42,8 @@ void fajita_wifi_lower(void) __attribute__((weak));
 void fajita_wifi_lower_kcmd(void) __attribute__((weak));
 // FajitaWifiLower.cpp: the AP side of the AOSS QMP link-up (fajita-wifi-qmp=1; FWQ rows, kcmd wifi qmp). No message.
 void fajita_wifi_qmp(void) __attribute__((weak));
+// FajitaWifiModem.cpp: stage 2, the modem (MSS) boot. 0 when the modem is up; non-zero stops the staged bring-up.
+int fajita_wifi_modem(void) __attribute__((weak));
 }
 
 namespace {
@@ -158,10 +160,11 @@ void worker(void *, wait_result_t) {
         IOLog("fajita-wifi: %s\n", fajita_wifi_rows[2]);
         return;
     }
-    // The protocol code is linked in and host-tested; the hardware steps follow once the phone is available.
-    static const char *names[] = {"", "", "modem remoteproc", "SMEM/GLINK/QRTR", "AP QMI servers (pdr/tftp/rmtfs)",
-                                  "wlfw handshake", "CE/HTC/WMI", "connect + data"};
-    for (unsigned s = 2; s <= gStage && s <= 7; ++s) {stagePending(s, names[s]); break;}
+    // Stage 2: the modem boot (FajitaWifiModem.cpp; the sequence is drivers/FajitaWifi/WifiMss.c). A failure has unwound itself.
+    if (gStage >= 2) {
+        if (!fajita_wifi_modem) {stagePending(2, "modem remoteproc (not linked)"); return;}
+        if (fajita_wifi_modem()) return;
+    }
     if (gStage >= 3 && fajita_wifi_stack) fajita_wifi_stack(gStage);
     // Touch the freestanding entry points so the archive keeps them (and a bad prototype fails the kernel link, not a run).
     if (gDump) {
