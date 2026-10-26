@@ -5,6 +5,11 @@
 //   (Biome segments under /private/var/mobile/Library/Biome) and timestamps from before/after a clock jump.
 // fjbundle --settime UNIXSECONDS|now+N: settimeofday, as timed does after a network time fix (to reproduce what a clock jump does to
 //   daemons on a boot without Wi-Fi); prints the time before and after.
+// fjbundle --lsrecord [--mobile] BUNDLEID...: LaunchServices' view of an app, as SafariCore asks it for MobileSafari's data
+//   container: LSApplicationRecord initWithBundleIdentifier:allowPlaceholder:NO error: (URL, dataContainerURL, the error), and
+//   LSApplicationProxy applicationProxyForIdentifier: (bundleURL, dataContainerURL, applicationType); --mobile as uid 501.
+// fjbundle --container PID|NAME...: sandbox_container_path_for_pid as libsystem_sandbox's callers ask it (SafariCore, PlugInKit):
+//   the return value, errno and the path; an app or extension (CFFIXED_USER_HOME set) gets its container, a daemon ENOENT.
 // fjbundle --fds PID|NAME: the open vnodes of a process (proc_pidinfo PROC_PIDLISTFDS + PROC_PIDFDVNODEPATHINFO): fd, offset, size, path.
 // fjbundle --lookup [--ping] [--watch SUBSTR] SERVICE...: bootstrap_look_up each Mach service (a job disabled in launchd's overrides gives
 //   BOOTSTRAP_UNKNOWN_SERVICE 1102); --ping also sends it an empty XPC message and waits up to 3 s for any answer, which makes launchd
@@ -62,6 +67,7 @@ static int find_process(const char *what) {
 }
 
 extern int __getdirentries64(int, void *, size_t, off_t *);
+extern int sandbox_container_path_for_pid(pid_t, char *, size_t);
 
 // sys/proc_info.h is not in the iPhoneOS SDK: the parts --fds uses (xnu bsd/sys/proc_info.h).
 extern int proc_pidinfo(int, int, uint64_t, void *, int);
@@ -174,6 +180,53 @@ int main(int argc, char **argv) {
     long long files = 0, bytes = 0;
     find_walk(argv[2], 0, argc > 3 ? atoi(argv[3]) : 8, &files, &bytes);
     printf("%s: %lld files, %lld bytes\n", argv[2], files, bytes);
+    return 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--lsrecord")) {
+    int at = 2;
+    if (!strcmp(argv[at], "--mobile")) { if (setgid(501) || setuid(501)) { perror("setuid(501)"); return 1; } at++; }
+    if (!dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW) &&
+        !dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_NOW)) { printf("dlopen CoreServices: %s\n", dlerror()); return 1; }
+    void *(*getClass)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
+    void *(*sel)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
+    void *send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    if (!getClass || !sel || !send) { printf("no objc runtime\n"); return 1; }
+    void *(*msg0)(void *, void *) = (void *(*)(void *, void *))send;
+    void *(*msg1)(void *, void *, const void *) = (void *(*)(void *, void *, const void *))send;
+    void *(*msg3)(void *, void *, const void *, long, void **) = (void *(*)(void *, void *, const void *, long, void **))send;
+    #define FJ_DESC(o) ({ char _b[2048] = "(nil)"; if (o) { CFStringRef _d = CFCopyDescription((CFTypeRef)(o)); if (_d) { CFStringGetCString(_d, _b, sizeof _b, kCFStringEncodingUTF8); CFRelease(_d); } } _b; })
+    printf("uid %d\n", getuid());
+    for (; at < argc; at++) {
+      CFStringRef id = CFStringCreateWithCString(NULL, argv[at], kCFStringEncodingUTF8);
+      void *rc = getClass("LSApplicationRecord"), *err = NULL, *rec = NULL;
+      if (rc) rec = msg3(msg0(rc, sel("alloc")), sel("initWithBundleIdentifier:allowPlaceholder:error:"), id, 0, &err);
+      printf("%s: LSApplicationRecord %s\n", argv[at], rec ? "found" : "nil");
+      if (err) printf("  error: %s\n", FJ_DESC(err));
+      if (rec) {
+        printf("  URL: %s\n", FJ_DESC(msg0(rec, sel("URL"))));
+        printf("  dataContainerURL: %s\n", FJ_DESC(msg0(rec, sel("dataContainerURL"))));
+        printf("  isPlaceholder: %ld\n", (long)(signed char)(intptr_t)msg0(rec, sel("isPlaceholder")));
+      }
+      void *pc = getClass("LSApplicationProxy");
+      void *px = pc ? msg1(pc, sel("applicationProxyForIdentifier:"), id) : NULL;
+      if (px) {
+        printf("  proxy bundleURL: %s\n", FJ_DESC(msg0(px, sel("bundleURL"))));
+        printf("  proxy dataContainerURL: %s\n", FJ_DESC(msg0(px, sel("dataContainerURL"))));
+        printf("  proxy applicationType: %s\n", FJ_DESC(msg0(px, sel("applicationType"))));
+        printf("  proxy isInstalled: %ld\n", (long)(signed char)(intptr_t)msg0(px, sel("isInstalled")));
+      } else printf("  LSApplicationProxy nil\n");
+      CFRelease(id);
+    }
+    return 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--container")) {
+    for (int i = 2; i < argc; i++) {
+      int pid = atoi(argv[i]); if (pid <= 0) pid = find_process(argv[i]);
+      if (pid <= 0) { printf("%s: no process\n", argv[i]); continue; }
+      char buf[1024]; memset(buf, 0, sizeof buf); buf[0] = '?';
+      errno = 0; int r = sandbox_container_path_for_pid(pid, buf, sizeof buf); int e = errno;
+      printf("%s pid %d: rc %d errno %d (%s) path '%s'\n", argv[i], pid, r, e, e ? strerror(e) : "-", buf);
+    }
     return 0;
   }
   if (argc == 3 && !strcmp(argv[1], "--settime")) {
