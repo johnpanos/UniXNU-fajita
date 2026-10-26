@@ -32,6 +32,11 @@ for r in $(seq 1 "$ROUNDS"); do
   done
   waits=$(( $(grep -a -c 'swap_wait_gated' "$CON" 2>/dev/null) - waits0 ))
   lost=$(grep -a 'no longer pending' "$CON" 2>/dev/null | tail -1 | sed -n 's/.*(why \([0-9]*\), \([0-9]*\) so far).*/why \1, \2 so far/p')
+  # The hand-off counters (NativeGOPPresenter, NativeLegacyDisplay): offers vs completions+failures+abandoned+reclaimed, and lost frames.
+  ctr=$(KM=${KM:-${FAJITA_OUT:-$ROOT/.cache/fajita-out}/unixnu/fajita-ios16/kernel/kernel.macho} timeout 60 python3 "$TD/kvar.py" native_gop_gpu_offers:8 \
+        native_gop_gpu_completions:8 native_gop_gpu_failures:8 native_gop_gpu_abandoned:8 native_gop_gpu_reclaimed:8 native_legacy_retire_lost 2>/dev/null |
+        sed 's/native_gop_gpu_//; s/native_legacy_retire_//; s/ (0x[0-9a-f]*)//; s/ = /=/' | tr '\n' ' ')
+  echo "round $r counters: $ctr"
   if [ $presented = 0 ] || [ "$waits" -gt 0 ]; then
     echo "round $r: FAIL backboardd $old -> $new; presents: $([ $presented = 1 ] && echo yes || echo 'no (60 s)'); swap_wait timeouts $waits; lost frames: ${lost:-none}"
     fails=$((fails+1))

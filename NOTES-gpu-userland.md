@@ -671,6 +671,42 @@ Now:
 - **Next.** QSEED3 scaling at scanout (the presenter's scale pass goes, a plain copy instead), then direct scan-out of CA's surfaces
   through an MDP SMMU context (SID 0x880), then two outstanding GPU swaps in the display so `=1` costs nothing.
 
+## Frozen screen after a render-server crash (fixed 2026-10-26)
+
+User report (user-hn-freeze, stay-up build, browsing news.ycombinator.com): the screen froze while the kernel and Wi-Fi ran on. The slots
+showed backboardd crashing at 141 s (`CRASH p55 backboardd sig11 ... F308`, QuartzCore +0x7f0c0 on the CA render thread) and the display
+never presenting again: SWAP calls kept coming from the restarted backboardd, COPY and retired stayed at 2670, and IOMFB logged
+`swap_wait_gated: CommandWake didn't happen even after 5 seconds` every 5 s, each followed by `UNIMPLEMENTED SLOT 329` (the render server's
+diagnostic call after that timeout: a symptom, not the cause). The idle dim near 270 s was not involved.
+
+Two wedges, both a frame in flight when its client died (`scripts/fajita/test/compositor-restart.sh` kills backboardd mid-scroll; before
+the fixes 1 round in 3 to 6 froze for good):
+1. NativeGOPPresenter (drivers/NativeMobileDisplay): the GPU client is backboardd's own plugin, reached through the Adreno accelerator's
+   tunnel (NativeAdrenoPublish.cpp 0x7000 methods), so no presenter user client closes when it dies, and `abandonSwap` never ran. A swap
+   delivered to the dead process stayed `delivered`; the display waited on its GPU copy, and the new backboardd's `waitSwap` slept on it
+   forever (kvar.py: offers 642, completions 641, abandoned 0). Now `waitSwap` reclaims a delivered swap held by another task, or one
+   delivered over a second ago (a copy takes milliseconds; this also covers the map-failure return, which left it delivered). It fails
+   the swap to the display, which copies that frame on the CPU. Counter `native_gop_gpu_reclaimed`, a log line.
+2. NativeLegacyDisplay `finishTransfer`: when the finished request was no longer the family's pending head (the family had discarded the
+   dead client's swaps), it returned with `transferred` still set, and every later kick stopped at that latch. Now the request is dropped
+   (never dereferenced), counted (`native_legacy_retire_lost`, `lost=N/why` on the SWAP row, a log line), and the next head is taken. A head
+   that is still there but refused keeps its validation and waits for the family's next kick (no spin).
+
+Proof (stack a43c5be, board 11232f7 + the presenter fix, --test, session-080604): compositor-restart.sh 10 rounds, 10 PASS. In two of them
+the race hit (`reclaimed` 1, then 2), and the display presented again 10-11 s after the kill with no swap_wait timeout. Baseline on the
+unfixed build: round 3 of 3 froze (no presentation for 60 s, 21 swap_wait timeouts), and the fix without the presenter change still froze
+in round 6 of 8. `lock-cycles.sh 5 25` (lock with the power key, 25 s blank, wake, check it presents) with Safari open: 5 PASS, no swap_wait timeout.
+No regression: fps.sh home motion 55.7 [44.8-56.8], App Library motion 50.0 [45.5-59.7]; settings-scroll.sh against corr/wpbase (same
+conditions, no network): resting screens 0, u4, d4 differ by 468-476 px over 8 (the status-bar clock).
+The kickOnce blank branch's early returns (console base vs bootMapping) were checked: nothing rewrites the console base (flips are done in
+the DPU), and those returns leave `transferred` clear, so they cannot latch the queue. With flips a blank frame is filled into the boot
+buffer while the DPU may show another one, which is cosmetic.
+Still open: why backboardd's render thread crashed. QuartzCore +0x7f0c0 dereferences (+0x308) the unchecked NULL result of QuartzCore
++0x203e28 (called with 0, 0, 0, flags 0x22413, 2), most likely an allocation that failed under memory pressure while browsing. There is no
+symbolizer for the cache here yet.
+Tools: `compositor-restart.sh [ROUNDS]` (prints the hand-off counters per round), `lock-cycles.sh [CYCLES] [IDLE_S]`, `kvar.py SYMBOL[:BYTES]`
+(kernel globals by symbol over the hub, '*' patterns), `fjbundle --kill SIG NAME|PID`.
+
 ## Handoff (2026-10-25, GPU perf round 3, end of the phone stretch)
 
 State: render defaults on (NativeAdrenoMetalPlugin.mm sets NGPU_ENCODE_BATCH=32, NMB_TCACHE=1, NGPU_LINEAR_ALIGNMENT=64,
