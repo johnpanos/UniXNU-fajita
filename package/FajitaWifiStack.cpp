@@ -234,7 +234,7 @@ int boardData(void *, uint32_t board_id, uint32_t, const uint8_t **data, uint32_
     *len = gBoardLen;
     return 0;
 }
-struct Seen {uint32_t service, instance, node, port;} gSeen[24];
+struct Seen {uint32_t service, instance, node, port;} gSeen[64];
 unsigned gNSeen;
 
 int qrtrXmit(void *, const uint8_t *pkt, size_t len)
@@ -246,7 +246,7 @@ void ipcrtrRx(wglink *, int, const uint8_t *data, size_t len, void *) {wqrtr_inp
 void ssrRx(wglink *, int, const uint8_t *, size_t, void *) {}
 void routerEvent(wqrtr *, int what, uint32_t service, uint32_t instance, uint32_t node, uint32_t port, void *)
 {
-    if (what == WQR_EV_NEW_SERVER && gNSeen < 24) gSeen[gNSeen++] = {service, instance, node, port};
+    if (what == WQR_EV_NEW_SERVER && gNSeen < 64) gSeen[gNSeen++] = {service, instance, node, port};
     if (gWlfwOn && service == WWLFW_SERVICE && instance == WWLFW_INSTANCE) {
         if (what == WQR_EV_NEW_SERVER) {gEnableSent = false; wwlfw_server(&gWlfw, node, port, nowMs());}
         if (what == WQR_EV_DEL_SERVER) wwlfw_server_gone(&gWlfw);
@@ -459,8 +459,11 @@ extern "C" void fajita_wifi_stack(unsigned stage)
         if (t - last >= 1000) {
             last = t;
             if (fajita_wifi_modem_poll) fajita_wifi_modem_poll();
-            char svcs[64] = "";
-            for (unsigned i = 0; i < gNSeen && strlen(svcs) < 56; ++i)
+            char svcs[96] = "";
+            bool wlfwSeen = false;
+            for (unsigned i = 0; i < gNSeen; ++i) wlfwSeen |= gSeen[i].service == 0x45;
+            snprintf(svcs, sizeof svcs, "n%u%s%s full%u:", gNSeen, gNSeen >= 64 ? "+" : "", wlfwSeen ? " 45" : "", gQrtr.remote_full);
+            for (unsigned i = 0; i < gNSeen && strlen(svcs) < 88; ++i)
                 snprintf(svcs + strlen(svcs), sizeof svcs - strlen(svcs), "%s%x", i ? "," : "", gSeen[i].service);
             uint32_t bits = 0;
             if (gSmp2p.in) {uint32_t ch; wsmp2p_take(&gSmp2p, "slave-kernel", &bits, &ch);}

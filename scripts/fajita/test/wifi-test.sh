@@ -183,7 +183,7 @@ evaluate() {
       local k; k=$($HUB call --timeout "$HUBT" kcmd wifimss rows 2>/dev/null | grep -a 'FW2 ' | tail -1)
       [ -n "$k" ] && say "  kcmd wifimss: $k"
       check_from_log modem 'FW2 modem up: .*auth4 ready1' 'MSS did not reach AUTH_COMPLETE + ready (the FW2/FWM rows above say where it stopped and unwound)' ;;
-    link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers ([0-9a-f]+,)*45(,|$| )' \
+    link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers n[0-9]+\+? 45 ' \
              'no GLINK/QRTR link with wlfw (0x45) announced'
            layers ;;
     servers) check_from_log servers 'FW4 pdr [1-9][0-9]* tftp rrq[1-9]' 'the modem did not use pd-mapper and TFTP'

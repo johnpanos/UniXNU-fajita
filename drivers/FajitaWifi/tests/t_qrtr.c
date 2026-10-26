@@ -755,10 +755,48 @@ static void t_rmtfs(void)
     CHECK(live == 0);
 }
 
+// The phone's modem announces 32 services before wlfw (round 8 log): wlfw's NEW_SERVER is the 33rd and must not be lost.
+static uint32_t last_new_svc;
+static void last_ev(wqrtr *r, int what, uint32_t s, uint32_t i, uint32_t n, uint32_t p, void *c)
+{
+    (void)r; (void)i; (void)n; (void)p; (void)c;
+    ++evs[what & 7];
+    if (what == WQR_EV_NEW_SERVER) last_new_svc = s;
+}
+static void new_server_pkt(wqrtr *ap, uint32_t svc, uint32_t inst, uint32_t port)
+{
+    uint8_t p[52] = {0};
+    const uint32_t w[13] = {1, 4, 0, 0xfffffffeu, 0, 20, 1, 0xfffffffeu, 4, svc, inst, 0, port};
+    for (int i = 0; i < 13; ++i) for (int b = 0; b < 4; ++b) p[4 * i + b] = (uint8_t)(w[i] >> 8 * b);
+    CHECK(wqrtr_input(ap, p, sizeof p) == 0);
+}
+static void t_router_many_servers(void)
+{
+    link_t k;
+    live = 0;
+    link_up(&k);
+    memset(evs, 0, sizeof evs);
+    k.ap.event = last_ev;
+    CHECK(wqrtr_hello(&k.mss) == 0);
+    pump(&k, 0, 0);
+    CHECK(k.ap.hello_seen);
+    for (uint32_t i = 0; i < 32; ++i) new_server_pkt(&k.ap, 0x100 + i, 0x101, 0x20 + i);
+    new_server_pkt(&k.ap, 0x45, 1, 0x60);   // the 33rd: wlfw
+    CHECK(evs[WQR_EV_NEW_SERVER] == 33 && last_new_svc == 0x45);
+    const wqr_server *srv = wqrtr_lookup(&k.ap, 0x45, 0);
+    CHECK(srv && srv->port == 0x60 && srv->node == 0 && k.ap.remote_full == 0);
+    // Past the table: the event still reaches the services.
+    for (uint32_t i = 0; i < WQR_MAX_REMOTE_SRV; ++i) new_server_pkt(&k.ap, 0x400 + i, 1, 0x100 + i);
+    CHECK(k.ap.remote_full == 33 && last_new_svc == 0x400 + WQR_MAX_REMOTE_SRV - 1);
+    link_down(&k);
+    CHECK(live == 0);
+}
+
 void t_qrtr(void)
 {
     RUN(t_router);
     RUN(t_router_bye);
+    RUN(t_router_many_servers);
     RUN(t_pdmap);
     RUN(t_tftp);
     RUN(t_rmtfs);

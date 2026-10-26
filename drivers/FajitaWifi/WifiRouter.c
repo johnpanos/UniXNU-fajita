@@ -237,7 +237,7 @@ static void ns_packet(wqrtr *r, uint32_t src_node, const uint8_t *b, size_t len)
             if (v->used && v->node == d && v->port == e) {slot = (int)s; break;}   // server_add replaces node:port
             if (!v->used && slot < 0) slot = (int)s;
         }
-        if (slot < 0) {++r->dropped; break;}
+        if (slot < 0) {++r->remote_full; event(r, WQR_EV_NEW_SERVER, a, c, d, e); break;}   // never lose the event
         r->remote[slot] = (wqr_server){a, c, d, e, 1};
         event(r, WQR_EV_NEW_SERVER, a, c, d, e);
         break;
