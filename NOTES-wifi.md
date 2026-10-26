@@ -36,9 +36,11 @@ apps_smmu facts for the Wi-Fi glue (round 3, read-only findings):
 - The MSA is likely not mapped through apps_smmu on SDM845 (the SCM assign gives it to the WLAN VMIDs): no window for it.
 - Use the kit in the stack worktree (kits/ArmSmmu4K at ios16/gpu-plugin.ref), not a second copy.
 
-Round 4 status: 5a merged (3f81617). 5b: the ABI generator is committed and its output checked; the WMI module itself
-is not written. The session writing `WifiWmi.h` was cut off by the safety filter partway through the file (the partial
-file was deleted, nothing of it committed). Facts gathered for 5b: TLV header is le16 len then le16 tag; command header
+Round 4 status (final for round 4): 5a (CE + HTC) is done and merged (3f81617). 5b stands at the ABI constants only:
+`tools/wifi/gen-ath10k-abi.py` and its generated `WifiAth10kIds.h` / `tests/ath10k_layout.h` are merged (3be19ca,
+`--check` passes). The WMI-TLV module (`WifiWmi.[ch]`) is NOT written: round 4 was stopped by the safety filter while
+writing `WifiWmi.h` (the partial file was deleted, nothing of it committed), and per the lead it is not to be retried.
+5c, layer 6 and the apps_smmu glue were not started; wifi-test.sh is unchanged. Facts gathered for 5b: TLV header is le16 len then le16 tag; command header
 le32 id (mask 0xffffff); main service bitmap uses 4 services per u32 word (WMI_SERVICE_IS_ENABLED, ids < 128), the
 SERVICE_AVAILABLE ext bitmap is 32 per word from id 128; host memory chunks: num_units from NUM_UNITS_IS_* flags
 (vdevs 4+1, peers 33+1), pool = num_units * roundup(unit_size, 4), ptr_high only with SUPPORT_EXTEND_ADDRESS (ext 179);
