@@ -2,6 +2,31 @@
 
 ## Current state (keep this updated; a restart starts here)
 
+Round 5 (lead): A = an iOS Ethernet interface proven over USB (IOEthernetController subclass, frames tunnelled over the
+fjdbg channel to a host bridge), B = the apps_smmu read-only survey. Modem boot, SCM and ath10k WMI are the user's.
+
+**B, apps_smmu survey (done 2026-10-25, read only, on the phone):** `scripts/fajita/test/smmu-survey.py` (hub `read32`
+only; `--raw` saves the words, `--from-raw` decodes offline). Run on the ios16-port test build (usb-debug=3, GPU on),
+in iOS userland, so the state is UEFI's plus NativeUfs/NativeDwc3's:
+- sCR0 0x002b0406: CLIENTPD 0, GFRE/GFIE 1, **USFCFG 1: an unmatched stream FAULTS** (it does not bypass), SMCFCFG 1;
+  `(sCR0 & 0x407) == 0x406` holds, so ArmSmmu4KAttachStreams' precondition is met. sACR 0x0400001c. sGFSR 0.
+- ID0 0x4c017e4c: 76 SMR groups, SMS, 15 SID bits, S1 only (S2TS 0). ID1 0x5000002d: 4 KiB pages, 64-page global
+  space, context banks at 0x15040000 (+0x1000 each), **45 banks**, 0 S2-only. ID2 0x5555: 48-bit IAS/OAS, 4K+64K granules.
+- Valid SMRs (8 of 76), every bank in S1-with-S2-bypass, VA64, **SCTLR.M = 0 (all bypass, no translation)**:
+
+  | SMR | Stream / mask | Device | Bank | CBAR | SCTLR |
+  | --- | --- | --- | --- | --- | --- |
+  | 0, 1 | 0x880 / 0x8, 0xc80 / 0x8 | MDSS (display) | cb0 | 0x10003 (vmid 3) | 0xe0 |
+  | 2, 3 | 0xa0 / 0xf (sdhc_2), 0xc0 / 0xf (not in mainline DT) | | cb1 | 0x10000 | 0xe0 |
+  | 4, 5 | 0xe0 / 0xf (not in mainline DT), 0x100 / 0xf (UFS) | UFS | cb2 | 0x10000 | 0xe0 |
+  | 6 | 0x740 / 0 | USB prim (dwc3, our gadget) | cb3 | 0x10000 | 0x0 (NativeDwc3's VA64 bypass) |
+  | 7 | 0x760 / 0 | USB sec | cb4 | 0x10000 | 0xe0 |
+
+- SMR 8..75 invalid, their S2CR read 0x000200ff (FAULT, cb 0xff). **No SMR covers 0x40/0x41 (Wi-Fi): Wi-Fi DMA faults
+  today.** Banks 5..44 (40 banks) have CBAR = CBA2R = 0 and power-on noise in SCTLR/TCR/TTBR (never programmed): free.
+  A Wi-Fi bank: one of 5..36 (off bank 0, off NativeUfs's top-8 range 37..44), plus one free SMR (8..) for 0x40 mask 0x1
+  (or two exact ones for ArmSmmu4KAttachStreams). Raw words: `.cache/fajita-work/smmu/apps-smmu-raw.txt`.
+
 Layer 5 notes (from ath10k, for the restart): WCN3990 hw_params target_64bit, shadow_reg_support (src write index via
 0x32000 + 4*ce for CE0/3/4/5/7), rri_on_ddr (read indices in a host DMA word per CE, enabled by ctrl1 bit 19; used for
 DIS_INTR pipes), use_fw_tx_credits = false (one HTC credit total, all on WMI control), CE regs at membase+0x240000 +
