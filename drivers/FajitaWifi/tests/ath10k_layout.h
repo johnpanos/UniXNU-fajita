@@ -117,4 +117,10 @@
 #define WL_OFF_htt_rx_desc_v2__msdu_end 48u
 #define WL_OFF_htt_rx_desc_v2__mpdu_start 16u
 #define WL_OFF_htt_rx_desc_v2__rx_hdr_status 296u
+#define WL_OFF_htt_rx_desc_v2__mpdu_end 104u
+#define WL_OFF_htt_rx_desc_v2__ppdu_start 108u
+#define WL_OFF_htt_rx_desc_v2__ppdu_end 148u
+#define WL_OFF_htt_rx_desc_v2__frag_info 8u
+#define WL_OFF_rx_msdu_start_common__info1 8u
+#define WL_OFF_rx_msdu_end_common__info0 16u
 #endif

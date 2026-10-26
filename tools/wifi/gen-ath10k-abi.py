@@ -161,7 +161,7 @@ wmi_vdev_install_key_cmd.key_len wmi_tlv_mgmt_tx_cmd.frame_len wmi_tlv_mgmt_tx_c
 htt_data_tx_desc_64.frags_paddr htt_data_tx_desc_64.peerid htt_rx_ring_setup_ring64.rx_ring_bufsize
 htt_rx_ring_setup_ring64.offsets ath10k_htt_txbuf_64.htc_hdr ath10k_htt_txbuf_64.cmd_tx
 htt_rx_desc_v2.msdu_payload htt_rx_desc_v2.attention htt_rx_desc_v2.msdu_start htt_rx_desc_v2.msdu_end
-htt_rx_desc_v2.mpdu_start htt_rx_desc_v2.rx_hdr_status
+htt_rx_desc_v2.mpdu_start htt_rx_desc_v2.rx_hdr_status htt_rx_desc_v2.mpdu_end htt_rx_desc_v2.ppdu_start htt_rx_desc_v2.ppdu_end htt_rx_desc_v2.frag_info rx_msdu_start_common.info1 rx_msdu_end_common.info0
 '''.split()
 
 PRELUDE = r'''

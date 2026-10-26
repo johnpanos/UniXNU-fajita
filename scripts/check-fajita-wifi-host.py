@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WIFI = ROOT / 'drivers/FajitaWifi'
 SOURCES = ['WifiMdt.c', 'WifiQmi.c', 'WifiQrtr.c', 'WifiBoard.c', 'WifiFat.c', 'tests/test_wifi.c']
 # The stack above a booted modem (tests/test_stack.c + one t_*.c per layer).
-STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiSnoc.c', 'WifiWlfw.c', 'WifiCe.c', 'WifiHtc.c', 'WifiWpa.c', 'WifiQmp.c', 'WifiMss.c', 'WifiWmi.c', 'WifiMlme.c']
-STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c', 'tests/wsim.c', 'tests/wfw.c', 'tests/t_ce.c', 'tests/t_wpa.c', 'tests/t_qmp.c', 'tests/t_mss.c', 'tests/t_wmi.c', 'tests/t_mlme.c']
+STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiSnoc.c', 'WifiWlfw.c', 'WifiCe.c', 'WifiHtc.c', 'WifiWpa.c', 'WifiQmp.c', 'WifiMss.c', 'WifiWmi.c', 'WifiMlme.c', 'WifiHtt.c']
+STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c', 'tests/wsim.c', 'tests/wfw.c', 'tests/t_ce.c', 'tests/t_wpa.c', 'tests/t_qmp.c', 'tests/t_mss.c', 'tests/t_wmi.c', 'tests/t_mlme.c', 'tests/t_htt.c']
 LIB_FOR_STACK = ['WifiQmi.c', 'WifiQrtr.c', 'WifiFat.c', 'WifiMdt.c', 'WifiBoard.c']
 DEFAULT_EFS = ROOT / '.cache/efs-backup'
 DEFAULT_SMEM = ROOT / '.cache/smem-snapshot/smem.bin'      # scripts/fajita/test/smem-snap.py (read-only, from the phone)
