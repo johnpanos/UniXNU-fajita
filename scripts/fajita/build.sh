@@ -127,6 +127,15 @@ AR=${FAJITA_AUTORESET:-600}
 [ $TEST = 1 ] && ARGS+=(sheng-autoreset=$AR wdstop=$((AR + 90)))
 ARGS+=("${EXTRA[@]}")
 KA=(); for a in "${ARGS[@]}"; do KA+=("--kernel-arg=$a"); done
+# fajita-wifid=1: Apple's own wifid runs as the com.apple.wifid job (the USB debug agent forks off and execs it; NOTES-wifi.md).
+# The addon carries the 20H392 binary from the extracted root (Apple material: .cache only, never committed); otherwise it is dropped.
+REAL_WIFID=${FAJITA_REAL_WIFID:-$BOARD/.cache/mnt/os20H392/root/usr/sbin/wifid}
+if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-wifid=1'; then
+  [ -r "$REAL_WIFID" ] || { say "fajita-wifid=1 needs $REAL_WIFID (the extracted 20H392 root)"; exit 1; }
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop fjdbg/ "fjdbg/wifid.real=$REAL_WIFID:755" | sed 's/^/  /'
+else
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop fjdbg/ >/dev/null
+fi
 say "payload: ${ARGS[*]}"
 FAJITA_EARLY_WDOG=1 FAJITA_PANIC_RESET=${FAJITA_PANIC_RESET:-30} UNIXNU_UNIQUE_CHIP_ID=$(cat "$IN/platform-seed") \
   ./unixnu build payload -D "$D16" --uefi "$UNIXNU_UEFI" --trust-cache "$BOARD/.cache/trust/original-static-system.bundle" \

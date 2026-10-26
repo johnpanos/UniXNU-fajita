@@ -28,6 +28,8 @@
 #include <dispatch/dispatch.h>
 #include <xpc/xpc.h>
 #include <sys/wait.h>
+#include <sys/file.h>
+#include <sys/sysctl.h>
 
 extern char **environ;
 
@@ -397,9 +399,45 @@ static void refuseWifiServices(void)
   }
 }
 
-int main(void)
+// fajita-wifid=1 (NOTES-wifi.md, "the real wifid"): launchd's only root RunAtLoad+KeepAlive job in /usr/sbin is com.apple.wifid
+// (iOS 16 launchd runs jobs from its signed cache, /System/Library/xpc/launchd.plist, so a new plist never loads). This agent keeps
+// being started as that job, but splits: a child (its own session, holding FJDBG_LOCK) stays the debug agent, and the job's own
+// process execs Apple's wifid, copied into Data by the addon (FJDBG_REAL_WIFID: trusted by cdhash, so the path does not matter).
+// The job keeps its pid and launchd's Mach service ports, so the real wifid serves CoreWiFi. When wifid is relaunched (KeepAlive)
+// and the debug agent still holds the lock, the new instance only execs wifid.
+#define FJDBG_REAL_WIFID "/private/var/ngpu/fjdbg/wifid.real"
+#define FJDBG_LOCK "/private/var/ngpu/fjdbg/agent.lock"
+static int bootArgOn(const char *name)
 {
+  char args[1024] = {0};
+  size_t n = sizeof args - 1;
+  if (sysctlbyname("kern.bootargs", args, &n, NULL, 0))
+    return 0;
+  const size_t l = strlen(name);
+  for (char *p = args; (p = strstr(p, name)); p += l)
+    if ((p == args || p[-1] == ' ') && p[l] == '=' && p[l + 1] == '1' && (p[l + 2] == ' ' || p[l + 2] == 0))
+      return 1;
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  (void)argc;
+  if (!strcmp(getprogname(), "wifid") && bootArgOn("fajita-wifid") && access(FJDBG_REAL_WIFID, X_OK) == 0) {
+    int lock = open(FJDBG_LOCK, O_RDWR | O_CREAT, 0600);
+    const int mine = lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0;
+    pid_t child = mine ? fork() : -1;
+    if (child == 0) {
+      setsid();   // out of the job's process group: launchd's restart of wifid does not take the debug agent with it
+      goto agent;   // the child keeps the lock for its lifetime
+    }
+    if (lock >= 0)
+      close(lock);   // the child's descriptor keeps the lock
+    execv(FJDBG_REAL_WIFID, argv);
+    return 1;   // exec failed: launchd retries (the child, if any, still serves the debug channel)
+  }
   refuseWifiServices();
+agent:
   for (int tries = 0; gDev < 0 && tries < 600; tries++) {
     gDev = open(FJDBG_DEV, O_RDWR);
     if (gDev < 0)
