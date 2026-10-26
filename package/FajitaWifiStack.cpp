@@ -243,6 +243,7 @@ int qrtrXmit(void *, const uint8_t *pkt, size_t len)
     return wglink_send(&gGlink, gIpcrtr, pkt, len) == WGLINK_OK ? 0 : WQR_ERR_AGAIN;
 }
 void ipcrtrRx(wglink *, int, const uint8_t *data, size_t len, void *) {wqrtr_input(&gQrtr, data, len);}
+void ssrRx(wglink *, int, const uint8_t *, size_t, void *) {}
 void routerEvent(wqrtr *, int what, uint32_t service, uint32_t instance, uint32_t node, uint32_t port, void *)
 {
     if (what == WQR_EV_NEW_SERVER && gNSeen < 24) gSeen[gNSeen++] = {service, instance, node, port};
@@ -431,6 +432,11 @@ extern "C" void fajita_wifi_stack(unsigned stage)
     wqrtr_init(&gQrtr, qrtrXmit, nullptr, kalloc, kfree, nullptr);
     gQrtr.event = routerEvent;
     gIpcrtr = wglink_open(&gGlink, "IPCRTR", ipcrtrRx, nullptr, 1024, 5);   // qrtr smd.c: the IPCRTR channel
+    {   // qcom_glink_ssr: Linux's SSR driver binds the "glink_ssr" channel, which acknowledges the modem's open (no messages are used)
+        unsigned ssr = 1;
+        PE_parse_boot_argn("fajita-wifi-ssr", &ssr, sizeof ssr);
+        if (ssr) wglink_open(&gGlink, "glink_ssr", ssrRx, nullptr, 128, 2);
+    }
     if (stage >= 4) servicesUp();
     if (stage >= 5) {
         const wwlfw_ops ops = {msaAssign, boardData, nullptr, FW_WLAN_MSA_PHYS, static_cast<uint32_t>(FW_WLAN_MSA_SIZE), 1};

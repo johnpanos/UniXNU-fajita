@@ -44,6 +44,8 @@ void fajita_wifi_lower_kcmd(void) __attribute__((weak));
 void fajita_wifi_qmp(void) __attribute__((weak));
 // FajitaWifiModem.cpp: stage 2, the modem (MSS) boot. 0 when the modem is up; non-zero stops the staged bring-up.
 int fajita_wifi_modem(void) __attribute__((weak));
+// FajitaNet.cpp: the BSD interface en0 (fajita-net=usb).
+int fajita_net_start(void) __attribute__((weak));
 }
 
 namespace {
@@ -183,6 +185,12 @@ extern "C" void fajita_wifi_poll(void) {
     if (!IOService::getPlatform()) return;
     unsigned stage = 0;
     PE_parse_boot_argn("fajita-wifi", &stage, sizeof stage);
+    {   // fajita-net=usb: the BSD network interface en0 over the USB network channel (FajitaNet.cpp), independent of the radio
+        char net[8] = {};
+        static bool netDone;
+        if (!netDone && PE_parse_boot_argn("fajita-net", net, sizeof net) && net[0] && fajita_net_start) {netDone = true; fajita_net_start();}
+        else if (!netDone) netDone = true;
+    }
     if (!stage) {absent = true; return;}
     PE_parse_boot_argn("fajita-wifi-dump", &gDump, sizeof gDump);
     gStage = stage;

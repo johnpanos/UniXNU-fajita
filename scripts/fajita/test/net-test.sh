@@ -4,6 +4,8 @@
 #
 #   sim     host only, no phone: the device-side NET core (UsbNet.h) in tests/UsbDbgSim behind a private hub (--exec),
 #           the echo test, then usbnet-host.py bridging to a real passt and the in-kernel probe (DHCP, ARP, ping)
+#   ios     on the phone: --test usb-net=1 fajita-net=usb; the BSD interface en0 (package/FajitaNet.cpp) over the NET channel; iOS
+#           runs DHCP (ipconfig set en0 DHCP) and pings the gateway through the passt bridge on this laptop
 #   usbnet  on the phone: a --test build with usb-net=1 (unless NET_NO_BUILD=1 and the image exists), one held session,
 #           `kcmd usbnet` reports the channel up; usbnet-host.py echo (N frames of 14..1536 bytes back intact, in order);
 #           then usbnet-host.py bridge to passt and `kcmd usbnet dhcp`: the kernel's DHCP DISCOVER reaches passt, the
@@ -25,7 +27,7 @@ fails=0; declare -A VERDICT
 verdict() { local s=$1 ok=$2; shift 2; VERDICT[$s]=$ok; if [ "$ok" = PASS ]; then say "PASS $s: $*"; else say "FAIL $s: $*"; fails=$((fails+1)); fi; }
 
 want=("$@"); [ ${#want[@]} -eq 0 ] && want=(sim)
-for s in "${want[@]}"; do case $s in sim|usbnet) ;; *) echo "unknown stage '$s'; known: sim usbnet"; exit 2;; esac; done
+for s in "${want[@]}"; do case $s in sim|usbnet|ios) ;; *) echo "unknown stage '$s'; known: sim usbnet ios"; exit 2;; esac; done
 command -v passt >/dev/null || { echo "passt is not installed (dnf install passt)"; exit 2; }
 
 # The echo test, then the passt bridge with the kernel probe, against the hub on socket $1. Sets ok=0 on a failure.
@@ -85,6 +87,50 @@ stage_usbnet() {
   session_end
   if [ "$ok" = 1 ]; then verdict usbnet PASS "phone <-> hub <-> passt: echo and the kernel's DHCP/ARP/ping"
   else verdict usbnet FAIL "see above and $RES"; fi
+}
+
+# The iOS network interface (package/FajitaNet.cpp, fajita-net=usb): the BSD interface en0 over the NET channel. iOS itself runs
+# DHCP (configd's IPConfiguration: `ipconfig set en0 DHCP`) and the ping through passt on this laptop.
+stage_ios() {
+  local ok=1 con b o ip gw
+  if [ -n "${NET_NO_BUILD:-}" ] && [ -f "$OUT/payload.img" ]; then say "build: reusing $OUT"
+  else
+    say "build: --test usb-net=1 fajita-net=usb -> $OUT"
+    git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true
+    FAJITA_OUT=$OUT "$TD/../build.sh" --test usb-net=1 fajita-net=usb > "$RES/build.txt" 2>&1 \
+      || { verdict ios FAIL "build failed (see $RES/build.txt)"; tail -6 "$RES/build.txt" | tee -a "$REPORT"; return; }
+  fi
+  FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { verdict ios FAIL "session start failed"; return; }
+  NAME=$(cat "$W/session.current"); con=$W/logs/$NAME/usb-console.txt
+  say "session $NAME (console $con)"
+  local sock=${FAJITA_USBDBG_HUB:-${XDG_RUNTIME_DIR:-/tmp}/fjdbg-hub.sock}
+  python3 -I "$NETPY" --sock "$sock" bridge -v --seconds 150 --pcap "$RES/ios.pcap" > "$RES/ios-bridge.txt" 2>&1 &
+  b=$!
+  for _ in $(seq 1 50); do grep -q 'usbnet bridge: phone' "$RES/ios-bridge.txt" 2>/dev/null && break; sleep 0.2; done
+  grep -a 'fajita-net' "$con" 2>/dev/null | tail -3 | while read -r r; do say "  log: $r"; done
+  grep -aq 'fajita-net: en0 attached' "$con" 2>/dev/null || { ok=0; say "  en0 was not attached (fajita-net: rows above)"; }
+  o=$("$TD/session.sh" run /sbin/ifconfig en0 2>&1); say "  ifconfig en0: $(echo "$o" | tr '\n' ' ')"
+  echo "$o" | grep -q 'en0' || ok=0
+  "$TD/session.sh" run /usr/sbin/ipconfig set en0 DHCP > "$RES/ios-ipconfig.txt" 2>&1
+  for _ in $(seq 1 30); do
+    ip=$("$TD/session.sh" run /usr/sbin/ipconfig getifaddr en0 2>/dev/null | grep -E '^([0-9]+\.){3}[0-9]+' | head -1)
+    [ -n "$ip" ] && break; sleep 1
+  done
+  say "  DHCP lease on en0: ${ip:-none}"
+  [ -n "$ip" ] || ok=0
+  gw=$("$TD/session.sh" run /usr/sbin/netstat -rn 2>/dev/null | awk '$1=="default"{print $2; exit}')
+  say "  default gateway: ${gw:-none}"
+  if [ -n "${gw:-}" ]; then
+    o=$("$TD/session.sh" run /sbin/ping -c 3 -t 5 "$gw" 2>&1); say "  ping $gw: $(echo "$o" | tail -3 | tr '\n' ' ')"
+    echo "$o" | grep -qE '[1-3] packets received|, [1-9][0-9]*(\.[0-9]+)?% packet loss|0\.0% packet loss' || ok=0
+    echo "$o" | grep -q '0.0% packet loss' || ok=0
+  else ok=0; fi
+  say "  kcmd net: $("$TD/session.sh" call kcmd net 2>&1 | head -1)"
+  kill -TERM "$b" 2>/dev/null; wait "$b" 2>/dev/null
+  grep -E 'dhcp|icmp|arp' "$RES/ios-bridge.txt" | head -12 | while read -r r; do say "  bridge: $r"; done
+  session_end
+  if [ "$ok" = 1 ]; then verdict ios PASS "iOS en0 over the NET channel: DHCP lease $ip, ping $gw"
+  else verdict ios FAIL "see above and $RES"; fi
 }
 
 for s in "${want[@]}"; do say "== $s"; "stage_$s"; done
