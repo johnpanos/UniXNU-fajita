@@ -1,8 +1,8 @@
 #!/bin/bash
-# proc-sample.sh NAME|PID [SECONDS] [HZ]: where a process's threads spend their time, on the held session: fjsurface --sample (task_for_pid;
+# proc-sample.sh NAME|PID [SECONDS] [HZ] [all]: where a process's threads spend their time, on the held session: fjsurface --sample (task_for_pid;
 # each thread suspended, its pc, lr and frame-pointer chain read, resumed; default 5 s at 100 Hz), then every address symbolized on the host
 # against the shared cache (tools/crash/dsc-sym.py with the process's slide). Prints the running threads and their most frequent stacks,
-# top frame first. For a daemon that spins (coreduetd, healthappd, mobileassetd in the gfx suite's scenes): what it is doing.
+# top frame first; "all" also the waiting threads (a client blocked in an XPC call). For a daemon that spins (coreduetd, healthappd, mobileassetd in the gfx suite's scenes): what it is doing.
 # Output also in $FAJITA_WORK/proc-sample/NAME.txt. fjsurface comes from $FAJITA_OUT/tools (scripts/fajita/build-usbdbg-agent.sh).
 TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
 W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}; OUTD=${FAJITA_OUT:-$BOARD/.cache/fajita-out}; SS=$TD/session.sh
@@ -15,7 +15,7 @@ if ! [[ $pid =~ ^[0-9]+$ ]]; then pid=$(T=15 $SS run /usr/sbin/ngpu-metal ps 2>/
 [ -n "$pid" ] || { echo "proc-sample: no process $1"; exit 1; }
 mkdir -p $W/proc-sample; out=$W/proc-sample/$1.txt
 secs=${2:-5}
-T=$(( ${secs%.*} + 30 )) $SS run $p --sample $pid $secs ${3:-100} > $out.raw 2>&1
+T=$(( ${secs%.*} + 30 )) $SS run $p --sample $pid $secs ${3:-100} ${4:-} > $out.raw 2>&1
 python3 -I - "$out.raw" "$BOARD" > $out <<'EOF'
 import re, subprocess, sys
 raw, board = sys.argv[1], sys.argv[2]

@@ -10,7 +10,8 @@
 //                                        (CGIOSurfaceContextCreate; w30r = RGB10 with kCGImagePixelFormatRGBCIF10, BGRA = 8-bit BGRA): fill white,
 //                                        a black square, flush, then count the words (zero / other) and print the seed.
 //   fjsurface --images PID [FILTER]      the images dyld loaded in another process (task_for_pid; whether Metal and the GPU plugin are in it)
-//   fjsurface --sample PID SECONDS [HZ]   sample another process's threads (stacks by count, unslid for tools/crash/dsc-sym.py --slide)
+//   fjsurface --sample PID SECONDS [HZ [all]]   sample another process's threads (stacks by count, unslid for tools/crash/dsc-sym.py
+//                                        --slide); all: waiting threads too (who is blocked in an XPC call to a daemon)
 // (IOSurfaceLookup by ID fails here for every surface: the kernel logs "IOSurface disallowing global lookups", as on any iPhone.)
 // Build: scripts/fajita/build-usbdbg-agent.sh; push with session.sh push (to a new name when the binary changed).
 #include <CoreFoundation/CoreFoundation.h>
@@ -276,9 +277,9 @@ static int images(int pid, const char *filter) {
 // pc, lr and up to 14 frame-pointer return addresses read, and resumed. Prints the shared cache slide, then per thread its samples, how
 // many found it running, its name, and its distinct stacks by count (unslid: tools/crash/dsc-sym.py --slide SLIDE ADDR... names them).
 // For a daemon that spins: what it is doing, without symbols on the phone.
-#define SAMPLE_DEPTH 16
+#define SAMPLE_DEPTH 48
 struct sample_stack { uint64_t thread; uint32_t count, depth; uint64_t pc[SAMPLE_DEPTH]; };
-static int sample(int pid, double seconds, int hz) {
+static int sample(int pid, double seconds, int hz, int all) {
   mach_port_t task = MACH_PORT_NULL;
   kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
   if (kr) { printf("task_for_pid(%d) failed: %#x\n", pid, kr); return 1; }
@@ -333,7 +334,7 @@ static int sample(int pid, double seconds, int hz) {
       for (; k < nstacks; ++k)
         if (stacks[k].thread == id && stacks[k].depth == depth && !memcmp(stacks[k].pc, pcs, depth * sizeof *pcs)) break;
       if (k == nstacks) { if (nstacks < kMax) { stacks[k].thread = id; stacks[k].depth = depth; memcpy(stacks[k].pc, pcs, sizeof pcs); ++nstacks; } else { ++overflow; continue; } }
-      stacks[k].count += running ? 1 : 0;
+      stacks[k].count += running || all ? 1 : 0;
       mach_port_deallocate(mach_task_self(), list[i]);
     }
     vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof *list);
@@ -342,7 +343,7 @@ static int sample(int pid, double seconds, int hz) {
   printf("sample pid %d: %u rounds over %.1f s, slide %#llx, %u threads, %u distinct stacks%s\n", pid, rounds, seconds, (unsigned long long)slide, nthreads,
          nstacks, overflow ? " (table full: some dropped)" : "");
   for (unsigned t = 0; t < nthreads; ++t) {
-    if (!threads[t].running) continue;
+    if (!threads[t].running && !all) continue;
     printf("thread %#llx %s: running %u of %u samples\n", (unsigned long long)threads[t].id, threads[t].name[0] ? threads[t].name : "-", threads[t].running, threads[t].samples);
     for (unsigned shown = 0; shown < 6; ++shown) {   // its most frequent running stacks
       int best = -1;
@@ -369,12 +370,12 @@ int main(int argc, char **argv) {
     return cgdraw(f, argc > 3 ? atoi(argv[3]) : 256, argc > 4 ? atoi(argv[4]) : 256);
   }
   if (argc >= 3 && !strcmp(argv[1], "--images")) return images(atoi(argv[2]), argc > 3 ? argv[3] : NULL);
-  if (argc >= 4 && !strcmp(argv[1], "--sample")) return sample(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 100);
+  if (argc >= 4 && !strcmp(argv[1], "--sample")) return sample(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 100, argc > 5 && !strcmp(argv[5], "all"));
   if (argc >= 2 && !strcmp(argv[1], "--share")) {
     uint32_t f = 'BGRA';
     if (argc > 4 && strlen(argv[4]) == 4) f = (uint32_t)argv[4][0] << 24 | (uint32_t)argv[4][1] << 16 | (uint32_t)argv[4][2] << 8 | (uint32_t)argv[4][3];
     return share(argc > 2 ? atoi(argv[2]) : 256, argc > 3 ? atoi(argv[3]) : 256, f);
   }
-  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER] | --sample PID SECONDS [HZ]\n");
+  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER] | --sample PID SECONDS [HZ [all]]\n");
   return 2;
 }
