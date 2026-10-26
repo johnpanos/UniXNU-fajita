@@ -72,6 +72,7 @@ build() {
   [ -n "$ssid" ] && args+=("fajita-wifi-ssid=$ssid")   # SSID is not secret
   for s in "${want[@]}"; do [ "$s" = lower ] && args+=(fajita-wifi-ro=1); done   # the read-only survey (FWR rows)
   for s in "${want[@]}"; do [ "$s" = qmp ] && args+=(fajita-wifi-qmp=1); done     # the AOSS QMP link-up (FWQ rows)
+  [ -n "${WIFI_EXTRA_ARGS:-}" ] && args+=($WIFI_EXTRA_ARGS)   # e.g. fajita-wifi-blk=1024
   [ -n "${WIFI_MSS_DRY:-}" ] && args+=(fajita-wifi-mss-dry=1)   # modem stage: map and read the MSS registers only, write nothing
   say "build: --test ${args[*]} (autoreset backstop)"
   git -C "$ROOT" pull --no-rebase origin ios16-port >/dev/null 2>&1 || true

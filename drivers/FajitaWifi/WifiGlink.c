@@ -140,6 +140,12 @@ static int tx(wglink *g, const void *hdr, uint32_t hlen, const void *data, uint3
         return WGLINK_ERR_AGAIN;
     }
     g->read_notify_sent = 0;
+    if (hlen >= 8) {
+        const uint8_t *hb = (const uint8_t *)hdr;
+        const unsigned i = g->ntrace++ & 63;
+        g->trace[i].dir = 't'; g->trace[i].cmd = get16(hb); g->trace[i].p1 = get16(hb + 2); g->trace[i].p2 = get32(hb + 4);
+        g->trace[i].len = tlen;
+    }
     tx_write(g, hdr, hlen, data, dlen);
     tx_kick(g);
     return WGLINK_OK;
@@ -449,6 +455,14 @@ int wglink_rx(wglink *g)
         const uint16_t cmd = get16(m), p1 = get16(m + 2);
         const uint32_t p2 = get32(m + 4);
         int ch;
+        {   // trace every command once (a partial message is re-peeked on the next call: skip the repeats)
+            const unsigned last = (g->ntrace - 1) & 63;
+            if (!(g->trace[last].dir == 'r' && g->trace[last].cmd == cmd && g->trace[last].p1 == p1 && g->trace[last].p2 == p2 &&
+                  g->trace[last].len == avail)) {
+                const unsigned i = g->ntrace++ & 63;
+                g->trace[i].dir = 'r'; g->trace[i].cmd = cmd; g->trace[i].p1 = p1; g->trace[i].p2 = p2; g->trace[i].len = avail;
+            }
+        }
         switch (cmd) {
         case CMD_VERSION:
             rx_advance(g, 8);
@@ -521,7 +535,18 @@ int wglink_rx(wglink *g)
                         if (g->ch[ch].ri[s].used && g->ch[ch].ri[s].id == iid) {slot = -2; break;}   // idr_alloc fails
                         if (!g->ch[ch].ri[s].used && slot == -1) slot = s;
                     }
-                    if (slot < 0) {++g->errors; continue;}
+                    if (slot == -1) {
+                        // The table is full of the small intents the modem advertised at open (16 x 128 bytes on the phone) and this
+                        // one is the grant for a large message: Linux keeps remote intents in an idr without a limit. Replace the
+                        // smallest idle intent that is smaller than the new one.
+                        int victim = -1;
+                        for (int s = 0; s < WGLINK_MAX_INTENTS; ++s) {
+                            const wglink_rintent *q = &g->ch[ch].ri[s];
+                            if (q->used && !q->in_use && q->size < size && (victim < 0 || q->size < g->ch[ch].ri[victim].size)) victim = s;
+                        }
+                        if (victim >= 0) {slot = victim; ++g->evicted;}
+                    }
+                    if (slot < 0) {++g->errors; ++g->err_by_site[1]; continue;}
                     g->ch[ch].ri[slot] = (wglink_rintent){iid, size, 0, 1};
                 }
             } else {

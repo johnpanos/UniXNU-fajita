@@ -491,11 +491,11 @@ static void t_tftp(void)
     // No options: block 1 straight away (tqftpserv).
     CHECK(simple_req(&k, &t, 1, "/readonly/firmware/image/modem_pr/mcfg.mbn", "OCTET", 0, rep, &rl) > 0 && rep[1] == 3
           && rep[3] == 1 && rl == 4 + 512 && !memcmp(rep + 4, img, 512));
-    // tsize is reported in the OACK; the extra NUL after blksize is there, byte for byte.
+    // tsize is reported in the OACK, each option as name NUL value NUL (tqftpserv.c tftp_send_oack).
     const char *const o2[] = {"blksize", "1024", "tsize", "0", 0};
     CHECK(simple_req(&k, &t, 1, "/readonly/firmware/image/wlanmdsp.mbn", "octet", o2, rep, &rl) > 0 && rep[1] == 6);
     {
-        static const char want[] = "\0\6blksize\0" "1024\0\0timeoutms\0" "1000\0tsize\0" "100000\0wsize\0" "1";
+        static const char want[] = "\0\6blksize\0" "1024\0timeoutms\0" "1000\0tsize\0" "100000\0wsize\0" "1";
         CHECK(rl == sizeof want && !memcmp(rep, want, sizeof want));
     }
     // /readwrite/: a write lands in the RAM store, and reads back.
@@ -547,6 +547,12 @@ static void t_tftp(void)
         CHECK(open == 0);
         wqrtr_unbind(&k.mss, port);
         pump(&k, tftp_poll, &t);
+    }
+    {   // a write request echoes the size the modem announced (tqftpserv's OACK carries the parsed tsize), not the file's
+        const char *const o3[] = {"blksize", "512", "tsize", "5", 0};
+        CHECK(simple_req(&k, &t, 2, "/readwrite/tsize.txt", "octet", o3, rep, &rl) > 0 && rep[1] == 6);
+        static const char want[] = "\0\6blksize\0" "512\0timeoutms\0" "1000\0tsize\0" "5\0wsize\0" "1";
+        CHECK(rl == sizeof want && !memcmp(rep, want, sizeof want));
     }
     // The real wlanmdsp.mbn from the phone's own modem partition, through the FAT reader, against a direct read.
     if (t_modem_img) {

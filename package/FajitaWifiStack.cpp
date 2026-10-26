@@ -202,6 +202,7 @@ wqrtr gQrtr;
 int gIpcrtr = -1;
 wpdm gPdm;
 wtftp gTftp;
+unsigned gHistShown, gStuck, gDropShown, gNamesShown;
 wrmtfs gRmtfs;
 uint32_t gPdmPort;
 wwlfw gWlfw;
@@ -291,6 +292,11 @@ bool servicesUp()
     gPdmPort = wqrtr_bind(&gQrtr, 0, pdmRx, nullptr);
     wqrtr_publish(&gQrtr, gPdmPort, WPDM_SERVICE, WPDM_VERSION, WPDM_INSTANCE);
     const wtftp_fs fs = {tftpOpen, tftpRead, nullptr};
+    {   // fajita-wifi-blk=N: cap the TFTP block size (the modem's GLINK receive intents are 128 bytes; bigger packets need a grant)
+        unsigned blk = 0;
+        PE_parse_boot_argn("fajita-wifi-blk", &blk, sizeof blk);
+        gTftp.max_blksize = blk;
+    }
     wtftp_init(&gTftp, &gQrtr, &fs);
     const bool rm = mapRegion(FW_RMTFS_PHYS, FW_RMTFS_SIZE, gRmtfsMap);
     wrmtfs_init(&gRmtfs, &gQrtr, efsRead, efsSize, nullptr, rm ? reinterpret_cast<volatile uint8_t *>(gRmtfsMap.va) : nullptr,
@@ -304,7 +310,7 @@ bool servicesUp()
 void row(unsigned i, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void row(unsigned i, const char *fmt, ...)
 {
-    char buf[160];
+    char buf[256];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
@@ -457,9 +463,45 @@ extern "C" void fajita_wifi_stack(unsigned stage)
                 gGlink.errors, wglink_ready(&gGlink, gIpcrtr) ? "open" : "closed", gQrtr.hello_seen, gQrtr.rx_pkts,
                 gQrtr.bad, svcs[0] ? svcs : "-", g < 0 ? " GLINK-FAULT" : "");
             if (stage >= 4)
-                row(5, "FW4 pdr %u tftp rrq%u wrq%u %llukB err%u refused%u last %.40s rmtfs open%u iov%u sect%u wr-refused%u",
-                    gPdm.requests, gTftp.rrq, gTftp.wrq, gTftp.bytes >> 10, gTftp.errors, gTftp.refused, gTftp.last,
+                row(5, "FW4 pdr %u tftp rrq%u wrq%u %llukB err%u refused%u tx%u/%u data-in%u other-in%u(op%u) last %.40s rmtfs open%u iov%u sect%u wr-refused%u",
+                    gPdm.requests, gTftp.rrq, gTftp.wrq, gTftp.bytes >> 10, gTftp.errors, gTftp.refused, gTftp.tx_pkts, gTftp.tx_fail, gTftp.data_in, gTftp.other_in, gTftp.last_in_op, gTftp.last,
                     gRmtfs.opens, gRmtfs.iovecs, gRmtfs.sectors_read, gRmtfs.writes_refused);
+            if (gIpcrtr >= 0) {   // the IPCRTR channel's send side: the modem's receive intents and any pending request
+                const wglink_channel &ch = gGlink.ch[gIpcrtr];
+                char ri[120] = "";
+                unsigned nu = 0, busy = 0;
+                for (unsigned i = 0; i < WGLINK_MAX_INTENTS; ++i) {
+                    if (!ch.ri[i].used) continue;
+                    ++nu; busy += ch.ri[i].in_use;
+                    if (strlen(ri) < 100) snprintf(ri + strlen(ri), sizeof ri - strlen(ri), " %x:%u%s", ch.ri[i].id, ch.ri[i].size, ch.ri[i].in_use ? "*" : "");
+                }
+                row(7, "FW3d ipcrtr remote intents %u (busy %u):%s | intent-req pending %d last %d | tx free %u | gl-err cmd %x",
+                    nu, busy, ri, ch.intent_req_pending, ch.intent_req_result, (unsigned)wglink_tx_avail(&gGlink), gGlink.last_error_cmd);
+            }
+            if (gIpcrtr >= 0 && gGlink.ch[gIpcrtr].intent_req_pending && ++gStuck == 4) {   // a request unanswered for 4 s: dump the trace
+                const unsigned n = gGlink.ntrace;
+                for (unsigned i = n > 64 ? n - 64 : 0; i < n; i += 4) {
+                    char t[200] = "";
+                    for (unsigned k = i; k < i + 4 && k < n; ++k) {
+                        const auto &e = gGlink.trace[k & 63];
+                        snprintf(t + strlen(t), sizeof t - strlen(t), " %c%u/%x/%x/%u", e.dir, e.cmd, e.p1, e.p2, e.len);
+                    }
+                    IOLog("fajita-wifi: FW3t %u:%s\n", i, t);
+                }
+            }
+            if (gQrtr.ndrop_log != gDropShown || gPdm.nnames != gNamesShown) {
+                gDropShown = gQrtr.ndrop_log; gNamesShown = gPdm.nnames;
+                for (unsigned i = 0; i < gPdm.nnames; ++i) IOLog("fajita-wifi: FW4 pdr-req %u %s\n", i, gPdm.names[i]);
+                for (unsigned i = 0; i < gQrtr.ndrop_log; ++i) {
+                    const auto &d = gQrtr.drop_log[i];
+                    IOLog("fajita-wifi: FW3q drop %u from %u:%x to port %x size %u: %02x %02x %02x %02x %02x %02x %02x %02x\n", i, d.src_node, d.src_port, d.dst_port,
+                          d.size, d.head[0], d.head[1], d.head[2], d.head[3], d.head[4], d.head[5], d.head[6], d.head[7]);
+                }
+            }
+            if (stage >= 4 && gTftp.nhist != gHistShown) {
+                gHistShown = gTftp.nhist;
+                for (unsigned i = 0; i < gTftp.nhist; ++i) IOLog("fajita-wifi: FW4 tftp-req %u %.90s\n", i, gTftp.hist[i]);
+            }
             if (gWlfwOn)
                 row(6, "FW5 wlfw %s%s%s ind%u cap chip=%x board=%x fw=%x msa%u%s bdf %s %u/%u seg%u res%u/%u fw_ready%d",
                     wwlfw_state_name(gWlfw.state), gWlfw.state == WWLFW_FAILED ? " in " : "",

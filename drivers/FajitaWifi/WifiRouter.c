@@ -307,7 +307,15 @@ int wqrtr_input(wqrtr *r, const uint8_t *pkt, size_t len)
         return WQR_OK;
     }
     const int i = port_index(r, dst_port);
-    if (i < 0) {++r->dropped; return WQR_ERR_NOENT;}
+    if (i < 0) {
+        if (r->ndrop_log < 8) {
+            unsigned k = r->ndrop_log++;
+            r->drop_log[k].src_node = src_node; r->drop_log[k].src_port = src_port; r->drop_log[k].dst_port = dst_port; r->drop_log[k].size = size;
+            for (unsigned b = 0; b < 12; ++b) r->drop_log[k].head[b] = b < size ? body[b] : 0;
+        }
+        ++r->dropped;
+        return WQR_ERR_NOENT;
+    }
     if (r->ports[i].rx) r->ports[i].rx(r, dst_port, src_node, src_port, body, size, r->ports[i].ctx);
     if (confirm) {   // qrtr_send_resume_tx, from the receiving port
         uint8_t c[CTRL_BYTES];

@@ -93,11 +93,18 @@ int wtftp_translate(const char *path, char *out, size_t cap)
 
 static void send_raw(wtftp *t, uint32_t from, uint32_t node, uint32_t port, const uint8_t *b, size_t n)
 {
-    if (wqrtr_send(t->r, from, node, port, b, n) < 0) ++t->errors;
+    ++t->tx_pkts;
+    if (wqrtr_send(t->r, from, node, port, b, n) < 0) {++t->errors; ++t->tx_fail;}
 }
 
 static void send_error(wtftp *t, uint32_t from, uint32_t node, uint32_t port, unsigned code, const char *msg)
 {
+    if (t->cur >= 0) {   // mark the request it answers
+        char *h = t->hist[t->cur];
+        size_t at = 0;
+        while (h[at]) ++at;
+        if (at + 4 < sizeof t->hist[0]) {h[at++] = ' '; h[at++] = 'E'; h[at++] = (char)('0' + code % 10); h[at] = 0;}
+    }
     uint8_t b[96];
     const size_t ml = slen(msg) < 80 ? slen(msg) : 80;
     b[0] = 0; b[1] = WTFTP_OP_ERROR; b[2] = (uint8_t)(code >> 8); b[3] = (uint8_t)code;
@@ -186,18 +193,18 @@ void wtftp_poll(wtftp *t)
 
 static void client_rx(wqrtr *r, uint32_t port, uint32_t node, uint32_t sport, const uint8_t *b, size_t len, void *ctx);
 
-static void send_oack(wtftp *t, wtftp_client *c, int tsize_valid, int rsize_valid, int seek_valid)
+static void send_oack(wtftp *t, wtftp_client *c, int tsize_valid, uint64_t tsize, int rsize_valid, int seek_valid)
 {
     uint8_t b[256];
     size_t at = 0;
     b[at++] = 0; b[at++] = WTFTP_OP_OACK;
-    // tftp_send_oack, byte for byte (including the extra NUL after the blksize value).
+    // tftp_send_oack (tqftpserv.c): name NUL value NUL for each option. (An earlier version of this wrote a second NUL after the
+    // blksize value, which the modem's parser can read as the end of the option list.)
     copy(b + at, (const uint8_t *)"blksize", 8); at += 8;
     at += utoa((char *)b + at, c->blksize) + 1;
-    b[at++] = 0;
     copy(b + at, (const uint8_t *)"timeoutms", 10); at += 10;
     at += utoa((char *)b + at, c->timeoutms) + 1;
-    if (tsize_valid) {copy(b + at, (const uint8_t *)"tsize", 6); at += 6; at += utoa((char *)b + at, c->size) + 1;}
+    if (tsize_valid) {copy(b + at, (const uint8_t *)"tsize", 6); at += 6; at += utoa((char *)b + at, tsize) + 1;}
     copy(b + at, (const uint8_t *)"wsize", 6); at += 6;
     at += utoa((char *)b + at, c->wsize) + 1;
     if (rsize_valid) {copy(b + at, (const uint8_t *)"rsize", 6); at += 6; at += utoa((char *)b + at, c->rsize) + 1;}
@@ -235,12 +242,14 @@ static void request(wtftp *t, int write, const uint8_t *buf, size_t len, uint32_
     const char *mode = p;
     p += mlen + 1;
     scpy(t->last, filename, sizeof t->last);
+    t->cur = -1;
+    if (t->nhist < 32) {t->cur = (int)t->nhist; t->hist[t->nhist][0] = write ? 'W' : 'R'; t->hist[t->nhist][1] = ' '; scpy(t->hist[t->nhist] + 2, filename, sizeof t->hist[0] - 2); ++t->nhist;}
     if (!ieq(mode, "octet")) {send_error_to(t, node, rport, WTFTP_E_EBADOP, "Only octet mode supported"); return;}
     if (sanitize(filename)) {++t->refused; send_error_to(t, node, rport, WTFTP_E_EACCESS, "Access violation"); return;}
     char path[96];
     const int kind = wtftp_translate(filename, path, sizeof path);
     // options
-    uint64_t blksize = 512, timeoutms = 1000, rsize = 0, wsize = 1, v;
+    uint64_t blksize = 512, timeoutms = 1000, rsize = 0, wsize = 1, v, tsize_in = 0;
     int tsize_req = 0, seek_set = 0, oack = 0;
     uint64_t seek = 0;
     if (p < end) {
@@ -257,14 +266,28 @@ static void request(wtftp *t, int write, const uint8_t *buf, size_t len, uint32_
             p += vl + 1;
             if (seq(opt, "blksize")) {if (parse_num(val, MIN_BLKSIZE, MAX_BLKSIZE, &blksize)) goto bad_opt;}
             else if (seq(opt, "timeoutms")) {if (parse_num(val, 1, MAX_TIMEOUTMS, &timeoutms)) goto bad_opt;}
-            else if (seq(opt, "tsize")) {if (parse_num(val, 0, ~0ull, &v)) goto bad_opt; tsize_req = 1;}
+            else if (seq(opt, "tsize")) {if (parse_num(val, 0, ~0ull, &v)) goto bad_opt; tsize_req = 1; tsize_in = v;}
             else if (seq(opt, "rsize")) {if (parse_num(val, 1, MAX_RSIZE, &rsize)) goto bad_opt;}
             else if (seq(opt, "wsize")) {if (parse_num(val, 1, MAX_WSIZE, &wsize)) goto bad_opt;}
             else if (seq(opt, "seek")) {if (parse_num(val, 0, ~0ull, &seek)) goto bad_opt; seek_set = 1;}
             // unknown options are ignored, as tqftpserv does
         }
     }
-    if (blksize > WTFTP_MAX_BLKSIZE) blksize = WTFTP_MAX_BLKSIZE;   // the OACK tells the modem the smaller size
+    if (t->cur >= 0) {   // remember what the modem asked for next to the path
+        char *h = t->hist[t->cur];
+        size_t at = 0;
+        while (h[at]) ++at;
+        char tail[40];
+        tail[0] = ' '; tail[1] = 'b';
+        size_t k = 2;
+        k += utoa(tail + k, blksize);
+        tail[k++] = ' '; tail[k++] = 'r';
+        k += utoa(tail + k, rsize);
+        tail[k] = 0;
+        for (size_t i = 0; tail[i] && at + 1 < sizeof t->hist[0]; ++i) h[at++] = tail[i];
+        h[at] = 0;
+    }
+    if (blksize > (t->max_blksize ? t->max_blksize : WTFTP_MAX_BLKSIZE)) blksize = t->max_blksize ? t->max_blksize : WTFTP_MAX_BLKSIZE;   // the OACK tells the modem the smaller size
     if (write) ++t->wrq; else ++t->rrq;
     if (kind < 0) {
         ++t->refused;
@@ -302,7 +325,7 @@ static void request(wtftp *t, int write, const uint8_t *buf, size_t len, uint32_
         }
     }
     if (oack) {
-        send_oack(t, c, tsize_req, rsize != 0, seek_set);
+        send_oack(t, c, tsize_req, write ? tsize_in : c->size, rsize != 0, seek_set);   // a write echoes the size the modem announced
     } else if (write) {
         uint8_t ack[4] = {0, WTFTP_OP_ACK, 0, 0};   // RFC 1350 (tqftpserv sends DATA here, which fails its own read)
         send_raw(t, c->port, node, rport, ack, 4);
@@ -330,6 +353,8 @@ static void client_rx(wqrtr *r, uint32_t port, uint32_t node, uint32_t sport, co
         return;
     }
     const unsigned op = (unsigned)b[0] << 8 | b[1], blk = (unsigned)b[2] << 8 | b[3];
+    t->last_in_op = op;
+    if (op == WTFTP_OP_DATA) ++t->data_in; else ++t->other_in;
     if (!c->writer) {
         // handle_reader
         if (op == WTFTP_OP_ERROR) {close_client(t, c); return;}   // incl. END_OF_TRANSFER
@@ -389,6 +414,8 @@ int wtftp_init(wtftp *t, wqrtr *r, const wtftp_fs *fs)
     t->r = r;
     t->fs = *fs;
     t->rrq = t->wrq = t->errors = t->refused = 0;
+    t->nhist = 0; t->cur = -1;
+    t->tx_pkts = t->tx_fail = t->data_in = t->other_in = t->last_in_op = 0;
     t->bytes = 0;
     t->last[0] = 0;
     t->port = wqrtr_bind(r, 0, server_rx, t);

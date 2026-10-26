@@ -219,8 +219,46 @@ static void t_glink_faults(void)
     free(mem);
 }
 
+// The phone: the modem advertises 16 intents of 128 bytes; a 7716-byte TFTP packet needs a grant that has no free table slot.
+static void t_glink_full_intents(void)
+{
+    rig r;
+    live_allocs = 0;
+    rig_up(&r);
+    pump(&r);
+    rxbox mbox = {0}, abox = {0};
+    int mch = wglink_open(&r.mss, "IPCRTR", on_rx, &mbox, 128, 16);
+    pump(&r);
+    int ach = wglink_find(&r.ap, "IPCRTR");
+    CHECK(wglink_open(&r.ap, "IPCRTR", on_rx, &abox, 128, 16) == ach);
+    pump(&r);
+    CHECK(wglink_ready(&r.ap, ach) && wglink_ready(&r.mss, mch));
+    int nri = 0;
+    for (int k = 0; k < WGLINK_MAX_INTENTS; ++k) nri += r.ap.ch[ach].ri[k].used;
+    CHECK(nri == 16);
+    // the modem has advertised more than the table holds: the idle slots hold 128-byte intents the modem never uses
+    for (int k = 0; k < WGLINK_MAX_INTENTS; ++k)
+        if (!r.ap.ch[ach].ri[k].used) r.ap.ch[ach].ri[k] = (wglink_rintent){5000u + (unsigned)k, 128, 0, 1};
+    static uint8_t msg[8192];
+    for (unsigned i = 0; i < sizeof msg; ++i) msg[i] = (uint8_t)(i * 5 + 1);
+    CHECK(wglink_send(&r.ap, ach, msg, 7716) == WGLINK_ERR_AGAIN);
+    pump(&r);
+    CHECK(r.ap.ch[ach].intent_req_result == 1 && !r.ap.ch[ach].intent_req_pending && r.ap.evicted == 1 && r.ap.errors == 0);
+    CHECK(wglink_send(&r.ap, ach, msg, 7716) == 0);
+    pump(&r);
+    CHECK(mbox.count == 1 && mbox.len == 7716 && !memcmp(mbox.buf, msg, 7716));
+    // a second big message works the same way (the one-shot intent was returned and dropped)
+    CHECK(wglink_send(&r.ap, ach, msg, 7000) == WGLINK_ERR_AGAIN);
+    pump(&r);
+    CHECK(wglink_send(&r.ap, ach, msg, 7000) == 0);
+    pump(&r);
+    CHECK(mbox.count == 2 && mbox.len == 7000 && !memcmp(mbox.buf, msg, 7000));
+    rig_down(&r);
+}
+
 void t_glink(void)
 {
+    RUN(t_glink_full_intents);
     RUN(t_glink_basic);
     RUN(t_glink_local_first);
     RUN(t_glink_faults);

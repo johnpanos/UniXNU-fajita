@@ -59,6 +59,8 @@ typedef struct wqrtr {
     struct {uint8_t *p; size_t len;} txq[WQR_TXQ];
     unsigned txq_head, txq_count;
     uint32_t rx_pkts, tx_pkts, dropped, bad;
+    struct {uint32_t src_node, src_port, dst_port, size; uint8_t head[12];} drop_log[8];   // the first packets to unbound ports
+    unsigned ndrop_log;
 } wqrtr;
 
 void wqrtr_init(wqrtr *r, int (*xmit)(void *, const uint8_t *, size_t), void *xmit_ctx,

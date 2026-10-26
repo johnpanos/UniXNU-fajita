@@ -232,6 +232,12 @@ long wpdm_handle(wpdm *p, const uint8_t *req, size_t len, uint8_t *out, size_t c
         ++n;
     }
     list[0] = (uint8_t)n;
+    if (p->nnames < 6) {
+        char *d = p->names[p->nnames++];
+        size_t k = 0;
+        for (size_t i = 0; name[i] && k < 36; ++i) d[k++] = name[i];
+        d[k++] = '@'; d[k++] = (char)('0' + offset % 10); d[k++] = '='; d[k++] = (char)('0' + n % 10); d[k++] = '/'; d[k++] = (char)('0' + total % 10); d[k] = 0;
+    }
     if (n) wqmi_tlv(&w, 0x12, list, at);
     return wqmi_end(&w);
 }

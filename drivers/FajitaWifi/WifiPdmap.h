@@ -30,6 +30,7 @@ typedef struct {
     wpdm_map map[WPDM_MAX_MAPS];
     unsigned count;
     uint32_t requests, pfr;
+    char names[6][48]; unsigned nnames;   // the service names asked for (first 6), with the offset and number of domains returned: "name@off=n"
 } wpdm;
 
 void wpdm_init(wpdm *p);
