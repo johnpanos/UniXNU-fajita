@@ -22,8 +22,8 @@ int main(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
       DIR *d = opendir(argv[i]); int n = 0;
       if (!d) { printf("%s: cannot open: %s\n", argv[i], strerror(errno)); continue; }
-      struct dirent *e; char line[2048] = "";
-      while ((e = readdir(d))) { if (n++ < 40) { strncat(line, " ", sizeof line - strlen(line) - 1); strncat(line, e->d_name, sizeof line - strlen(line) - 1); } }
+      struct dirent *e; char line[65536] = "";
+      while ((e = readdir(d))) { n++; { strncat(line, " ", sizeof line - strlen(line) - 1); strncat(line, e->d_name, sizeof line - strlen(line) - 1); } }
       closedir(d);
       printf("%s: %d entries:%s\n", argv[i], n, line);
     }
@@ -33,6 +33,7 @@ int main(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
       struct stat st;
       if (lstat(argv[i], &st)) { printf("%s: lstat: %s\n", argv[i], strerror(errno)); continue; }
+      if (S_ISLNK(st.st_mode)) { char lb[1024]; ssize_t ln = readlink(argv[i], lb, sizeof lb - 1); if (ln >= 0) { lb[ln] = 0; printf("%s -> %s\n", argv[i], lb); } }
       int fd = open(argv[i], O_RDONLY); int e1 = errno;
       int fd2 = open(argv[i], O_RDONLY | O_DIRECTORY); int e2 = errno;
       printf("%s: mode %o flags %#x size %lld nlink %d ino %llu; open=%d(%s) open|O_DIRECTORY=%d(%s)\n", argv[i], st.st_mode, st.st_flags,

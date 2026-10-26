@@ -32,8 +32,15 @@ static const char lite_jobs[]=
  "com.apple.fairplayd.A2,com.apple.passd,com.apple.mobile.obliteration,"
  // aggregated (powerlog) is KeepAlive and aborts about every 10 s from boot on, so launchd relaunches it all boot and the kernel
  // keeps creating corpses for it ("Too many corpses"); syncdefaultsd (iCloud key-value sync, no account here) aborts the same way.
- "com.apple.aggregated,com.apple.syncdefaultsd";
-static char policy[2048],jobs[200];
+ "com.apple.aggregated,com.apple.syncdefaultsd,"
+ // Jobs whose program is under /System/Cryptexes/App (or OS): the OS volume's symlinks lead to /private/preboot/Cryptexes/..., which this
+ // board does not provide (no cryptex graft). launchd cannot start them, so a lookup of their Mach services never returns: MobileSafari's
+ // main thread hung on com.apple.Safari.History.Service. Disabled, the lookups fail at once. scripts/fajita/test/cryptex-jobs.sh lists them;
+ // com.apple.fairplayd.H2 is the iPhone X label of the fairplayd job that is disabled above as .A2 (lookups of com.apple.fairplayd.versioned hung too).
+ "com.apple.Safari.History,com.apple.webinspectord,com.apple.safarifetcherd,com.apple.webkit.webpushd,com.apple.SafariBookmarksSyncAgent,"
+ "com.apple.Safari.passwordbreachd,com.apple.WebBookmarks.webbookmarksd,com.apple.AuthenticationServicesCore.AuthenticationServicesAgent,"
+ "com.apple.webkit.adattributiond,com.apple.fairplayd.H2";
+static char policy[4096],jobs[200];
 volatile int sheng_watchdog_policy_status=-1;
 
 // sheng-setup=1 or sheng-data-reset=2 (the install entry's "show Hello" choice): remove Setup's completion flags once, so this boot shows the Hello page.
