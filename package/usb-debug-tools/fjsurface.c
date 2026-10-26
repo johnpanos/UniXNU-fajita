@@ -421,31 +421,41 @@ static int watch_ca(int pid, double seconds, int us, uint64_t S, uint64_t T) {
   struct dyld_all_image_infos all;
   if (!task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &count) && !readq(task, info.all_image_info_addr, &all, sizeof all))
     slide = all.sharedCacheSlide;
-  const uint64_t vt[2] = {0x1d5b29c28ULL + slide, 0x1d5b39ee0ULL + slide};
+  // The two server vtables (IOMFBServer's address point, the other class's) and both two slots earlier, in case the address point is
+  // there; every object found is printed with its last tick, and the one with the newest tick (the live display's server) is watched.
+  const uint64_t vt[4] = {0x1d5b29c28ULL + slide, 0x1d5b39ee0ULL + slide, 0x1d5b29c18ULL + slide, 0x1d5b39ed0ULL + slide};
   uint64_t D = 0;
   if (S && (readq(task, S + 0x60, &D, 8) || !D)) S = 0;   // a server address from an earlier window: still valid?
   if (S) printf("server %#llx (given) display %#llx\n", (unsigned long long)S, (unsigned long long)D);
+  const int given = S != 0;
   if (!S) T = 0;
   mach_vm_address_t addr = 0; mach_vm_size_t size = 0;
   enum { kChunk = 1 << 20 };
-  uint64_t *buf = malloc(kChunk);
-  for (; !S;) {
+  uint64_t *buf = malloc(kChunk), best = 0;
+  unsigned found = 0;
+  for (; !given;) {
     vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
     if (mach_vm_region(task, &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &obj)) break;
     if ((bi.protection & VM_PROT_WRITE) && !(addr - slide >= 0x180000000ULL && addr - slide < 0x200000000ULL))
-      for (mach_vm_size_t o = 0; o < size && !S; o += kChunk) {
+      for (mach_vm_size_t o = 0; o < size; o += kChunk) {
         const size_t n = size - o < kChunk ? (size_t)(size - o) : kChunk;
         if (readq(task, addr + o, buf, n)) continue;
-        for (size_t i = 0; i < n / 8; ++i)
-          if (buf[i] == vt[0] || buf[i] == vt[1]) {
-            uint64_t d = 0;
-            if (!readq(task, addr + o + i * 8 + 0x60, &d, 8) && d) { S = addr + o + i * 8; D = d; printf("server %#llx (vtable %s) display %#llx\n", (unsigned long long)S, buf[i] == vt[0] ? "a" : "b", (unsigned long long)D); break; }
-          }
+        for (size_t i = 0; i < n / 8; ++i) {
+          int k = -1;
+          for (int v = 0; v < 4; ++v) if (buf[i] == vt[v]) k = v;
+          if (k < 0) continue;
+          const uint64_t at = addr + o + i * 8;
+          uint64_t d = 0, tick = 0;
+          if (readq(task, at + 0x60, &d, 8) || !d) continue;
+          readq(task, at + 0x2e0, &tick, 8);
+          if (found++ < 16) printf("candidate %#llx vtable %c display %#llx tick %llu\n", (unsigned long long)at, "abcd"[k], (unsigned long long)d, (unsigned long long)tick);
+          if (!S || tick > best) { S = at; D = d; best = tick; }
+        }
       }
-    if (S) break;
     addr += size;
   }
   free(buf);
+  if (found) printf("server %#llx display %#llx (of %u candidates)\n", (unsigned long long)S, (unsigned long long)D, found);
   if (!S) { printf("no IOMFBServer found (slide %#llx)\n", (unsigned long long)slide); return 1; }
   uint64_t f[0x80];
   if (T) printf("timer %#llx (given)\n", (unsigned long long)T);

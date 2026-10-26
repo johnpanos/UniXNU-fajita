@@ -8,6 +8,7 @@
              the immediate path, target - half a period on the vsync path)
   NOTDUE     nothing due yet: the next-update time (a client's commit) was after this tick's target, so CA only collected
   IDLE       no update pending at all (the timer counts down 3 such ticks, then stops)
+  STOPPED    a gap after an idle tick: the timer had stopped (nothing due) until a commit restarted it; not a drop
   LATE       the timer itself skipped: the interval to the next tick was over 1.5 periods (the callback, which renders on the timer
              thread, ran more than a period late, and display_timer_callback re-phased from "now")
 Model and evidence: NOTES-gfx.md "CA's display timer". Prints per scene the counts, then every gap of 2+ ticks between renders with the
@@ -70,7 +71,8 @@ def classify(samples, period):
                                thr_ms=(before['thr'] - T) * US_PER_TICK / 1e3, ring=win[0]['ring'],
                                to_next_ms=None if nt is None else (nt - T) * US_PER_TICK / 1e3)))
         if nt is not None and nt - T > 1.5 * period:
-            res.append((T + period, 'LATE', dict(gap_ms=(nt - T) * US_PER_TICK / 1e3)))
+            # after an idle tick the timer was stopped (3 idle ticks, set_vsync_disabled) and restarted by a commit: not a late frame
+            res.append((T + period, 'STOPPED' if c == 'IDLE' else 'LATE', dict(gap_ms=(nt - T) * US_PER_TICK / 1e3)))
     return res
 
 
@@ -125,7 +127,7 @@ def main():
         renders = [k for k, r in enumerate(res) if r[1] == 'RENDER']
         shown = 0
         for a, b in zip(renders, renders[1:]):
-            if b - a < 2 or all(r[1] == 'IDLE' for r in res[a + 1:b]):
+            if b - a < 2 or all(r[1] in ('IDLE', 'STOPPED') for r in res[a + 1:b]):
                 continue
             T = res[a][0] * US_PER_TICK
             n = bisect.bisect_left(retire, T)
