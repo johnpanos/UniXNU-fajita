@@ -27,6 +27,7 @@ extern "C" {
 #include "WifiFat.h"
 #include "WifiWlfw.h"
 extern char fajita_wifi_rows[8][160];
+void fajita_wifi_modem_poll(void) __attribute__((weak));
 extern volatile uint32_t fajita_wifi_state[8];
 int native_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *blocks, uint64_t *attr) __attribute__((weak));
 int native_ufs_part_read(uint8_t lun, uint64_t lba, uint32_t count, void *dst) __attribute__((weak));
@@ -326,6 +327,39 @@ extern "C" int fajita_wifi_smp2p_bits(uint32_t *value)
     IOLockUnlock(gInitLock);
     return r;
 }
+// What the modem has put in SMEM, for the stage-2 wait for "ready": its SMP2P item (435, in the APPS<->MODEM partition) decoded,
+// our own item (428), and the modem's crash reason string (item 421, global or any partition). Rows for the boot log.
+extern "C" void fajita_wifi_smp2p_diag(char *buf, size_t cap)
+{
+    if (!gInitLock) gInitLock = IOLockAlloc();
+    IOLockLock(gInitLock);
+    size_t at = 0;
+    buf[0] = 0;
+    if (!gSmemUp) {snprintf(buf, cap, "smem down"); IOLockUnlock(gInitLock); return;}
+    for (unsigned k = 0; k < 2; ++k) {
+        const unsigned item = k ? FW_SMP2P_MPSS_OUT_ITEM : FW_SMP2P_MPSS_IN_ITEM;
+        size_t sz = 0;
+        int err = 0;
+        volatile void *it = wsmem_get(&gSmem, 1, item, &sz, &err);
+        if (!it) {at += snprintf(buf + at, cap - at, "%s%u absent(%d)", k ? " | out " : "in ", item, err); continue;}
+        wsmp2p_view v;
+        const int pk = wsmp2p_peek(it, sz, &v);
+        at += snprintf(buf + at, cap - at, "%s%u peek %d magic %08x v%u pid %u->%u valid %u flags %x", k ? " | out " : "in ", item, pk,
+                       v.magic, v.version, v.local_pid, v.remote_pid, v.valid, v.flags);
+        for (unsigned i = 0; i < v.nentries && at + 40 < cap; ++i) at += snprintf(buf + at, cap - at, " %s=%x", v.entry[i].name, v.entry[i].value);
+    }
+    size_t sz = 0;
+    int err = 0;
+    volatile void *cr = wsmem_get(&gSmem, 1, 421, &sz, &err);
+    if (!cr) cr = wsmem_get(&gSmem, WSMEM_GLOBAL_HOST, 421, &sz, &err);
+    if (cr && sz && at + 30 < cap) {
+        char s[64];
+        for (unsigned i = 0; i < sizeof s - 1 && i < sz; ++i) {const char c = ((volatile const char *)cr)[i]; s[i] = c >= 32 && c < 127 ? c : (c ? '?' : 0); s[i + 1] = 0;}
+        snprintf(buf + at, cap - at, " | crash421 '%s'", s);
+    }
+    IOLockUnlock(gInitLock);
+}
+
 // The AP's outbound SMP2P "master-kernel" bits (bit 0 = stop, qcom,smem-states).
 extern "C" int fajita_wifi_smp2p_set(uint32_t mask, uint32_t value)
 {
@@ -412,6 +446,7 @@ extern "C" void fajita_wifi_stack(unsigned stage)
         const uint64_t t = nowMs();
         if (t - last >= 1000) {
             last = t;
+            if (fajita_wifi_modem_poll) fajita_wifi_modem_poll();
             char svcs[64] = "";
             for (unsigned i = 0; i < gNSeen && strlen(svcs) < 56; ++i)
                 snprintf(svcs + strlen(svcs), sizeof svcs - strlen(svcs), "%s%x", i ? "," : "", gSeen[i].service);

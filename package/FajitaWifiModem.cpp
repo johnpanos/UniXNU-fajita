@@ -30,11 +30,12 @@ int fajita_rpmh_lookup(const char *name, uint32_t *addr, uint8_t *aux, unsigned 
 int fajita_rpmh_send(unsigned n, const uint32_t (*cmd)[3], uint32_t *resp) __attribute__((weak));
 int fajita_wifi_smp2p_bits(uint32_t *value);
 int fajita_wifi_smp2p_set(uint32_t mask, uint32_t value);
+void fajita_wifi_smp2p_diag(char *buf, size_t cap);
 int fajita_wifi_qmp_load_state(const char *name, int on);
 int fajita_wifi_fw_size(const char *path, uint32_t *size);
 long fajita_wifi_fw_read(const char *path, uint32_t off, void *dst, uint32_t len);
 int fajita_wifi_modem(void);
-void fajita_wifi_modem_kcmd(void);
+void fajita_wifi_modem_poll(void);
 int fajita_wifi_msa_assign(const wlfw_mem_region *regions, unsigned count);
 void fajita_wifi_msa_release(void);
 typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out, size_t cap);
@@ -277,11 +278,29 @@ void opMdataFree(void *) {gMdata.release();}
 int opLoadState(void *, int on) {return fajita_wifi_qmp_load_state("modem", on);}
 int opFwSize(void *, const char *name, uint32_t *size) {return fajita_wifi_fw_size(name, size);}
 long opFwRead(void *, const char *name, uint32_t off, void *dst, uint32_t len) {return fajita_wifi_fw_read(name, off, dst, len);}
-int opSmp2pBits(void *, uint32_t *v) {return fajita_wifi_smp2p_bits(v);}
+void rowAdd(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int opSmp2pBits(void *, uint32_t *v)
+{
+    const int rc = fajita_wifi_smp2p_bits(v);
+    static uint64_t last;
+    const uint64_t t = nowUs();
+    if (t - last > 1000000) {   // once a second while waiting: what the modem has written to SMEM
+        last = t;
+        char d[150];
+        fajita_wifi_smp2p_diag(d, sizeof d);
+        IOLog("fajita-wifi: FWM smp2p rc %d bits %x | %s\n", rc, rc ? 0 : *v, d);
+    }
+    return rc;
+}
 int opSmp2pSet(void *, uint32_t mask, uint32_t v) {return fajita_wifi_smp2p_set(mask, v);}
 
+void opStep(void *, unsigned index, unsigned step, int rc, uint32_t value, uint32_t us)
+{
+    IOLog("fajita-wifi: FWM live %u %s rc %d val %x %u us\n", index, wmss_step_name(step), rc, value, us);
+}
+
 const wmss_ops kOps = {nullptr, hwRd, hwWr, opNow, opUdelay, opMsleep, opArcGet, opArcSet, opAssign, opLoadState, opFwSize, opFwRead,
-                       opRegionWrite, opRegionZero, opMdataAlloc, opMdataFree, opSmp2pBits, opSmp2pSet};
+                       opRegionWrite, opRegionZero, opMdataAlloc, opMdataFree, opSmp2pBits, opSmp2pSet, opStep};
 
 wmss *gM;
 IOLock *gLock;
@@ -337,7 +356,7 @@ bool setup()
         gM = static_cast<wmss *>(IOMallocData(sizeof(wmss)));
         if (!gM) return false;
         wmss_cfg cfg = {FW_MBA_REGION_PHYS, FW_MBA_REGION_SIZE, FW_MPSS_REGION_PHYS, FW_MPSS_REGION_SIZE, FW_RMTFS_PHYS, FW_RMTFS_SIZE,
-                        "image/mba.mbn", "image/modem.mdt", 5000, 10000};
+                        "image/mba.mbn", "image/modem.mdt", 5000, 10000, 0x100000};
         wmss_init(gM, &kOps, &cfg);
     }
     return mapBlocks();
@@ -406,12 +425,21 @@ extern "C" int fajita_wifi_modem(void)
     }
     rowAdd("%s", row);
     strlcpy(fajita_wifi_rows[2], row, sizeof fajita_wifi_rows[2]);
-    survey();
+    // No register survey while the modem runs: the QDSP6SS/RMB windows are not safe to read once the MBA has locked the XPUs
+    // (the first successful boot ended in an unhandled SError right after this row). After a failure the modem is in reset.
+    if (rc) survey();
     IOLockUnlock(gLock);
     return rc;
 }
 
-extern "C" void fajita_wifi_modem_kcmd(void) {}
+// Called from the stage-3 loop about once a second: the late SMP2P handover bit releases the proxy votes.
+extern "C" void fajita_wifi_modem_poll(void)
+{
+    if (!gM || !gLock || !gUp) return;
+    IOLockLock(gLock);
+    if (gM->proxy_held && wmss_poll_handover(gM) == 1) rowAdd("FWM handover seen, proxy votes released");
+    IOLockUnlock(gLock);
+}
 
 // ---- the wlfw MSA regions (ath10k_qmi_setup_msa_permissions / remove_msa_permission) ----
 namespace {

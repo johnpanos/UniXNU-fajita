@@ -18,6 +18,7 @@
 #define HLOS (1ull << WMSS_VMID_HLOS)
 #define MSS (1ull << WMSS_VMID_MSS_MSA)
 #define NCLK 7
+static int g_meta_in_mba;   // run every test with the metadata in a separate DMA buffer (0) and inside the MBA carveout (1)
 
 typedef struct {uint32_t en, mask, halt;} sclk;
 // CLK_IFACE, SNOC_AXI, BUS, MEM, GPLL0_MSS, MNOC_AXI, PRNG as in WifiMss.c (enable register, mask, halt register)
@@ -205,8 +206,11 @@ static void s_wr(void *c, unsigned blk, uint32_t off, uint32_t v)
         s->rmb[off / 4] = v;
         if (off == WMSS_RMB_MBA_COMMAND && v == WMSS_CMD_META_DATA_READY) {
             s->meta_addr = s->rmb[WMSS_RMB_PMI_META_DATA / 4];
-            const int ok = s->mdata_alive && s->meta_addr == (uint32_t)s->mdata_phys && own_of(s, s->mdata_phys, 0)->mask == MSS &&
-                           s->expect_meta && !memcmp(s->mdata, s->expect_meta, s->expect_meta_len) && s->fault != FL_META_FAIL;
+            const int inmba = s->cfg.meta_off != 0;
+            const int ok = inmba ? (s->meta_addr == (uint32_t)(s->cfg.mba_phys + s->cfg.meta_off) && own_of(s, s->cfg.mba_phys, 0)->mask == MSS &&
+                                    !memcmp(s->mba + s->cfg.meta_off, s->expect_meta, s->expect_meta_len) && s->fault != FL_META_FAIL)
+                                 : (s->mdata_alive && s->meta_addr == (uint32_t)s->mdata_phys && own_of(s, s->mdata_phys, 0)->mask == MSS &&
+                                    s->expect_meta && !memcmp(s->mdata, s->expect_meta, s->expect_meta_len) && s->fault != FL_META_FAIL);
             if (s->fault != FL_META_NEVER) ev_add(s, 2000, EV_META, ok ? WMSS_MBA_META_AUTH_SUCCESS : (uint32_t)-2);
             if (!ok) snprintf(s->why, sizeof s->why, "meta: addr %x alive %d owner %llx", s->meta_addr, s->mdata_alive,
                               (unsigned long long)own_of(s, s->mdata_phys, 0)->mask);
@@ -348,7 +352,7 @@ static int s_smp2p_set(void *c, uint32_t mask, uint32_t v)
 static wmss_ops sim_ops(sim *s)
 {
     wmss_ops o = {s, s_rd, s_wr, s_now, s_udelay, s_msleep, s_arc_get, s_arc_set, s_assign, s_load_state, s_fw_size, s_fw_read,
-                  s_region_write, s_region_zero, s_mdata_alloc, s_mdata_free, s_smp2p_bits, s_smp2p_set};
+                  s_region_write, s_region_zero, s_mdata_alloc, s_mdata_free, s_smp2p_bits, s_smp2p_set, NULL};
     return o;
 }
 
@@ -378,7 +382,7 @@ static void sim_init(sim *s, unsigned variant)
     s->stuck_clk = -1;
     s->arc_cur[WMSS_ARC_MX] = 3; s->arc_cur[WMSS_ARC_CX] = 6; s->arc_cur[WMSS_ARC_MSS] = 0;
     s->arc_max[WMSS_ARC_MX] = 4; s->arc_max[WMSS_ARC_CX] = 7; s->arc_max[WMSS_ARC_MSS] = 7;
-    s->cfg = (wmss_cfg){SYN_MBA_PHYS, SYN_MBA_SIZE, SYN_MPSS_PHYS, SYN_MPSS_SIZE, 0xf5b01000ull, 0x200000, "image/mba.mbn", "image/modem.mdt", 0, 0};
+    s->cfg = (wmss_cfg){SYN_MBA_PHYS, SYN_MBA_SIZE, SYN_MPSS_PHYS, SYN_MPSS_SIZE, 0xf5b01000ull, 0x200000, "image/mba.mbn", "image/modem.mdt", 0, 0, g_meta_in_mba ? 0x10000u : 0};
     s->mba = t_talloc(SYN_MBA_SIZE);
     s->mpss = t_talloc(SYN_MPSS_SIZE);
     s->gcc[0x52004 / 4] = 1u << 10;     // boot rom AHB already voted by someone else: must stay on
@@ -526,11 +530,17 @@ static void t_mss_boot_ok(void)
                                          WMSS_S_Q6_RESET, WMSS_S_MBA_WAIT, WMSS_S_META_ALLOC, WMSS_S_META_ASSIGN, WMSS_S_META_AUTH,
                                          WMSS_S_META_RECLAIM, WMSS_S_MPSS_SHARE, WMSS_S_SEGMENTS, WMSS_S_MPSS_MSS, WMSS_S_AUTH,
                                          WMSS_S_READY, WMSS_S_MBA_RECLAIM, WMSS_S_HANDOVER};
-        unsigned at = 0;
-        for (unsigned i = 0; i < m->ntrace && at < sizeof order / sizeof order[0]; ++i)
-            if (m->trace[i].step == order[at] && m->trace[i].rc == 0) ++at;
-        if (at != sizeof order / sizeof order[0]) printf("variant %u: trace stops after %s\n", v, wmss_step_name(order[at ? at - 1 : 0]));
-        CHECK(at == sizeof order / sizeof order[0]);
+        unsigned at = 0, want = 0;
+        for (unsigned i = 0; i < sizeof order / sizeof order[0]; ++i)
+            if (!g_meta_in_mba || (order[i] != WMSS_S_META_ASSIGN && order[i] != WMSS_S_META_RECLAIM && order[i] != WMSS_S_META_ALLOC)) ++want;
+        for (unsigned i = 0, k = 0; i < m->ntrace && k < sizeof order / sizeof order[0]; ++i) {
+            while (k < sizeof order / sizeof order[0] && g_meta_in_mba && (order[k] == WMSS_S_META_ASSIGN || order[k] == WMSS_S_META_RECLAIM || order[k] == WMSS_S_META_ALLOC)) ++k;
+            if (k < sizeof order / sizeof order[0] && m->trace[i].step == order[k] && m->trace[i].rc == 0) {++k; ++at;}
+        }
+        if (g_meta_in_mba) {   // the metadata is written once, before the MBA is started: its note comes before the load state
+            CHECK(!s->mdata_alive && m->trace[3].step == WMSS_S_META_ALLOC);
+        }
+        CHECK(at == want);
         // then stop: everything is given back and powered down
         CHECK(wmss_stop(m) == 0);
         CHECK(s->smp2p_stop_out == 0);
@@ -625,7 +635,7 @@ static void t_mss_op_failures(void)
             check_failed_boot(s, m, rc, "op", k, s->failed_kind != OP_ASSIGN);
             t_tfree_all();
         }
-        CHECK(total > 30);
+        CHECK(total > 25);
     }
 }
 
@@ -736,7 +746,7 @@ static void t_mss_real(void)
     s->stuck_clk = -1;
     s->arc_cur[WMSS_ARC_MX] = 3; s->arc_cur[WMSS_ARC_CX] = 6;
     s->arc_max[WMSS_ARC_MX] = 4; s->arc_max[WMSS_ARC_CX] = 7; s->arc_max[WMSS_ARC_MSS] = 7;
-    s->cfg = (wmss_cfg){0x96500000ull, 0x200000, 0x8e000000ull, 0x7800000, 0xf5b01000ull, 0x200000, "image/mba.mbn", "image/modem.mdt", 0, 100};
+    s->cfg = (wmss_cfg){0x96500000ull, 0x200000, 0x8e000000ull, 0x7800000, 0xf5b01000ull, 0x200000, "image/mba.mbn", "image/modem.mdt", 0, 100, g_meta_in_mba ? 0x100000u : 0};
     s->mba = calloc(1, 0x200000);
     s->mpss = calloc(1, 0x7800000);
     s->gcc[0x52004 / 4] = 1u << 10; s->init_gcc52004 = s->gcc[0x52004 / 4];
@@ -815,6 +825,8 @@ static void t_mss_survey(void)
 
 void t_mss(void)
 {
+  for (g_meta_in_mba = 0; g_meta_in_mba < 2; ++g_meta_in_mba) {
+    printf("  metadata %s\n", g_meta_in_mba ? "inside the MBA carveout" : "in a separate DMA buffer");
     RUN(t_mss_boot_ok);
     RUN(t_mss_handover_late);
     RUN(t_mss_op_failures);
@@ -822,4 +834,5 @@ void t_mss(void)
     RUN(t_mss_preflight);
     RUN(t_mss_survey);
     RUN(t_mss_real);
+  }
 }

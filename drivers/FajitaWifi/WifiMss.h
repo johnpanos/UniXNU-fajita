@@ -110,6 +110,8 @@ typedef struct wmss_ops {
     // SMP2P with the modem: its inbound bits (0 = valid, negative before the modem allocated its item); our outbound bits.
     int (*smp2p_bits)(void *ctx, uint32_t *v);
     int (*smp2p_set)(void *ctx, uint32_t mask, uint32_t v);
+    // Optional: every recorded step as it happens (the phone's log is the only record if the SoC resets mid-boot).
+    void (*step)(void *ctx, unsigned index, unsigned step, int rc, uint32_t value, uint32_t us);
 } wmss_ops;
 
 // The boot steps, as recorded (FWM rows).
@@ -127,6 +129,11 @@ typedef struct {
     uint64_t mba_phys, mba_size, mpss_phys, mpss_size, rmtfs_phys, rmtfs_size;   // rmtfs_size 0: not assigned
     const char *mba_name, *mdt_name;    // "image/mba.mbn", "image/modem.mdt" (the .bNN names are derived from the latter)
     uint32_t ready_ms, handover_ms;     // 5000 / 10000
+    // The metadata (what the MBA authenticates first) can live inside the MBA carveout at this offset (0: a separate DMA buffer
+    // from mdata_alloc, as Linux's fallback does). On the phone the DMA buffer comes from the OS's own pool, whose pages stay
+    // mapped cacheable in the OS and are reached by speculation once the hypervisor has taken them: the SoC reset in
+    // meta-assign/meta-auth on one run in four. The carveout is outside the OS's memory, written before the MBA owns it.
+    uint32_t meta_off;
 } wmss_cfg;
 
 typedef struct {

@@ -97,8 +97,10 @@
 #define FW_GLINK_FIFO_BYTES (16u << 10)
 
 // ---- SMP2P modem (smp2p.c): smem items, SPI 451, apss_shared 14 ----
-#define FW_SMP2P_MPSS_OUT_ITEM 435          // qcom,smem = <435>, <428>
-#define FW_SMP2P_MPSS_IN_ITEM  428
+// qcom,smem = <435>, <428>: smp2p.c takes smem_items[SMP2P_INBOUND] first, so 435 is the modem's item (inbound for the AP) and 428
+// the AP's own (outbound). Round 3 had these two swapped: the AP allocated the modem's item and the modem never found its peer.
+#define FW_SMP2P_MPSS_OUT_ITEM 428
+#define FW_SMP2P_MPSS_IN_ITEM  435
 #define FW_SMP2P_SPI 451
 #define FW_SMP2P_APCS_MBOX 14
 #define FW_SMP2P_MAGIC 0x504d5324u          // "$PMS" little-endian

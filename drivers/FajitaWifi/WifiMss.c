@@ -56,6 +56,7 @@ static void note(wmss *m, unsigned step, int rc, uint32_t val)
     s->step = step; s->rc = rc; s->value = val;
     const uint64_t dt = now(m) - m->t0;
     s->us = dt > 0xffffffffu ? 0xffffffffu : (uint32_t)dt;
+    if (m->ops->step) m->ops->step(m->ops->ctx, m->ntrace - 1, step, rc, val, s->us);
 }
 static int fail(wmss *m, unsigned step, int rc, uint32_t val)
 {
@@ -438,6 +439,14 @@ static int mpss_init_image(wmss *m)
     uint32_t size = 0;
     int rc = read_metadata(m, 0, &size);
     if (rc) return fail(m, WMSS_S_META_ALLOC, rc, 0);
+    if (m->cfg.meta_off) {      // already in the MBA carveout (written before the MBA owned it): just hand over the address
+        WR(m, WMSS_BLK_RMB, WMSS_RMB_PMI_META_DATA, (uint32_t)m->mdata_phys);
+        WR(m, WMSS_BLK_RMB, WMSS_RMB_MBA_COMMAND, WMSS_CMD_META_DATA_READY);
+        rc = rmb_mba_wait(m, WMSS_MBA_META_AUTH_SUCCESS, 1000);
+        if (rc < 0) return fail(m, WMSS_S_META_AUTH, rc == E_TIMEDOUT ? E_TIMEDOUT : E_INVAL, (uint32_t)rc);
+        note(m, WMSS_S_META_AUTH, 0, (uint32_t)rc);
+        return 0;
+    }
     rc = m->ops->mdata_alloc(m->ops->ctx, size, &m->mdata_phys);
     if (rc) return fail(m, WMSS_S_META_ALLOC, rc < 0 ? rc : E_IO, size);
     m->mdata_held = 1; m->mdata_size = size;
@@ -552,6 +561,15 @@ int wmss_boot(wmss *m)
         (void)m->ops->fw_size(m->ops->ctx, m->cfg.mba_name, &size);
         if (fw_to_region(m, m->cfg.mba_name, 0, WMSS_REGION_MBA, 0, size)) {unwind(m, 0); return fail(m, WMSS_S_MBA_COPY, E_IO, size);}
         note(m, WMSS_S_MBA_COPY, 0, size);
+        if (m->cfg.meta_off) {
+            uint32_t msize = 0;
+            if (m->cfg.meta_off < size || (uint64_t)m->cfg.meta_off + MDATA_MAX > m->cfg.mba_size) {unwind(m, 0); return fail(m, WMSS_S_META_ALLOC, E_INVAL, m->cfg.meta_off);}
+            int mrc = read_metadata(m, m->buf, &msize);
+            if (!mrc && m->ops->region_write(m->ops->ctx, WMSS_REGION_MBA, m->cfg.meta_off, m->buf, msize)) mrc = E_IO;
+            if (mrc) {unwind(m, 0); return fail(m, WMSS_S_META_ALLOC, mrc, 2);}
+            m->mdata_phys = m->cfg.mba_phys + m->cfg.meta_off;
+            note(m, WMSS_S_META_ALLOC, 0, msize);
+        }
     }
     rc = mba_load(m);
     if (rc) return rc;                       // mba_load unwound itself

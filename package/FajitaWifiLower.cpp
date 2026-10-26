@@ -151,7 +151,7 @@ void surveySmem()
     }
     // SMP2P, every APPS pair of sdm845.dtsi (local pid 0): {remote pid, out item, in item}.
     static const struct {const char *name; unsigned pid, out, in;} kPairs[] = {
-        {"mpss", 1, 435, 428}, {"lpass", 2, 443, 429}, {"slpi", 3, 481, 430}, {"cdsp", 5, 94, 432}};
+        {"mpss", 1, 428, 435}, {"lpass", 2, 429, 443}, {"slpi", 3, 430, 481}, {"cdsp", 5, 432, 94}};
     for (const auto &pr : kPairs) {
         for (unsigned dir = 0; dir < 2; ++dir) {
             const unsigned item = dir ? pr.in : pr.out;

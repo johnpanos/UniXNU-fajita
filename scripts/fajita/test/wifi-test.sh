@@ -84,8 +84,16 @@ build() {
 NAME=
 session_start() {
   say "session: boot fajita-wifi=$maxN"
-  FAJITA_OUT=$OUT "$TD/session.sh" start >/dev/null 2>&1 || { say "session start failed"; exit 1; }
+  local out rc=0
+  out=$(FAJITA_OUT=$OUT "$TD/session.sh" start 2>&1) || rc=$?
   NAME=$(cat "$W/session.current")
+  if [ $rc -ne 0 ]; then
+    # a dead boot shows up here, not as a stall: the console of that session says where it stopped (panic? reset?)
+    say "FAIL boot: ${out##*$'\n'}"
+    say "  tail of $W/logs/$NAME/usb-console.txt:"
+    tail -25 "$W/logs/$NAME/usb-console.txt" 2>/dev/null | cut -c1-240 | while read -r r; do say "    $r"; done
+    exit 1
+  fi
   CON=$W/logs/$NAME/usb-console.txt
   say "session $NAME (console $CON)"
 }
@@ -170,7 +178,7 @@ evaluate() {
       if [ "$ok" = 1 ]; then verdict qmp PASS "AOSS QMP link and both channels up"
       else verdict qmp FAIL "AOSS QMP link-up incomplete (see above)"; fi ;;
     modem)
-      grep -aE 'FWM |FW2 ' "$CON" 2>/dev/null | sed 's/^.*fajita-wifi: //' | awk '!seen[$0]++' | head -70 | while read -r r; do say "  $r"; done
+      grep -aE 'FWM |FW2 ' "$CON" 2>/dev/null | sed 's/^.*fajita-wifi: //' | awk '!seen[$0]++' | head -140 | while read -r r; do say "  $r"; done
       local k; k=$($HUB call --timeout "$HUBT" kcmd wifimss rows 2>/dev/null | grep -a 'FW2 ' | tail -1)
       [ -n "$k" ] && say "  kcmd wifimss: $k"
       check_from_log modem 'FW2 modem up: .*auth4 ready1' 'MSS did not reach AUTH_COMPLETE + ready (the FW2/FWM rows above say where it stopped and unwound)' ;;

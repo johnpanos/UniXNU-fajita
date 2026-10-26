@@ -22,7 +22,13 @@ start)
   NAME=session-$(date +%H%M%S); echo $NAME > $CUR
   CYCLE_WAIT=${CYCLE_WAIT:-2000} nohup $TD/cycle.sh $NAME $P $B > $S/logs-$NAME.out 2>&1 &
   echo "$NAME: waiting for the phone lock and boot (log: $S/logs/$NAME/)"
-  until grep -q "XNU booting" $S/logs/$NAME/cycle.txt 2>/dev/null; do sleep 2; done
+  # Fail fast: the run ended (RESULT) or the phone fell back to fastboot before the kernel logged "XNU booting" = a dead boot.
+  until grep -q "XNU booting" $S/logs/$NAME/cycle.txt 2>/dev/null; do
+    if grep -qE "^\[[0-9:]+\] RESULT:|back in fastboot" $S/logs/$NAME/cycle.txt 2>/dev/null; then
+      echo "FAIL boot: $NAME ended before the kernel came up (see $S/logs/$NAME/cycle.txt)"; exit 3
+    fi
+    sleep 2
+  done
   t0=$(date +%s)
   touch $ACT
   # idle guard: nobody should hold the phone without using it; reset the run after SESSION_IDLE s with no command
@@ -36,6 +42,8 @@ start)
       sleep 10
     done ) > /dev/null 2>&1 &
   for i in $(seq 1 90); do
+    # the phone fell back to fastboot (panic or reset) with the session still waiting: stop now
+    if grep -qE "back in fastboot|^\[[0-9:]+\] RESULT:" $S/logs/$NAME/cycle.txt 2>/dev/null; then echo "FAIL boot: phone back in fastboot (panic or reset?) after $(( $(date +%s) - t0 )) s"; exit 3; fi
     $HUB call --timeout 20 run /usr/sbin/ioreg -d 1 2>/dev/null | grep -q "+-o" && { echo "ready after $(( $(date +%s) - t0 )) s"; exit 0; }
     sleep 3
   done
