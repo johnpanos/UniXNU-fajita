@@ -20,6 +20,22 @@ before msa_ready with `msa-assign?`); the board file is `image/bdwlan.<id>` (cns
 `wifi-stack`, merged into `ios16-port` after each layer. Host tests: `scripts/check-fajita-wifi-host.py` (two binaries:
 `test_wifi` for the earlier protocol code, `test_stack` for the layers below).
 
+Round 4 order (lead): 5a CE+HTC, 5b WMI-TLV, 5c association + HTT, then layer 6 (Ethernet interface, WPA2, DHCP), all
+host-only; the apps_smmu glue comes LAST, after a read-only hardware survey on the phone.
+
+apps_smmu facts for the Wi-Fi glue (round 3, read-only findings):
+- The GPU's banks are on the separate adreno_smmu (0x5040000). Wi-Fi is on apps_smmu (0x15000000), shared with UFS, USB
+  (SID 0x740) and display (0x880/0xc80).
+- NativeUfs's SmmuTakeover.h takes apps_smmu banks from the top (8 deep) or adopts the UEFI UFS bank: a Wi-Fi bank stays
+  off the top 8 and off bank 0.
+- ArmSmmu4KAttachStreams does exact matches only: SID 0x40 mask 0x1 needs SMRs for 0x40 and 0x41. It requires
+  (sCR0 & 0x407) == 0x406, which UEFI may not have left. Survey first, read-only: sCR0, ID0-2, every SMR/S2CR, each bank's
+  CBAR/SCTLR.
+- The Qualcomm S2CR quirk (NOTES-gpu.md section 2: FAULT-type S2CR writes dropped, BYPASS lands as FAULT) probably applies.
+- IOVAs under 4 GiB; non-cacheable tables (the wifi node is not dma-coherent).
+- The MSA is likely not mapped through apps_smmu on SDM845 (the SCM assign gives it to the WLAN VMIDs): no window for it.
+- Use the kit in the stack worktree (kits/ArmSmmu4K at ios16/gpu-plugin.ref), not a second copy.
+
 | Layer | Code | Host test | Status |
 | --- | --- | --- | --- |
 | 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
