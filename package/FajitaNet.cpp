@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // fajita network interface: a BSD ifnet "en0" (IFT_ETHER, family ETHERNET) that iOS's network stack, configd's
 // IPConfiguration agent (ipconfig / DHCP), routing and the sockets above treat as an Ethernet interface, with a pluggable
-// frame backend. `fajita-net=wifi` waits for the Wi-Fi station (FajitaWifiDev.cpp: MAC, HTT tx, rx into fajita_net_input).
+// frame backend. `fajita-net=wifi` attaches en0 as soon as the station's MAC is known (the fajita-wifi-mac boot argument, else
+// FajitaWifiDev.cpp's report when the device starts), with its link down until the station associates (HTT tx, rx into
+// fajita_net_input), the way a real Wi-Fi interface exists from boot: configd's InterfaceNamer names it before the IORegistry
+// quiesces, so PreferencesMonitor's default configuration on a fresh Data includes a network service for it (it is made once, at
+// that "quiet"; an interface named later never gets one on iOS: NOTES-daemons.md). Link changes post KEV_DL_LINK_ON/OFF.
 // `fajita-net=usb` uses the USB network channel (drivers/NativeDwc3/UsbNet.h: fajita_usbnet_send and
 // fajita_usbnet_register_rx, `usb-net=1`) so DHCP and ping can be proven against the laptop (scripts/fajita/test/net-test.sh,
 // passt) before the Wi-Fi radio carries frames; the Wi-Fi data path will call fajita_net_input and fajita_net_set_backend.
@@ -32,6 +36,7 @@
 #include <net/kpi_interface.h>
 extern "C" {
 #include <net/bpf.h>
+#include <sys/kern_event.h>
 }
 
 extern "C" {
@@ -67,6 +72,7 @@ volatile unsigned gHead, gTail;      // producer (backend callback) / consumer (
 IOSimpleLock *gRingLock;
 ifnet_t gIf;
 uint8_t gMac[ETHER_ADDR_LEN] = {0x02, 0xfa, 0x6a, 0x17, 0x4e, 0x02};
+volatile bool gMacKnown = false;   // wifi mode: the station's MAC (boot argument or the device's report)
 int (*gSend)(void *, const void *, size_t);
 void *gSendCtx;
 bool gStarted;
@@ -253,10 +259,24 @@ void worker(void *, wait_result_t)
         fajita_usbnet_register_rx(usbRx, nullptr);
     }
     if (!strcmp(mode, "wifi")) {
-        // the Wi-Fi station (FajitaWifiDev.cpp) sets the MAC and the backend once it is associated and keyed
-        IOLog("fajita-net: en0 waits for the Wi-Fi link\n");
-        for (unsigned i = 0; i < 1200 && !gSend; ++i) IOSleep(500);
-        if (!gSend) {IOLog("fajita-net: no Wi-Fi link in 600 s\n"); return;}
+        // en0 exists from the start with its link down; the station (FajitaWifiDev.cpp) sets the backend once it is associated
+        // and keyed. The MAC: fajita-wifi-mac (the phone's persist:/wlan_mac.bin, the same one the station uses), else the
+        // device's own when it starts.
+        char m[24] = {};
+        if (PE_parse_boot_arg_str("fajita-wifi-mac", m, sizeof m)) {
+            uint8_t v[ETHER_ADDR_LEN] = {};
+            unsigned k = 0;
+            for (const char *q = m; *q && k < 12; ++q) {
+                const int h = *q >= '0' && *q <= '9' ? *q - '0' : *q >= 'a' && *q <= 'f' ? *q - 'a' + 10 : *q >= 'A' && *q <= 'F' ? *q - 'A' + 10 : -1;
+                if (h < 0) continue;
+                if (k & 1) v[k / 2] = uint8_t(v[k / 2] << 4 | h); else v[k / 2] = uint8_t(h);
+                ++k;
+            }
+            if (k == 12 && !(v[0] & 1) && (v[0] | v[1] | v[2] | v[3] | v[4] | v[5])) {memcpy(gMac, v, sizeof gMac); gMacKnown = true;}
+        }
+        if (!gMacKnown) IOLog("fajita-net: en0 waits for the Wi-Fi device's MAC\n");
+        for (unsigned i = 0; i < 1200 && !gMacKnown && !gSend; ++i) IOSleep(500);
+        if (!gMacKnown && !gSend) {IOLog("fajita-net: no Wi-Fi device in 600 s\n"); return;}
     }
     if (!attach()) {IOLog("fajita-net: ifnet attach failed\n"); return;}
     if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("net", kcmdNet, "fajita-net interface counters");
@@ -289,12 +309,36 @@ extern "C" int fajita_net_input(const void *frame, size_t len)
 
 extern "C" void fajita_net_set_mac(const uint8_t mac[6])
 {
-    if (fajita_net_state[0]) return;   // attached: the address is fixed
+    if (fajita_net_state[0] || gMacKnown) return;   // attached, or already known: the address is fixed
     memcpy(gMac, mac, ETHER_ADDR_LEN);
+    gMacKnown = true;
+}
+
+// KEV_DL_LINK_ON/OFF for en0 (as bsd/net/if_fake.c's interface_link_event): IPConfiguration restarts DHCP on a link change.
+static void linkEvent(u_int32_t code)
+{
+    ifnet_t ifp = gIf;
+    if (!ifp) return;
+    struct event { u_int32_t ifnet_family; u_int32_t unit; char if_name[IFNAMSIZ]; };
+    _Alignas(struct kern_event_msg) char message[sizeof(struct kern_event_msg) + sizeof(struct event)] = {};
+    struct kern_event_msg *header = reinterpret_cast<struct kern_event_msg *>(message);
+    struct event *data = reinterpret_cast<struct event *>(header + 1);
+    header->total_size = sizeof message;
+    header->vendor_code = KEV_VENDOR_APPLE;
+    header->kev_class = KEV_NETWORK_CLASS;
+    header->kev_subclass = KEV_DL_SUBCLASS;
+    header->event_code = code;
+    data->ifnet_family = ifnet_family(ifp);
+    data->unit = static_cast<u_int32_t>(ifnet_unit(ifp));
+    strlcpy(data->if_name, ifnet_name(ifp), IFNAMSIZ);
+    ifnet_event(ifp, header);
+    IOLog("fajita-net: en0 link %s\n", code == KEV_DL_LINK_ON ? "up" : "down");
 }
 
 extern "C" void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len), void *ctx)
 {
+    const bool was = gSend != nullptr;
     gSendCtx = ctx;
     gSend = send;
+    if (was != (send != nullptr)) linkEvent(send ? KEV_DL_LINK_ON : KEV_DL_LINK_OFF);
 }

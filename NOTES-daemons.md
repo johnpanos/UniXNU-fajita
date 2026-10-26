@@ -7,7 +7,7 @@
 | coreduetd | 91-94% for whole runs on Wi-Fi boots; 94.8% median over 34 min idle on a fixed-clock Wi-Fi boot (old Data) | 0.0% median on 3 boots (reset boot, no Wi-Fi; resumed, no Wi-Fi; Wi-Fi), never above 2% after the first minute |
 | healthappd / healthd | 59-139% / 22-59% in gfx scenes; 120% / 15% at once when the clock jumped 1970 -> 2026 | healthappd one 10 s window at 8.2% in 6 rounds (Wi-Fi boot), healthd only in the first minute after boot |
 | assetsd, searchd, cloudd, CacheDelete | 64-75% each right after the clock jump (dasd's maintenance activities, overdue by 56 years) | not seen at idle |
-| mobileassetd / kbd | 63-98% / 40-50% when the App Library first opens (gfx suite) | not re-measured in the suite here (the graphics agent's baseline will show it); 0% at idle |
+| mobileassetd / kbd | 63-98% / 40-50% when the App Library first opens (gfx suite) | 0% at idle; the in-suite numbers come from the graphics agent's next baseline on the final Data (pending) |
 
 Idle rounds: `scripts/fajita/test/idle-daemons.sh` (10 s CPU windows, 120-180 s apart). Logs: `$FAJITA_WORK/daemons/{wifi2-prune,reset0,proofB,proofC-wifi}.txt`.
 
@@ -63,18 +63,42 @@ Merge ios16-port before booting.
   run wifi-test.sh once), `/private/var/ssh` (dropbear host keys are regenerated: the SSH host key changes, NOTES-devmode.md),
   `/private/var/ngpu/gpu-env` (the default), the backboardd m2v shader cache (rebuilt on the first boot: backboardd ~98% for a few minutes).
 
-## Safari's container (webbookmarksd, com.apple.Safari.History, Safari's migration plugin)
+## Safari's container (webbookmarksd, com.apple.Safari.History, Safari's migration plugin): fixed
 
-All three abort in SafariCore `-[NSFileManager(SafariNSFileManagerExtras) _safari_getMobileSafariContainerDirectoryURL:isContainerized:]`,
+All three aborted in SafariCore `-[NSFileManager(SafariNSFileManagerExtras) _safari_getMobileSafariContainerDirectoryURL:isContainerized:]`,
 with `-[NSURL initFileURLWithPath:isDirectory:]: nil string parameter` (kernel `ABORT webbookmarksd reason ...` line). The method does
 `if (sandbox_container_path_for_pid(getpid(), buf, 1024) == 0) url = [NSURL fileURLWithPath:@(buf) isDirectory:YES]` and otherwise asks
-LaunchServices (`LSApplicationRecord initWithBundleIdentifier:@"com.apple.mobilesafari" ...`.dataContainerURL). LaunchServices is fine
-(`fjbundle --lsrecord --mobile com.apple.mobilesafari`: /Applications/MobileSafari.app, data container
-/private/var/mobile/Containers/Data/Application/<uuid>, System, installed). The Sandbox stand-in (stack patch
-zzw-hackios-security-standins.patch, `minisandbox_container_path`) answered request 4 with success and an untouched buffer for a process
-without a container, where the real Sandbox fails it. Fix (being tested): `ios16/patches/xnu-8796/zzw-hackios-z-sandbox-no-container.patch`,
-ENOENT for a process without CFFIXED_USER_HOME (extensions and apps, which have it, are unchanged). Proof wanted: no webbookmarksd /
-Safari.History ABORT lines, and `DMLastMigrationResults` success True on a fresh Data.
+LaunchServices (`LSApplicationRecord initWithBundleIdentifier:@"com.apple.mobilesafari" ...`.dataContainerURL). LaunchServices was fine
+(`fjbundle --lsrecord --mobile com.apple.mobilesafari`: /Applications/MobileSafari.app, its data container, System, installed). The Sandbox
+stand-in (`minisandbox_container_path` in the stack's patches/xnu-8796/zzw-hackios-security-standins.patch) answered request 4 with success
+and an untouched buffer for a process without a container, where the real Sandbox fails it.
+
+Fix (stack 80d6d69, pinned by ios16-port 3c24330): ENOENT for a process without CFFIXED_USER_HOME. Apps and their XPC services keep their
+answer (`fjbundle --container`: MobileCal, MobileSafari, WebKit.Networking/WebContent rc 0 with the data container); daemons and widget
+extensions get -1/ENOENT. (A second board patch editing kern_minimac.c broke incremental builds: the stand-ins patch no longer
+reverse-checked as applied. Change the stand-ins patch itself.) On the phone: webbookmarksd and Safari.History stay up (4 aborts per boot
+before), and on a fresh Data `DMLastMigrationResults` success **True**.
+
+## en0 had no network service on a fresh Data: fixed
+
+On iOS, configd's PreferencesMonitor (configd-1241 Plugins/PreferencesMonitor/prefsmon.c) makes the default network set once per boot, at
+InterfaceNamer's IORegistry "quiet", from the interfaces named at that moment, and commits nothing when there are none; an interface named
+later never gets a service (InterfaceNamer's updateNetworkConfiguration runs only on macOS base systems). FajitaNet attached en0 only after
+the Wi-Fi association (205.3 s, launchd at 172.4 s), so the fresh Data had no service (`preferences.plist` 192 bytes, no Sets), and Safari
+said "not connected" although the radio had a lease. The old Data had a service from some earlier boot.
+
+Fix (633661c): `fajita-net=wifi` attaches en0 and publishes its IOKit interface at start with the station's MAC (`fajita-wifi-mac`, else
+FajitaWifiDev's report when the device starts), media inactive until association, KEV_DL_LINK_ON/OFF on link changes. On the phone: en0 at
+91.0 s, launchd at 99.1 s; `Plugin:InterfaceNamer` has en0 named before `*QUIET*`; iOS created
+`Setup:/Network/Service/<uuid>/IPv4 ConfigMethod DHCP`; IPConfiguration lease; `fjnet http http://example.com/` 200 by name; Safari loads
+apple.com and news.ycombinator.com over TLS. Open (graphics): the pages' content draws blank on the fresh Data
+(all WebKit processes run; `/var/mobile/Library/Caches/com.apple.backboardd/m2v` does not exist). iOS's wifid still knows no network
+(the Settings > Wi-Fi path is the stopped IO80211 survey, NOTES-wifi.md); the radio joins through fajita-wifi as before.
+
+## The final Data (second reset, 2026-10-26 14:47, session-144727)
+
+`dreset=1` on the Wi-Fi build (`fajita-wifi-iokit=1 fajita-wifid=1`) with the clock, sandbox and en0 fixes: 32 staged apps installed by
+DataMigrator, Setup done, `DMLastMigrationResults` success True, crashes only AegirPoster (predates all this), coreduetd idle.
 
 ## Also found
 

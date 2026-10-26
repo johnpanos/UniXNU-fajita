@@ -391,6 +391,7 @@ extern "C" int fajita_wifi_dev_start(void)
     IOLockUnlock(gLock);
     note("FW6 start rc %d ce intr %08x", r, wce_intr_summary(&gDev.ce));
     if (r) {row(8, "FW6 wdev_start FAILED rc %d", r); return -4;}
+    fajita_net_set_mac(ops.mac);   // fajita-net=wifi: en0 attaches now with this MAC (link down until associated)
     PE_parse_boot_argn("fajita-wifi", &gStage, sizeof gStage);
     {unsigned prot = 1; PE_parse_boot_argn("fajita-wifi-txprot", &prot, sizeof prot); gDev.tx_unprotected = !prot;}
     {   // fajita-wifi-ssid: scan for it as soon as the device runs
