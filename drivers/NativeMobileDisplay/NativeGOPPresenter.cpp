@@ -17,6 +17,8 @@ volatile uint64_t native_gop_transfers,native_gop_bytes,native_gop_physical,nati
 // [2] the most runs of any, [3] the fewest, [4] the last frame's bytes, [5] its first physical address. Measured once per new mapping.
 volatile uint64_t native_gop_frame_runs[6];
 volatile uint64_t native_gop_gpu_offers,native_gop_gpu_completions,native_gop_gpu_failures,native_gop_gpu_abandoned;
+// Delivered swaps whose client never completed them (it died with the frame, or lost it for over a second), reclaimed by the next wait.
+volatile uint64_t native_gop_gpu_reclaimed;
 /* waitSwap: [0] calls, [1] timeouts, [2] the requested timeout of the last call (ms), [3] time the last timed-out call really waited (ns), [4] the shortest
  * and [5] the longest such wait (ns), [6] total ns waited in timed-out calls. A timed wait that returns long before its deadline shows here. */
 volatile uint64_t native_gop_wait_stats[7];
@@ -87,6 +89,10 @@ class NativeGOPPresenter : public IOService {
     uint32_t mapIds=0;
     uint64_t mapClock=0,deliveredAt=0;
     task_t mapTask=TASK_NULL;
+    // The task that took the delivered swap (compared, never dereferenced). The GPU client is the render server's plugin, reached through
+    // the Adreno accelerator's tunnel, so no user client of ours closes when it dies: a delivered swap of a dead client was never completed
+    // and the restarted render server's waits never saw a frame again (user-hn-freeze, 2026-10-26). waitSwap reclaims it.
+    task_t deliveredTask=TASK_NULL;
     void flushMaps();
     IOReturn waitSwap(task_t,uint64_t timeoutMs,NGPSwap *);
     IOReturn completeSwap(uint64_t sequence,int status);
@@ -207,6 +213,21 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     if(flipWanted && !flipTried)setupFlip();
     IOLockLock(gate);
     gpuClient=true;
+    // A swap delivered to another task (its client died with the frame) or delivered more than a second ago (its copy was lost; one takes
+    // milliseconds) is reclaimed: the display driver is told it failed and uses its own copy, and this waiter gets the next frame.
+    if(swap.offered && swap.delivered) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-deliveredAt,&ns);
+        if(deliveredTask!=task || ns>1000000000ull) {
+            auto lost=swap;swap={};const bool otherTask=deliveredTask!=task;deliveredTask=TASK_NULL;
+            IOLockUnlock(gate);
+            OSSafeReleaseNULL(lost.map);if(lost.memory)lost.memory->release();
+            const uint64_t n=__atomic_add_fetch(&native_gop_gpu_reclaimed,1,__ATOMIC_RELAXED);
+            if(n==1 || !(n%64))IOLog("NativeGOP: swap %llu delivered %llu ms ago to %s was never completed: reclaimed (%llu so far)\n",
+                                    lost.sequence,ns/1000000,otherTask?"another task":"this task",n);
+            if(lost.display)native_legacy_gpu_complete(lost.display,kIOReturnAborted);
+            IOLockLock(gate);
+        }
+    }
     if(flipMode && freeTarget()<0)native_gop_flip_stats[4]=native_gop_flip_stats[4]+1;
     while(online && (!swap.offered || swap.delivered || (flipMode && freeTarget()<0))) {
         if(IOLockSleepDeadline(gate,&swap,deadline,THREAD_ABORTSAFE)!=THREAD_AWAKENED) {
@@ -220,7 +241,7 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
         }
     }
     if(!online) {IOLockUnlock(gate);return kIOReturnNotReady;}
-    swap.delivered=true;
+    swap.delivered=true;deliveredTask=task;
     IOMemoryDescriptor *memory=swap.memory;memory->retain();
     const uint64_t sequence=swap.sequence,stride=swap.stride;const uint32_t width=swap.width,height=swap.height;
     IOLockUnlock(gate);
