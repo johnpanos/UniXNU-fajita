@@ -248,6 +248,11 @@ for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do
   grep -aqE "$done_re|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
 done
 evaluate
+# the WLAN streams' SMMU context (fajita-wifi>=6): any recorded fault fails the run
+if [ "$maxN" -ge 6 ]; then
+  r=$(grep -a 'FW6 SMMU FAULT' "$CON" 2>/dev/null | head -2)
+  if [ -n "$r" ]; then say "FAIL smmu: $r"; fails=$((fails+1)); else say "  smmu: $(grep -a 'FW6 smmu ' "$CON" | tail -1 | sed 's/^.*fajita-wifi: //'), no faults"; fi
+fi
 if [ -n "${WIFI_HOLD:-}" ]; then   # keep the session for live probing (it still ends itself when idle)
   trap - EXIT; say "session $NAME held (WIFI_HOLD): scripts/fajita/test/session.sh end $NAME when done"
 else session_end; trap - EXIT; fi

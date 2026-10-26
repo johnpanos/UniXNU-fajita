@@ -10,6 +10,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
@@ -22,6 +23,7 @@
 #include "FajitaWifiBoard.h"
 extern "C" {
 #include "WifiDev.h"
+#include "WifiSmmu.h"
 extern char fajita_wifi_rows[12][160];
 extern unsigned int phys_reserve_count __attribute__((weak_import));
 extern uint64_t phys_reserve_base[8] __attribute__((weak_import)), phys_reserve_size[8] __attribute__((weak_import));
@@ -156,6 +158,84 @@ int smmuBypassWlan()
     gSmmuSlot = int(slot); gSmmuBank = int(bank);
     return 0;
 }
+// fajita-wifi-smmu=xlate: SIDs 0x40 and 0x41 (two exact SMRs) on a free context bank that translates through WifiSmmu's stage-1
+// tables, which map only the DMA arena (IOVA = PA); anything else faults (CB_FSR) instead of reaching memory. The tables sit in
+// their own contiguous buffer outside the arena, cleaned to PoC (non-cacheable walks). Order: tables, TLB invalidate, bank
+// registers with SCTLR.M last, S2CR, then the SMRs (NOTES-wifi.md, apps_smmu design).
+OSSharedPtr<IOBufferMemoryDescriptor> gSmmuTables;
+int gSmmuSlot2 = -1, gSmmuXlate;
+uint32_t gSmmuFar, gSmmuFsrSeen;
+int smmuTranslateWlan()
+{
+    if (!mapRegion(FW_APPS_SMMU_PHYS, FW_APPS_SMMU_SIZE, gSmmu)) return -1;
+    const uintptr_t smmu = gSmmu.va;
+    auto rd = [smmu](unsigned off) -> uint32_t {return *reinterpret_cast<volatile uint32_t *>(smmu + off);};
+    auto wr = [smmu](unsigned off, uint32_t v) {*reinterpret_cast<volatile uint32_t *>(smmu + off) = v; __asm__ volatile("dsb sy" ::: "memory");};
+    const uint32_t idr0 = rd(0x20), idr1 = rd(0x24), idr2 = rd(0x28);
+    if (!(idr0 & (1u << 30)) || !(idr2 & (1u << 12))) return -7;   // no stage 1 / no AArch64 4 KiB granule
+    unsigned numSmr = idr0 & 0xff, banks = idr1 & 0xff;
+    const unsigned pages = 1u << (((idr1 >> 28) & 7) + 1);
+    if (numSmr > 128) numSmr = 128;
+    if (!numSmr || banks < 2 || (pages + banks) * 4096ull > FW_APPS_SMMU_SIZE) return -2;
+    unsigned freeSlot[2] = {~0u, ~0u}, nfree = 0;
+    bool bankUsed[128] = {false};
+    for (unsigned i = 0; i < numSmr; ++i) {
+        const uint32_t smr = rd(0x800 + 4 * i);
+        if (!(smr & 0x80000000u)) {if (nfree < 2) freeSlot[nfree++] = i; continue;}
+        const uint32_t s2cr = rd(0xc00 + 4 * i);
+        if (((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) < 128) bankUsed[s2cr & 0xff] = true;
+        const uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
+        for (uint32_t sid = FW_WLAN_SMMU_SID; sid <= (FW_WLAN_SMMU_SID | FW_WLAN_SMMU_MASK); ++sid)
+            if (((sid ^ id) & ~mask & 0x7fff) == 0) {note("FW6 smmu: SMR %u (%08x) already matches sid %x", i, smr, sid); return -3;}
+    }
+    if (nfree < 2) return -4;
+    unsigned bank = ~0u;
+    for (unsigned b = 0; b < banks && b < 128; ++b) {
+        if (bankUsed[b] || (rd((pages + b) * 4096) & 1)) continue;
+        bank = b;
+        break;
+    }
+    if (bank == ~0u) return -5;
+    // the tables: contiguous, below 4 GiB, outside the arena
+    gSmmuTables = OSSharedPtr<IOBufferMemoryDescriptor>(IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone, WSMMU_TABLE_BYTES, 0x00000000fffff000ull),
+        OSNoRetain);
+    if (!gSmmuTables) return -8;
+    uint8_t *tva = static_cast<uint8_t *>(gSmmuTables->getBytesNoCopy());
+    IOByteCount seg = 0;
+    const uint64_t tpa = gSmmuTables->getPhysicalSegment(0, &seg, kIOMemoryMapperNone);
+    if (!tva || !tpa || seg < WSMMU_TABLE_BYTES || (tpa & 0xfff)) return -8;
+    wsmmu_ctx c;
+    if (wsmmu_build(tva, tpa, FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE, &c)) return -9;
+    for (uintptr_t p = reinterpret_cast<uintptr_t>(tva); p < reinterpret_cast<uintptr_t>(tva) + WSMMU_TABLE_BYTES; p += 64)
+        __asm__ volatile("dc civac, %0" ::"r"(p) : "memory");   // the SMMU walks non-cacheable: the tables must be in memory
+    __asm__ volatile("dsb sy" ::: "memory");
+    const unsigned cb = (pages + bank) * 4096;
+    wr(cb + WSMMU_CB_SCTLR, 0);
+    wr(0x1000 + 4 * bank, c.cbar);
+    wr(0x1800 + 4 * bank, c.cba2r);
+    wr(cb + WSMMU_CB_TCR2, c.tcr2);
+    wr(cb + WSMMU_CB_TCR, c.tcr);
+    wr(cb + WSMMU_CB_MAIR0, c.mair0);
+    wr(cb + WSMMU_CB_MAIR1, c.mair1);
+    wr(cb + WSMMU_CB_TTBR0, static_cast<uint32_t>(c.ttbr0));
+    wr(cb + WSMMU_CB_TTBR0 + 4, static_cast<uint32_t>(c.ttbr0 >> 32));
+    wr(cb + WSMMU_CB_FSR, rd(cb + WSMMU_CB_FSR));   // clear anything stale (write 1 to clear)
+    wr(cb + WSMMU_CB_TLBIALL, 0);
+    wr(cb + WSMMU_CB_TLBSYNC, 0);
+    for (unsigned i = 0; i < 1000 && (rd(cb + WSMMU_CB_TLBSTATUS) & 1); ++i) IODelay(1);
+    wr(cb + WSMMU_CB_SCTLR, c.sctlr);
+    for (unsigned k = 0; k < 2; ++k) wr(0xc00 + 4 * freeSlot[k], bank);   // S2CR: translation context, CBNDX = bank
+    wr(0x800 + 4 * freeSlot[0], 0x80000000u | FW_WLAN_SMMU_SID);           // exact SMRs, mask 0
+    wr(0x800 + 4 * freeSlot[1], 0x80000000u | (FW_WLAN_SMMU_SID + 1));
+    if (rd(0x800 + 4 * freeSlot[0]) != (0x80000000u | FW_WLAN_SMMU_SID) || (rd(0xc00 + 4 * freeSlot[0]) & 0xff) != bank ||
+        !(rd(cb + WSMMU_CB_SCTLR) & 1) || rd(cb + WSMMU_CB_TTBR0) != static_cast<uint32_t>(c.ttbr0)) return -6;
+    gSmmuSlot = int(freeSlot[0]); gSmmuSlot2 = int(freeSlot[1]); gSmmuBank = int(bank); gSmmuXlate = 1;
+    note("FW6 smmu xlate: bank %u slots %u/%u tables %llx (%u x 2 MiB blocks at %llx) tcr %x tcr2 %x sctlr %x", bank, freeSlot[0],
+         freeSlot[1], tpa, c.blocks, FW_WLAN_DMA_PHYS, c.tcr, c.tcr2, c.sctlr);
+    return 0;
+}
+
 // After traffic: any fault recorded on our bank (CB_FSR at +0x58) or globally (sGFSR 0x48).
 uint32_t smmuFaults()
 {
@@ -163,7 +243,15 @@ uint32_t smmuFaults()
     const uintptr_t smmu = gSmmu.va;
     const uint32_t idr1 = *reinterpret_cast<volatile uint32_t *>(smmu + 0x24);
     const unsigned pages = 1u << (((idr1 >> 28) & 7) + 1);
-    return *reinterpret_cast<volatile uint32_t *>(smmu + (pages + unsigned(gSmmuBank)) * 4096 + 0x58) & ~0x600u;   // FORMAT (bits 10:9) is not a fault
+    const uintptr_t cb = smmu + (pages + unsigned(gSmmuBank)) * 4096;
+    const uint32_t fsr = *reinterpret_cast<volatile uint32_t *>(cb + WSMMU_CB_FSR) & WSMMU_FSR_FAULTS;   // FORMAT (10:9) is not a fault
+    if (fsr && fsr != gSmmuFsrSeen) {
+        gSmmuFsrSeen = fsr;
+        gSmmuFar = *reinterpret_cast<volatile uint32_t *>(cb + WSMMU_CB_FAR);
+        note("FW6 SMMU FAULT fsr %x far %x:%08x fsynr0 %x", fsr, *reinterpret_cast<volatile uint32_t *>(cb + WSMMU_CB_FAR + 4), gSmmuFar,
+             *reinterpret_cast<volatile uint32_t *>(cb + WSMMU_CB_FSYNR0));
+    }
+    return fsr;
 }
 
 uint32_t ioRdRaw(uint32_t off) {return *reinterpret_cast<volatile uint32_t *>(gMem.va + off);}
@@ -270,8 +358,11 @@ extern "C" int fajita_wifi_dev_start(void)
         row(8, "FW6 map failed (membase %d arena %d)", gMem.va != 0, gArena.va != 0);
         return -2;
     }
-    const int s = smmuBypassWlan();
-    note("FW6 smmu sid %x/%x rc %d slot %d bank %d", FW_WLAN_SMMU_SID, FW_WLAN_SMMU_MASK, s, gSmmuSlot, gSmmuBank);
+    char mode[8] = "bypass";   // fajita-wifi-smmu=xlate|bypass
+    PE_parse_boot_arg_str("fajita-wifi-smmu", mode, sizeof mode);
+    const int s = !strcmp(mode, "xlate") ? smmuTranslateWlan() : smmuBypassWlan();
+    note("FW6 smmu %s sid %x/%x rc %d slot %d/%d bank %d", gSmmuXlate ? "xlate" : "bypass", FW_WLAN_SMMU_SID, FW_WLAN_SMMU_MASK, s, gSmmuSlot,
+         gSmmuSlot2, gSmmuBank);
     if (s) {row(8, "FW6 smmu FAILED rc %d", s); return -3;}
     note("FW6 arena %llx+%llx at %lx (normal non-cacheable), membase at %lx", FW_WLAN_DMA_PHYS, FW_WLAN_DMA_SIZE, (unsigned long)gArena.va, (unsigned long)gMem.va);
     bzero(reinterpret_cast<void *>(gArena.va), FW_WLAN_DMA_SIZE);
@@ -351,7 +442,7 @@ extern "C" void fajita_wifi_dev_poll(void)
             gDev.mac[0], gDev.mac[1], gDev.mac[2], gDev.mac[3], gDev.mac[4], gDev.mac[5], gDev.mac_fallback ? (gDev.ops.mac[0] == 0x02 ? "(laa)" : "(persist)") : "", gDev.htc.state, gDev.htt_eid, gDev.wmi_eid,
             gDev.wmi.cmds, gDev.wmi.events, gDev.wmi.bad_events, gDev.wmi.unknown_events, gDev.wmi.last_unknown_id, gDev.wmi.nchunks,
             gDev.htt.state, gDev.htt.rx_frames, gDev.htt.tx_frames, gDev.dma.used, gDev.dma.size, ce.pipe[1].rx, ce.pipe[2].rx, ce.pipe[5].rx,
-            ce.pipe[0].tx + ce.pipe[3].tx + ce.pipe[4].tx, smmuFaults());
+            ce.pipe[0].tx + ce.pipe[3].tx + ce.pipe[4].tx, smmuFaults());   // (the row says smmu-fsr; xlate faults are also logged)
         if (gScans) scanRow();
         if (gConnects) {
             const wmlme &m = gDev.mlme;
