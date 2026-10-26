@@ -232,3 +232,12 @@ timing shmem polled every 200 us, found by S's vtable pointer) in place of the C
 classifies every tick (RENDER, CANT, THRESHOLD, NOTDUE, IDLE, LATE), lists each 2+ tick gap between renders with its ticks'
 classes and the retire ring around it, says whether the phase reference was ever set and histograms the ticks' phase against the
 panel's rd_ptr ring. Pending a free phone (the daemons agent's Data reset).
+
+### Ready for the phone (after the Data reset: prime-done, REBASE, new settled b0 first)
+
+| item | build / how | host evidence | on the phone |
+| --- | --- | --- | --- |
+| CA timer gates and phase reference | any build; `CAWATCH=1 gfx-suite.sh` (or gfx-scene.py --cawatch), `tools/gpu/ca-timer.py` | static model above | which gate makes each 2-tick gap; whether frame info ever sets the phase reference |
+| CA_FORCE_TIMER (CADeviceUseVBL) experiment | gfx 57259e3 kernel; boot-arg `fajita-ca-force-timer=1` vs off, same build | patch in the kernel (strings present) | A/B REPEAT=2 against the new b0; landing needs the lead's approval |
+| metal2vulkan draw-cost (johnpanos/metal2vulkan draw-cost f35f75b1 = 1ff8f4b3 + bench fix) | stack f6ad4e9 (fork fajita-gfx-m2v; NativeMetal gfx-m2v 3d54a97: two bridge patches refreshed), payload in .cache/fajita-out-m2v (built rc 0) | encode bench STEADY=1 (lavapipe, callgrind): 35333 -> 34357 instructions per draw (-2.8%), 19.5 -> 10.8 allocations per draw | frame-trace commit wait per draw, REPEAT=2 against b0 |
+| CA frame capture for the host replay | `ca-capture.sh [FRAMES [SKIP]]` (needs fajita-ssh=1) | - | pulls backboardd's command buffers over Wi-Fi, builds frames.json for command-replay |
