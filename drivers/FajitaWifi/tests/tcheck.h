@@ -11,6 +11,7 @@ extern int tfails, tchecks;
 // Firmware/partition files given on the command line (NULL when absent): argv[1] = a modem partition image.
 extern const char *t_modem_img;
 extern const char *t_efs_dir;
+extern const char *t_board2;   // argv[3]: board-2.bin
 uint8_t *t_slurp(const char *path, size_t *len);
 // A synthetic partitioned SMEM image (version 12): a global partition and an APPS<->MODEM private partition.
 #define T_SMEM_SIZE (2u << 20)

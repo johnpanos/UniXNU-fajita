@@ -134,7 +134,10 @@ evaluate() {
     servers) check_from_log servers 'FW4 pdr [1-9][0-9]* tftp rrq[1-9]' 'the modem did not use pd-mapper and TFTP'
            local r; r=$(con_has 'FW4 '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)"
            r=$(con_has 'FW4 services'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
-    wlfw)  check_from_log wlfw  'FW5 .*ready fw_status' 'wlfw handshake did not reach FW_READY' ;;
+    wlfw)  check_from_log wlfw  'FW5 wlfw enabled ' 'wlfw handshake did not reach FW_READY + wlan_cfg/wlan_mode'
+           local r; r=$(con_has 'FW5 '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)"
+           case $r in *msa-assign?*) say "  layer: no fajita_wifi_msa_assign hook (the modem-boot side assigns the MSA)" ;;
+                      *'failed in '*) say "  layer: wlfw step ${r#*failed in } (result/error in the row)" ;; esac ;;
     scan)  check_from_log scan  "FW6 .*scan.*$ssid" "scan did not see $ssid" ;;
     assoc) check_from_log assoc 'FW7 .*(ptk|gtk|connect)' '4-way handshake / association did not complete' ;;
     dhcp)
@@ -166,7 +169,7 @@ say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
 # Wait for the deepest requested stage's pass row (the link and the services come up seconds after FW3/FW4 first log),
 # or a row that says it will not get there.
 declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers [0-9a-f]' [4]='FW4 pdr [1-9][0-9]* tftp rrq[1-9]'
-                     [5]='FW5 ' [6]='FW6 ' [7]='FW7 ' )
+                     [5]='FW5 wlfw (enabled|failed)' [6]='FW6 ' [7]='FW7 ' )
 for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do
   grep -aqE "${DONE_RE[$maxN]}|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
 done

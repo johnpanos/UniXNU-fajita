@@ -25,10 +25,14 @@ extern "C" {
 #include "WifiTftp.h"
 #include "WifiRmtfs.h"
 #include "WifiFat.h"
+#include "WifiWlfw.h"
 extern char fajita_wifi_rows[8][160];
 extern volatile uint32_t fajita_wifi_state[8];
 int native_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *blocks, uint64_t *attr) __attribute__((weak));
 int native_ufs_part_read(uint8_t lun, uint64_t lba, uint32_t count, void *dst) __attribute__((weak));
+// The modem-boot side (memory assignment is theirs): hand the wlfw MSA regions HLOS -> MSS_MSA + WLAN, as
+// ath10k_qmi_setup_msa_permissions does. 0 on success. Without it stage 5 stops before msa_ready (FW5 "msa-assign?").
+int fajita_wifi_msa_assign(const wlfw_mem_region *regions, unsigned count) __attribute__((weak));
 }
 
 // Not in FajitaWifiBoard.h (kept separate from the modem-boot constants):
@@ -196,6 +200,34 @@ wpdm gPdm;
 wtftp gTftp;
 wrmtfs gRmtfs;
 uint32_t gPdmPort;
+wwlfw gWlfw;
+bool gWlfwOn, gEnableSent;
+uint8_t *gBoard;
+uint32_t gBoardLen;
+char gBoardName[24];
+
+int msaAssign(void *, const wlfw_mem_region *regions, unsigned count)
+{
+    if (!fajita_wifi_msa_assign) return -1;
+    return fajita_wifi_msa_assign(regions, count);
+}
+// cnss naming of the modem partition's board files: bdwlan.bin (id 0xff), bdwlan.bNN (< 0xff), bdwlan.NNN.
+int boardData(void *, uint32_t board_id, uint32_t, const uint8_t **data, uint32_t *len)
+{
+    if (board_id == 0xff) snprintf(gBoardName, sizeof gBoardName, "image/bdwlan.bin");
+    else if (board_id < 0xff) snprintf(gBoardName, sizeof gBoardName, "image/bdwlan.b%02x", board_id);
+    else snprintf(gBoardName, sizeof gBoardName, "image/bdwlan.%03x", board_id & 0xfff);
+    wfat_file f;
+    if (!gFatUp || wfat_open(&gFat, gBoardName, &f) || !f.size || f.size > 0x10000) return -1;
+    if (gBoard && gBoardLen) IOFree(gBoard, gBoardLen);
+    gBoard = static_cast<uint8_t *>(IOMalloc(f.size));
+    if (!gBoard) return -1;
+    gBoardLen = f.size;
+    if (wfat_read(&gFat, &f, 0, gBoard, f.size) != static_cast<long>(f.size)) return -1;
+    *data = gBoard;
+    *len = gBoardLen;
+    return 0;
+}
 struct Seen {uint32_t service, instance, node, port;} gSeen[24];
 unsigned gNSeen;
 
@@ -208,6 +240,11 @@ void ipcrtrRx(wglink *, int, const uint8_t *data, size_t len, void *) {wqrtr_inp
 void routerEvent(wqrtr *, int what, uint32_t service, uint32_t instance, uint32_t node, uint32_t port, void *)
 {
     if (what == WQR_EV_NEW_SERVER && gNSeen < 24) gSeen[gNSeen++] = {service, instance, node, port};
+    if (gWlfwOn && service == WWLFW_SERVICE && instance == WWLFW_INSTANCE) {
+        if (what == WQR_EV_NEW_SERVER) {gEnableSent = false; wwlfw_server(&gWlfw, node, port, nowMs());}
+        if (what == WQR_EV_DEL_SERVER) wwlfw_server_gone(&gWlfw);
+    }
+    if (gWlfwOn && what == WQR_EV_BYE) wwlfw_server_gone(&gWlfw);
     if (what == WQR_EV_NEW_SERVER || what == WQR_EV_DEL_SERVER || what == WQR_EV_BYE)
         IOLog("fajita-wifi: FW3 qrtr %s svc 0x%x inst 0x%x node %u port 0x%x\n",
               what == WQR_EV_NEW_SERVER ? "new" : what == WQR_EV_BYE ? "bye" : "del", service, instance, node, port);
@@ -313,6 +350,10 @@ extern "C" void fajita_wifi_stack(unsigned stage)
     gQrtr.event = routerEvent;
     gIpcrtr = wglink_open(&gGlink, "IPCRTR", ipcrtrRx, nullptr, 1024, 5);   // qrtr smd.c: the IPCRTR channel
     if (stage >= 4) servicesUp();
+    if (stage >= 5) {
+        const wwlfw_ops ops = {msaAssign, boardData, nullptr, FW_WLAN_MSA_PHYS, static_cast<uint32_t>(FW_WLAN_MSA_SIZE), 1};
+        gWlfwOn = wwlfw_init(&gWlfw, &gQrtr, &ops) == 0;
+    }
     fajita_wifi_state[0] = stage;
     uint64_t last = 0;
     for (;;) {
@@ -322,6 +363,10 @@ extern "C" void fajita_wifi_stack(unsigned stage)
         const int g = wglink_rx(&gGlink);
         wqrtr_flush(&gQrtr);
         if (stage >= 4) wtftp_poll(&gTftp);
+        if (gWlfwOn) {
+            wwlfw_poll(&gWlfw, nowMs());
+            if (gWlfw.state == WWLFW_FW_READY && !gEnableSent) {gEnableSent = true; wwlfw_enable(&gWlfw, WLFW_MODE_MISSION);}
+        }
         const uint64_t t = nowMs();
         if (t - last >= 1000) {
             last = t;
@@ -338,6 +383,14 @@ extern "C" void fajita_wifi_stack(unsigned stage)
                 row(5, "FW4 pdr %u tftp rrq%u wrq%u %llukB err%u refused%u last %.40s rmtfs open%u iov%u sect%u wr-refused%u",
                     gPdm.requests, gTftp.rrq, gTftp.wrq, gTftp.bytes >> 10, gTftp.errors, gTftp.refused, gTftp.last,
                     gRmtfs.opens, gRmtfs.iovecs, gRmtfs.sectors_read, gRmtfs.writes_refused);
+            if (gWlfwOn)
+                row(6, "FW5 wlfw %s%s%s ind%u cap chip=%x board=%x fw=%x msa%u%s bdf %s %u/%u seg%u res%u/%u fw_ready%d",
+                    wwlfw_state_name(gWlfw.state), gWlfw.state == WWLFW_FAILED ? " in " : "",
+                    gWlfw.state == WWLFW_FAILED ? wwlfw_state_name(gWlfw.failed_in) : "", gWlfw.indications,
+                    gWlfw.cap.chip_id, gWlfw.cap.board_id, gWlfw.cap.fw_version, gWlfw.msa.count,
+                    gWlfw.failed_in == WWLFW_MSA_DELAY && !fajita_wifi_msa_assign ? " msa-assign?" : gWlfw.msa_assigned ? " assigned" : "",
+                    gBoardName[0] ? gBoardName + 6 : "-", gWlfw.bd_off, gWlfw.bd_len, gWlfw.bd_seg, gWlfw.last_result,
+                    gWlfw.last_error, gWlfw.fw_ready);
         }
         if (g < 0) IOSleep(100);   // a GLINK protocol fault: keep the rows, do not spin
         else IOSleep(2);

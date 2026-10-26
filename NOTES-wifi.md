@@ -7,7 +7,8 @@ Round 3 (stack above a booted modem; the modem boot itself is the user's). Kerne
 every protocol object). For the modem boot: `fajita_wifi_smp2p_bits(&v)` (inbound bits, ready = bit 2) and
 `fajita_wifi_smp2p_set(mask, v)` (outbound stop bit 0). Compile check without a build: `scripts/check-fajita-wifi-kernel.py`.
 Notes for the phone run: TFTP offers at most blksize 8192 (GLINK fifo is 16 KiB; tqftpserv allows 65464) and the modem
-must accept the smaller OACK; `/readwrite/` is RAM only; rmtfs refuses writes (counted as `wr-refused` in FW4). Worktree `../UniXNU-fajita-wifi`, branch
+must accept the smaller OACK; stage 5 needs the boot side's `fajita_wifi_msa_assign(regions, n)` (weak; without it FW5 stops
+before msa_ready with `msa-assign?`); the board file is `image/bdwlan.<id>` (cnss naming: .bin for 0xff, .bNN, .NNN); `/readwrite/` is RAM only; rmtfs refuses writes (counted as `wr-refused` in FW4). Worktree `../UniXNU-fajita-wifi`, branch
 `wifi-stack`, merged into `ios16-port` after each layer. Host tests: `scripts/check-fajita-wifi-host.py` (two binaries:
 `test_wifi` for the earlier protocol code, `test_stack` for the layers below).
 
@@ -16,8 +17,8 @@ must accept the smaller OACK; `/readwrite/` is RAM only; rmtfs refuses writes (c
 | 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
 | 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
 | 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | `WifiRouter`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` + kernel glue `package/FajitaWifiStack.cpp` | `tests/t_qrtr.c` (simulated modem router; real .jsn, real wlanmdsp.mbn via FAT, real EFS backup) | done |
-| 4 wlfw client | | | next |
-| 5 ath10k CE/HTC/WMI | | | |
+| 4 wlfw client | `WifiWlfw.[ch]`, `WifiSnoc.[ch]` (snoc CE tables); stage 5 in FajitaWifiStack.cpp | `tests/t_wlfw.c` (fixture server, every request decoded; real bdwlan.102 == board-2.bin id 0x102) | done |
+| 5 ath10k CE/HTC/WMI | | | next |
 | 6 iOS Ethernet + WPA2 + DHCP | | | |
 
 Goal: join a WPA2 network and pass IP traffic in iOS on the OnePlus 6T. The Wi-Fi radio (WCN3990) runs on the modem

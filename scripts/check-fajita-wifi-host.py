@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WIFI = ROOT / 'drivers/FajitaWifi'
 SOURCES = ['WifiMdt.c', 'WifiQmi.c', 'WifiQrtr.c', 'WifiBoard.c', 'WifiFat.c', 'tests/test_wifi.c']
 # The stack above a booted modem (tests/test_stack.c + one t_*.c per layer).
-STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c']
-STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c']
+STACK_LIBS = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiSnoc.c', 'WifiWlfw.c']
+STACK_TESTS = ['tests/test_stack.c', 'tests/t_smem.c', 'tests/t_glink.c', 'tests/t_qrtr.c', 'tests/t_wlfw.c']
 LIB_FOR_STACK = ['WifiQmi.c', 'WifiQrtr.c', 'WifiFat.c', 'WifiMdt.c', 'WifiBoard.c']
 DEFAULT_EFS = ROOT / '.cache/efs-backup'
 DEFAULT_MODEM = ROOT / '.cache/fw-modem-part/modem_b.img'   # ufspart.py backup --passes 1 --out .cache/fw-modem-part modem_b
@@ -68,7 +68,7 @@ def main():
     subprocess.run([args.cc, '-std=c11', '-g', '-O1', '-Wall', '-Wextra', '-Werror', *san,
                     *[str(WIFI / x) for x in STACK_LIBS + LIB_FOR_STACK + STACK_TESTS], '-o', str(stack)], check=True)
     efs = args.efs if args.efs else (str(DEFAULT_EFS) if DEFAULT_EFS.is_dir() else '')
-    if subprocess.run([str(stack), args.modem or '', efs]).returncode:
+    if subprocess.run([str(stack), args.modem or '', efs, args.board or '']).returncode:
         raise SystemExit('FAIL: fajita Wi-Fi stack host tests')
     if args.modem and shutil.which('mcopy'):
         fat = out / 'test_fat'

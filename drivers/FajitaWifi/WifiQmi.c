@@ -255,7 +255,11 @@ int wlfw_parse_cap_resp(const uint8_t *msg, size_t len, wlfw_cap_resp *out)
     if ((v = wqmi_find(msg, len, 0x10, &vlen)) && vlen >= 8) {out->chip_valid = 1; out->chip_id = rd32(v); out->chip_family = rd32(v + 4);}
     if ((v = wqmi_find(msg, len, 0x11, &vlen)) && vlen >= 4) {out->board_valid = 1; out->board_id = rd32(v);}
     if ((v = wqmi_find(msg, len, 0x12, &vlen)) && vlen >= 4) {out->soc_valid = 1; out->soc_id = rd32(v);}
-    if ((v = wqmi_find(msg, len, 0x13, &vlen)) && vlen >= 4) {out->fw_valid = 1; out->fw_version = rd32(v); copy_str(out->fw_timestamp, sizeof out->fw_timestamp, v + 4, vlen > 4 ? vlen - 4 : 0);}
+    // fw_version_info: u32 fw_version, then fw_build_timestamp, a string nested in a struct: u8 length + chars.
+    if ((v = wqmi_find(msg, len, 0x13, &vlen)) && vlen >= 4) {
+        out->fw_valid = 1; out->fw_version = rd32(v);
+        if (vlen >= 5) {const uint16_t sl = v[4] <= vlen - 5 ? v[4] : (uint16_t)(vlen - 5); copy_str(out->fw_timestamp, sizeof out->fw_timestamp, v + 5, sl);}
+    }
     if ((v = wqmi_find(msg, len, 0x14, &vlen))) {out->build_valid = 1; copy_str(out->build_id, sizeof out->build_id, v, vlen);}
     return 0;
 }
