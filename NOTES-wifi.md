@@ -243,7 +243,24 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
   (fixed: -> MHz), READY's MAC is zero (fixed: LAA 02:fa:6a:17:4e:03), KittyCorner's RSN parsed as not usable
   (`kcmd wifidev bss` now dumps the RSN element), and **the modem raised its SMP2P fatal bit ~1 s into the scan**
   (rows froze; `FW3 MODEM FATAL ... crash421 '...'` now logs the reason). Under investigation.
-- kcmd `wifidev [state|scan [SSID]|bss]`; rows FW6 (row 8, device), FW7 (row 9, scan), FW3 MODEM FATAL (row 10).
+- Second scan (LAA MAC): 47 BSSes, scan completes, **no modem fatal** (the zero MAC was the likely cause), KittyCorner
+  fa:d0:0e:a8:9f:89 2412 MHz -44 dBm and fa:d0:0e:af:9f:8a 5220 MHz -61 dBm.
+- **KittyCorner is WPA3-Personal only**: RSNE `30 14 01 00 | 00-0f-ac:4 | 1x 00-0f-ac:4 | 1x 00-0f-ac:8 (SAE) | caps 00cc`
+  (MFPC + MFPR) on both BSSIDs, no RSNXE (hunting-and-pecking, no H2E). Not TKIP/mixed.
+- **WPA3 implemented (host-tested):** `WifiSae.[ch]` (SAE group 19 after hostap sae.c/dragonfly.c: >= 40 iterations,
+  stub password, constant-time selection, blinded QR; peer validation; Montgomery P-256; SHA-256/HMAC/KDF/CMAC); IEEE
+  802.11-2020 J.10 vector passes (commit, KCK, PMK, PMKID). Supplicant AKM 8 (key descriptor v0, KDF-SHA-256 PTK, CMAC
+  MIC) matches an independent Python reference byte for byte (gen-wpa-vectors.py). MLME: SAE commit/confirm with the
+  anti-clogging token, RSNE AKM 8 + MFPC|MFPR, PMF peer flag, PDEV PMF_QOS; end-to-end against the simulated AP
+  (t_mlme_sae). Kernel: fajita-wifi=7 joins fajita-wifi-ssid with `/private/var/ngpu/wifi.psk` (pushed by wifi-test,
+  read in the kernel, never logged); FW7 link row (row 11); `kcmd wifidev connect`.
+- MAC: the phone's own, from persist:/wlan_mac.bin (only Intf2 filled), via `tools/wifi/persist-wlan-mac.py` on the EFS
+  backup -> `fajita-wifi-mac=`; LAA 02:fa:6a:17:4e:03 fallback.
+- **TODO before done (lead): apps_smmu translating bank.** SIDs 0x40/0x41 are on a *bypass* bank (the chip can DMA
+  anywhere). Replace with a stage-1 translating context bank that maps only the arena (the handoff's design) and check
+  CB_FSR stays clear.
+- kcmd `wifidev [state|scan [SSID]|connect|bss]`; rows FW6 (row 8, device), FW7 scan (row 9), FW3 MODEM FATAL (row 10),
+  FW7 link (row 11).
 - Test: `scripts/fajita/test/wifi-test.sh modem link servers wlfw scan` (via bg.sh; reuse FAJITA_OUT).
 
 Round 8 (lead): a USB network transport, so a future iOS network interface can be tested against this laptop. The
