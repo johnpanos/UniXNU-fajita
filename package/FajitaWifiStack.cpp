@@ -463,18 +463,21 @@ extern "C" void fajita_wifi_stack(unsigned stage)
             bool wlfwSeen = false;
             for (unsigned i = 0; i < gNSeen; ++i) wlfwSeen |= gSeen[i].service == 0x45;
             snprintf(svcs, sizeof svcs, "n%u%s%s full%u:", gNSeen, gNSeen >= 64 ? "+" : "", wlfwSeen ? " 45" : "", gQrtr.remote_full);
+            char gsites[64] = "";   // which GLINK conditions counted errors (site numbers in WifiGlink.c; 4 = channel table full)
+            for (unsigned i = 0; i < 20 && strlen(gsites) < 56; ++i)
+                if (gGlink.err_by_site[i]) snprintf(gsites + strlen(gsites), sizeof gsites - strlen(gsites), "%s%u:%u", gsites[0] ? "," : "", i, gGlink.err_by_site[i]);
             for (unsigned i = 0; i < gNSeen && strlen(svcs) < 88; ++i)
                 snprintf(svcs + strlen(svcs), sizeof svcs - strlen(svcs), "%s%x", i ? "," : "", gSeen[i].service);
             uint32_t bits = 0;
             if (gSmp2p.in) {uint32_t ch; wsmp2p_take(&gSmp2p, "slave-kernel", &bits, &ch);}
-            row(4, "FW3 smp2p %x glink v%s fifo1 %s rx%u tx%u err%u ipcrtr %s qrtr hello %d rx%u bad%u servers %s%s",
+            row(4, "FW3 smp2p %x glink v%s fifo1 %s rx%u tx%u err%u[%s] ipcrtr %s qrtr hello %d rx%u bad%u drop%u flowfull%u txqfull%u smp2p-over%u servers %s%s",
                 bits, gGlink.version_acked ? "1" : "?", gGlink.rx.fifo ? "yes" : "no", gGlink.rx_cmds, gGlink.tx_cmds,
-                gGlink.errors, wglink_ready(&gGlink, gIpcrtr) ? "open" : "closed", gQrtr.hello_seen, gQrtr.rx_pkts,
-                gQrtr.bad, svcs[0] ? svcs : "-", g < 0 ? " GLINK-FAULT" : "");
+                gGlink.errors, gsites, wglink_ready(&gGlink, gIpcrtr) ? "open" : "closed", gQrtr.hello_seen, gQrtr.rx_pkts,
+                gQrtr.bad, gQrtr.dropped, gQrtr.flows_full, gQrtr.txq_full, gSmp2p.in_overflow, svcs[0] ? svcs : "-", g < 0 ? " GLINK-FAULT" : "");
             if (stage >= 4)
-                row(5, "FW4 pdr %u tftp rrq%u wrq%u %llukB err%u refused%u tx%u/%u data-in%u other-in%u(op%u) last %.40s rmtfs open%u iov%u sect%u wr-refused%u",
-                    gPdm.requests, gTftp.rrq, gTftp.wrq, gTftp.bytes >> 10, gTftp.errors, gTftp.refused, gTftp.tx_pkts, gTftp.tx_fail, gTftp.data_in, gTftp.other_in, gTftp.last_in_op, gTftp.last,
-                    gRmtfs.opens, gRmtfs.iovecs, gRmtfs.sectors_read, gRmtfs.writes_refused);
+                row(5, "FW4 pdr %u(more%u cut%u) tftp busy%u rrq%u wrq%u %llukB err%u refused%u tx%u/%u data-in%u other-in%u(op%u) last %.40s rmtfs open%u iov%u sect%u wr-refused%u full%u",
+                    gPdm.requests, gPdm.names_more, gPdm.list_cut, gTftp.busy, gTftp.rrq, gTftp.wrq, gTftp.bytes >> 10, gTftp.errors, gTftp.refused, gTftp.tx_pkts, gTftp.tx_fail, gTftp.data_in, gTftp.other_in, gTftp.last_in_op, gTftp.last,
+                    gRmtfs.opens, gRmtfs.iovecs, gRmtfs.sectors_read, gRmtfs.writes_refused, gRmtfs.callers_full);
             if (gIpcrtr >= 0) {   // the IPCRTR channel's send side: the modem's receive intents and any pending request
                 const wglink_channel &ch = gGlink.ch[gIpcrtr];
                 char ri[120] = "";

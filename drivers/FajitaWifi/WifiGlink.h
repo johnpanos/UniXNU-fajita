@@ -18,7 +18,7 @@ extern "C" {
 #define WGLINK_SMEM_FIFO0 479u           // AP -> remote
 #define WGLINK_SMEM_FIFO1 480u           // remote -> AP (the remote allocates it)
 #define WGLINK_FIFO_BYTES (16u << 10)
-#define WGLINK_MAX_CH 8
+#define WGLINK_MAX_CH 16             // the phone opens 6 (IPCRTR, glink_ssr, SSM_RTR_MODEM_APPS, apr_voice_svc, apr_apps2, LOOPBACK_CTL_MPSS)
 #define WGLINK_MAX_INTENTS 64          // the modem advertises dozens of small intents at open (16 x 128 B seen, more follow)
 #define WGLINK_NAME 32
 #define WGLINK_CHUNK (8u << 10)          // SZ_8K per TX_DATA chunk
@@ -92,7 +92,7 @@ typedef struct wglink {
     struct {char dir; uint16_t cmd, p1; uint32_t p2, len;} trace[64];
     unsigned ntrace;
     uint32_t evicted;               // small remote intents replaced by a larger grant
-    uint32_t err_by_site[16];       // which condition counted an error (the site numbers are in WifiGlink.c)
+    uint32_t err_by_site[20];       // which condition (4 = channel table full, 1 = remote intent table full) counted an error (the site numbers are in WifiGlink.c)
 } wglink;
 
 // The AP end over SMEM, after qcom_glink_smem_register: alloc/get the 32-byte descriptor (478) and our 16 KiB TX fifo

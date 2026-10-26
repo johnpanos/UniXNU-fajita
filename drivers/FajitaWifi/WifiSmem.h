@@ -101,6 +101,7 @@ typedef struct {
     void *kick_ctx;
     int negotiated, ssr_ack_enabled, ssr_ack;
     unsigned in_valid;          // inbound entries already seen
+    uint32_t in_overflow;       // polls where the remote claimed more than WSMP2P_MAX_ENTRY valid entries
     uint32_t in_last[WSMP2P_MAX_ENTRY];
     uint32_t in_changed[WSMP2P_MAX_ENTRY];   // bits that changed since the last wsmp2p_take()
 } wsmp2p;

@@ -434,7 +434,7 @@ int wsmp2p_irq(wsmp2p *p)
         ack = restart != p->ssr_ack;
     }
     unsigned valid = p16(p->in, SP_VALID);
-    if (valid > WSMP2P_MAX_ENTRY) valid = WSMP2P_MAX_ENTRY;
+    if (valid > WSMP2P_MAX_ENTRY) {++p->in_overflow; valid = WSMP2P_MAX_ENTRY;}   // Linux's limit too (SMP2P_MAX_ENTRY)
     for (unsigned i = 0; i < valid; ++i) {
         const uint32_t v = p32(p->in, SP_ENTRY + i * SP_ENTRY_BYTES + WSMP2P_NAME);
         if (i >= p->in_valid) p->in_last[i] = 0;   // a new entry: bits set from 0 count as changes

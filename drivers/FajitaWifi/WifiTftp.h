@@ -66,6 +66,7 @@ typedef struct {
     uint8_t blk[4 + WTFTP_MAX_BLKSIZE];
     // counters and the last request, for the FW4 log row
     uint32_t rrq, wrq, errors, refused;
+    uint32_t busy;                   // requests refused because all WTFTP_MAX_CLIENTS sessions (or QRTR ports) were in use
     uint32_t max_blksize;                        // 0 = WTFTP_MAX_BLKSIZE; lower for a peer whose receive intents are small
     char hist[32][96]; unsigned nhist; int cur;  // every request: "R|W path bBLK rRSIZE [Ecode]" (first 32), for the FW4 history rows
     uint32_t tx_pkts, tx_fail, data_in, other_in, last_in_op;   // packets sent / failed to send / DATA received / other client packets

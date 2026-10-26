@@ -227,7 +227,7 @@ int wlfw_parse_msa_info_resp(const uint8_t *msg, size_t len, wlfw_msa_info_resp 
     const uint8_t *v = wqmi_find(msg, len, 0x03, &vlen);
     if (!v || vlen < 1) return 0;
     unsigned count = v[0];
-    if (count > WLFW_MAX_MEM_REG) count = WLFW_MAX_MEM_REG;
+    if (count > WLFW_MAX_MEM_REG) return -1;   // ath10k: "invalid memory region length" (-EINVAL); never assign half of them
     if ((size_t)1 + count * 13u > vlen) return -1;
     for (unsigned i = 0; i < count; ++i) {
         const uint8_t *p = v + 1 + i * 13;

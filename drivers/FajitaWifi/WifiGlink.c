@@ -292,7 +292,7 @@ static void check_ready(wglink *g, int ch)
     if (c->ready || !c->want || !c->open_acked || !c->rcid || !c->ack_sent) return;
     c->ready = 1;
     // qcom_glink_announce_create: the default intents.
-    for (unsigned i = 0; i < c->intent_count; ++i) if (add_intent(g, ch, c->intent_size, 1)) {++g->errors; break;}
+    for (unsigned i = 0; i < c->intent_count; ++i) if (add_intent(g, ch, c->intent_size, 1)) {++g->errors; ++g->err_by_site[2]; break;}
     if (g->event) g->event(g, ch, WGLINK_EV_READY, g->event_ctx);
 }
 
@@ -399,12 +399,12 @@ int wglink_send(wglink *g, int ch, const void *data, size_t len)
 // ---- receive ----
 static void rx_open(wglink *g, uint16_t rcid, const char *name)
 {
-    if (by_rcid(g, rcid) >= 0) {++g->errors; return;}
+    if (by_rcid(g, rcid) >= 0) {++g->errors; ++g->err_by_site[3]; return;}
     int ch = -1;
     for (int i = 0; i < WGLINK_MAX_CH; ++i)
         if (g->ch[i].used && !g->ch[i].rcid && name_eq(g->ch[i].name, name)) {ch = i; break;}
     if (ch < 0) ch = new_channel(g, name);
-    if (ch < 0) {++g->errors; return;}
+    if (ch < 0) {++g->errors; ++g->err_by_site[4]; return;}
     wglink_channel *c = &g->ch[ch];
     c->rcid = rcid;
     if (c->want && c->open_sent) {   // create_local: the remote's open completes ours
@@ -420,11 +420,11 @@ static void rx_data(wglink *g, const uint8_t hdr[16])
     const uint16_t rcid = get16(hdr + 2);
     const uint32_t liid = get32(hdr + 4), chunk = get32(hdr + 8), left = get32(hdr + 12);
     const int ch = by_rcid(g, rcid);
-    if (ch < 0) {++g->errors; return;}
+    if (ch < 0) {++g->errors; ++g->err_by_site[5]; return;}
     wglink_channel *c = &g->ch[ch];
     wglink_lintent *li = 0;
     for (int i = 0; i < WGLINK_MAX_INTENTS; ++i) if (c->li[i].used && c->li[i].id == liid) {li = &c->li[i]; break;}
-    if (!li || li->size - li->offset < chunk) {++g->errors; return;}
+    if (!li || li->size - li->offset < chunk) {++g->errors; ++g->err_by_site[6]; return;}
     rx_peek(g, 16, li->data + li->offset, chunk);
     li->offset += chunk;
     if (left) return;
@@ -494,14 +494,14 @@ int wglink_rx(wglink *g)
         case CMD_OPEN_ACK:
             rx_advance(g, 8);
             ch = by_lcid(g, p1);
-            if (ch < 0) {++g->errors; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}   // Linux stops too (-EINVAL)
+            if (ch < 0) {++g->errors; ++g->err_by_site[7]; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}   // Linux stops too (-EINVAL)
             g->ch[ch].open_acked = 1;
             check_ready(g, ch);
             break;
         case CMD_CLOSE:
             rx_advance(g, 8);
             ch = by_rcid(g, p1);
-            if (ch < 0) {++g->errors; break;}
+            if (ch < 0) {++g->errors; ++g->err_by_site[8]; break;}
             tx_cmd(g, CMD_CLOSE_ACK, p1, 0);
             g->ch[ch].rcid = 0;
             g->ch[ch].ready = 0;
@@ -513,7 +513,7 @@ int wglink_rx(wglink *g)
         case CMD_CLOSE_ACK:
             rx_advance(g, 8);
             ch = by_lcid(g, p1);
-            if (ch < 0) {++g->errors; break;}
+            if (ch < 0) {++g->errors; ++g->err_by_site[9]; break;}
             g->ch[ch].lcid = 0;
             g->ch[ch].open_sent = g->ch[ch].open_acked = g->ch[ch].closing = 0;
             free_local_intents(g, &g->ch[ch]);
@@ -521,7 +521,7 @@ int wglink_rx(wglink *g)
             maybe_release(g, ch);
             break;
         case CMD_INTENT: {
-            if (p2 > 64) {++g->errors; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}
+            if (p2 > 64) {++g->errors; ++g->err_by_site[10]; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}
             const uint32_t msglen = 8 + p2 * 8;
             if (avail < msglen) return handled;
             ch = by_rcid(g, p1);
@@ -550,7 +550,7 @@ int wglink_rx(wglink *g)
                     g->ch[ch].ri[slot] = (wglink_rintent){iid, size, 0, 1};
                 }
             } else {
-                ++g->errors;
+                ++g->errors; ++g->err_by_site[11];
             }
             rx_advance(g, align8(msglen));
             break;
@@ -559,7 +559,7 @@ int wglink_rx(wglink *g)
         case CMD_RX_DONE_W_REUSE:
             rx_advance(g, 8);
             ch = by_rcid(g, p1);
-            if (ch < 0) {++g->errors; break;}
+            if (ch < 0) {++g->errors; ++g->err_by_site[12]; break;}
             for (int s = 0; s < WGLINK_MAX_INTENTS; ++s) {
                 wglink_rintent *r = &g->ch[ch].ri[s];
                 if (!r->used || r->id != p2) continue;
@@ -571,7 +571,7 @@ int wglink_rx(wglink *g)
         case CMD_RX_INTENT_REQ:
             rx_advance(g, 8);
             ch = by_rcid(g, p1);
-            if (ch < 0) {++g->errors; break;}
+            if (ch < 0) {++g->errors; ++g->err_by_site[13]; break;}
             {
                 const int ok = g->ch[ch].lcid && add_intent(g, ch, p2, 0) == 0;
                 tx_cmd(g, CMD_RX_INTENT_REQ_ACK, g->ch[ch].lcid, ok);
@@ -580,7 +580,7 @@ int wglink_rx(wglink *g)
         case CMD_RX_INTENT_REQ_ACK:
             rx_advance(g, 8);
             ch = by_rcid(g, p1);
-            if (ch < 0) {++g->errors; break;}
+            if (ch < 0) {++g->errors; ++g->err_by_site[14]; break;}
             g->ch[ch].intent_req_pending = 0;
             g->ch[ch].intent_req_result = p2 ? 1 : 0;
             break;
@@ -589,7 +589,7 @@ int wglink_rx(wglink *g)
             if (avail < 16) return handled;
             rx_peek(g, 0, m, 16);
             const uint32_t chunk = get32(m + 8);
-            if (chunk > g->rx.length) {++g->errors; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}
+            if (chunk > g->rx.length) {++g->errors; ++g->err_by_site[15]; g->last_error_cmd = cmd; return WGLINK_ERR_PROTO;}
             if (avail < 16 + chunk) return handled;
             rx_data(g, m);
             rx_advance(g, align8(16 + chunk));
@@ -603,7 +603,7 @@ int wglink_rx(wglink *g)
             rx_advance(g, 8);
             break;
         default:
-            ++g->errors;
+            ++g->errors; ++g->err_by_site[16];
             g->last_error_cmd = cmd;
             return WGLINK_ERR_PROTO;
         }

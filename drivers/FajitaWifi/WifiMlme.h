@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define WMLME_MAX_BSS 32u
+#define WMLME_MAX_BSS 64u            // a busy area has more: when full the weakest non-target entry is replaced (scan_full counts)
 #define WMLME_MAX_RATES 12u
 #define WMLME_RSN_MAX 64u
 #define WMLME_MGMT_BUFS 4u
@@ -80,6 +80,7 @@ typedef struct wmlme {
     // management buffers
     struct {uint8_t *cpu; uint64_t iova;} mbuf[WMLME_MGMT_BUFS]; unsigned mnext, mdesc;
     // counters
+    uint32_t scan_full, scan_evicted;   // new BSSes that found the table full / that replaced a weaker one
     uint32_t scan_frames, scan_new, mgmt_bad, auth_tx, assoc_tx, eapol_rx, eapol_tx, ev_scan_done;
     int scan_running;
 } wmlme;
@@ -100,6 +101,8 @@ void wmlme_wmi_event(wmlme *m, const wwmi_event *ev);
 void wmlme_eapol_rx(wmlme *m, const uint8_t src[6], const uint8_t *eapol, uint32_t len);
 void wmlme_poll(wmlme *m);
 const wmlme_bss *wmlme_find(const wmlme *m, const char *ssid);
+// The network we are after (before a scan): a full scan table never evicts it.
+void wmlme_set_target(wmlme *m, const char *ssid);
 const char *wmlme_state_name(unsigned state);
 
 // Frame helpers (exposed for the tests and the data path)

@@ -70,7 +70,7 @@ static int enqueue(wqrtr *r, uint32_t type, uint32_t src_node, uint32_t src_port
                    int confirm, const void *data, size_t len)
 {
     if (len > WQR_MAX_PKT) return WQR_ERR_INVAL;
-    if (r->txq_count >= WQR_TXQ || !r->alloc) {++r->dropped; return WQR_ERR_NOMEM;}
+    if (r->txq_count >= WQR_TXQ || !r->alloc) {++r->dropped; ++r->txq_full; return WQR_ERR_NOMEM;}
     const size_t total = HDR1 + ((len + 3) & ~(size_t)3);
     uint8_t *p = (uint8_t *)r->alloc(total, r->alloc_ctx);
     if (!p) {++r->dropped; return WQR_ERR_NOMEM;}
@@ -178,6 +178,7 @@ int wqrtr_send(wqrtr *r, uint32_t src_port, uint32_t dst_node, uint32_t dst_port
     // qrtr_tx_wait: confirm_rx at the low watermark, block at the high one until RESUME_TX.
     int confirm = 1;
     const int f = flow_index(r, dst_node, dst_port, 1);
+    if (f < 0) ++r->flows_full;
     if (f >= 0) {
         if (r->flows[f].pending >= WQR_FLOW_HIGH) return WQR_ERR_BUSY;
         ++r->flows[f].pending;

@@ -32,7 +32,7 @@ int wrmtfs_init(wrmtfs *s, wqrtr *r, wrmtfs_read_fn read, wrmtfs_size_fn size, v
     s->r = r; s->read = read; s->size = size; s->ctx = ctx;
     s->buf = buf; s->buf_phys = buf_phys; s->buf_size = buf_size;
     for (unsigned i = 0; i < WRMTFS_MAX_CALLERS; ++i) s->caller[i].used = 0;
-    s->opens = s->iovecs = s->sectors_read = s->writes_refused = s->errors = 0;
+    s->opens = s->iovecs = s->sectors_read = s->writes_refused = s->errors = s->callers_full = 0;
     s->last_path[0] = 0;
     s->port = 0;
     if (!r) return 0;   // handler-only use (tests)
@@ -86,7 +86,7 @@ long wrmtfs_handle(wrmtfs *s, uint32_t node, const uint8_t *req, size_t len, uin
         for (unsigned i = 0; i < WRMTFS_MAX_CALLERS; ++i)
             if (s->caller[i].used && s->caller[i].node == node && seq(s->caller[i].part, part)) {id = (int)i; break;}
         for (unsigned i = 0; i < WRMTFS_MAX_CALLERS && id < 0; ++i) if (!s->caller[i].used) id = (int)i;
-        if (id < 0) {++s->errors; return respond(out, cap, h.txn, 1, WRMTFS_ERR_INTERNAL, 0, 0, 0, 0);}
+        if (id < 0) {++s->errors; ++s->callers_full; return respond(out, cap, h.txn, 1, WRMTFS_ERR_INTERNAL, 0, 0, 0, 0);}
         s->caller[id].used = 1; s->caller[id].node = node; s->caller[id].part = part;
         return respond(out, cap, h.txn, 1, 0, 1, (uint32_t)id, 0, 0);
     }

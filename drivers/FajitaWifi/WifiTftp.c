@@ -301,9 +301,9 @@ static void request(wtftp *t, int write, const uint8_t *buf, size_t len, uint32_
     }
     wtftp_client *c = 0;
     for (unsigned i = 0; i < WTFTP_MAX_CLIENTS; ++i) if (!t->c[i].used) {c = &t->c[i]; break;}
-    if (!c) {send_error_to(t, node, rport, WTFTP_E_UNDEF, "Resources temporarily unavailable"); return;}
+    if (!c) {++t->busy; send_error_to(t, node, rport, WTFTP_E_UNDEF, "Resources temporarily unavailable"); return;}
     c->port = wqrtr_bind(t->r, 0, client_rx, t);
-    if (!c->port) {send_error_to(t, node, rport, WTFTP_E_UNDEF, "Resources temporarily unavailable"); return;}
+    if (!c->port) {++t->busy; send_error_to(t, node, rport, WTFTP_E_UNDEF, "Resources temporarily unavailable"); return;}
     c->used = 1; c->writer = write; c->node = node; c->rport = rport;
     c->blksize = (uint32_t)blksize; c->rsize = (uint32_t)rsize; c->wsize = (uint32_t)wsize;
     c->timeoutms = (uint32_t)timeoutms; c->seek = seek_set ? seek : 0;
@@ -413,7 +413,7 @@ int wtftp_init(wtftp *t, wqrtr *r, const wtftp_fs *fs)
     for (unsigned i = 0; i < WTFTP_RAM_FILES; ++i) {t->ram[i].used = 0; t->ram[i].data = 0;}
     t->r = r;
     t->fs = *fs;
-    t->rrq = t->wrq = t->errors = t->refused = 0;
+    t->rrq = t->wrq = t->errors = t->refused = t->busy = 0;
     t->nhist = 0; t->cur = -1;
     t->tx_pkts = t->tx_fail = t->data_in = t->other_in = t->last_in_op = 0;
     t->bytes = 0;

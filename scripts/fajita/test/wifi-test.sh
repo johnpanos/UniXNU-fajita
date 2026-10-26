@@ -186,7 +186,7 @@ evaluate() {
     link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers n[0-9]+\+? 45 ' \
              'no GLINK/QRTR link with wlfw (0x45) announced'
            layers ;;
-    servers) check_from_log servers 'FW4 pdr [1-9][0-9]* tftp rrq[1-9]' 'the modem did not use pd-mapper and TFTP'
+    servers) check_from_log servers 'FW4 pdr [1-9][0-9]*\(more[0-9]+ cut[0-9]+\) tftp busy[0-9]+ rrq[1-9]' 'the modem did not use pd-mapper and TFTP'
            local r; r=$(con_has 'FW4 '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)"
            r=$(con_has 'FW4 services'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     wlfw)  check_from_log wlfw  'FW5 wlfw enabled ' 'wlfw handshake did not reach FW_READY + wlan_cfg/wlan_mode'
@@ -223,7 +223,7 @@ push_psk
 say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
 # Wait for the deepest requested stage's pass row (the link and the services come up seconds after FW3/FW4 first log),
 # or a row that says it will not get there.
-declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers [0-9a-f]' [4]='FW4 pdr [1-9][0-9]* tftp rrq[1-9]'
+declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers n[0-9]' [4]='FW4 pdr [1-9][0-9]*\(more[0-9]+ cut[0-9]+\) tftp busy[0-9]+ rrq[1-9]'
                      [5]='FW5 wlfw (enabled|failed)' [6]='FW6 ' [7]='FW7 ' )
 done_re=${DONE_RE[$maxN]}
 for s in "${want[@]}"; do [ "$s" = lower ] && [ "$maxN" = 1 ] && done_re='FWR aoss '; done   # the survey's last row

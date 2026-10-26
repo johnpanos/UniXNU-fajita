@@ -60,6 +60,7 @@ typedef struct wqrtr {
     struct {uint8_t *p; size_t len;} txq[WQR_TXQ];
     unsigned txq_head, txq_count;
     uint32_t rx_pkts, tx_pkts, dropped, bad;
+    uint32_t flows_full, txq_full; // sends without a flow slot (no flow control) / packets refused by a full TX queue
     uint32_t remote_full;         // NEW_SERVERs that found the remote table full (the event is still delivered)
     struct {uint32_t src_node, src_port, dst_port, size; uint8_t head[12];} drop_log[8];   // the first packets to unbound ports
     unsigned ndrop_log;

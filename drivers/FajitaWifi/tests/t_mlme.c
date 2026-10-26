@@ -9,7 +9,7 @@
 #include "../WifiMlme.h"
 #include "../WifiAth10kIds.h"
 
-#define QMAX 64
+#define QMAX 256
 typedef struct {uint8_t d[600]; uint32_t len; int is_eapol;} qent;
 
 typedef struct {
@@ -26,6 +26,7 @@ typedef struct {
     uint8_t bssid[6], other[6];
     const char *ssid, *pass;
     uint16_t freq;
+    unsigned crowd;             // extra BSSes the target reports in a scan
     int ap_rsn_flags;           // 0 plain WPA2-PSK/CCMP; 1 PMF required; 2 TKIP group
     int ap_ignore_auth, ap_auth_status, ap_assoc_status, ap_no_m1, ap_resend_m3, ap_drop_key_complete;
     uint8_t pmk[32], anonce[32], snonce[32], gtk[16];
@@ -207,6 +208,12 @@ static int tsend(void *c, const void *buf, uint32_t len)
         const uint32_t nch = r32(cmd + 64);
         const uint8_t *arr = d + 4 + 4 + 100 + 4;
         ev_scan(s, WA_WMI_SCAN_EVENT_STARTED, 0);
+        for (unsigned c = 0; c < s->crowd; ++c) {   // a busy area: more BSSes than the table holds, all stronger than ours
+            uint8_t f[300], bs[6] = {0x40, 0, 0, 0, (uint8_t)(c >> 8), (uint8_t)c};
+            char name[16]; snprintf(name, sizeof name, "Crowd%u", c);
+            const uint32_t n = beacon(s, f, bs, name, 0, 0, 0);
+            ev_mgmt(s, f, n, 2412, 70 + (c % 20));
+        }
         for (uint32_t i = 0; i < nch; ++i)
             if (r32(arr + 4 * i) == s->freq) ap_beacons(s, s->freq);
         ev_scan(s, WA_WMI_SCAN_EVENT_COMPLETED, 0);
@@ -366,6 +373,20 @@ static void t_mlme_scan(void)
     CHECK(wmlme_scan(&s->m, &f1, 1) == 0);
     pump(s);
     CHECK(s->m.state == WMLME_SCAN_DONE && s->m.nbss == 0);
+    // a busy area: 100 stronger BSSes than ours; the table stays full, the target survives, the strongest are kept
+    s->crowd = 100;
+    wmlme_set_target(&s->m, "KittyCorner");
+    CHECK(wmlme_scan(&s->m, NULL, 0) == 0);
+    pump(s);
+    CHECK(s->m.nbss == WMLME_MAX_BSS && s->m.scan_full > 0 && wmlme_find(&s->m, "KittyCorner"));
+    {
+        int32_t min_crowd = 0; unsigned crowd = 0;
+        for (unsigned i = 0; i < s->m.nbss; ++i)
+            if (s->m.bss[i].ssid_len >= 6 && !memcmp(s->m.bss[i].ssid, "Crowd", 5)) {++crowd; if (s->m.bss[i].rssi < min_crowd) min_crowd = s->m.bss[i].rssi;}
+        CHECK(crowd == WMLME_MAX_BSS - 2 && min_crowd >= 77 - 95 && !wmlme_find(&s->m, "OtherNet"));   // the strongest 62 + both KittyCorner APs
+        CHECK(s->m.scan_full == 100 + 3 - WMLME_MAX_BSS);   // 100 crowd + 2 KittyCorner + OtherNet new; the hidden beacon updates
+    }
+    s->crowd = 0;
     // a damaged frame is counted and ignored
     t_tfree_all();
 }

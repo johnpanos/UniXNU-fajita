@@ -196,7 +196,24 @@ static void scan_frame(wmlme *m, const wwmi_event *ev)
         else m->bss[i].rssi = b.rssi;
         return;
     }
-    if (m->nbss < WMLME_MAX_BSS) {m->bss[m->nbss++] = b; ++m->scan_new;}
+    if (m->nbss < WMLME_MAX_BSS) {m->bss[m->nbss++] = b; ++m->scan_new; return;}
+    // Full: never lose the network we want; otherwise keep the strongest. Replace the weakest entry that is not the target.
+    ++m->scan_full;
+    const int want = m->ssid_len && b.ssid_len == m->ssid_len && eq(b.ssid, m->ssid, m->ssid_len);
+    int victim = -1;
+    for (unsigned i = 0; i < m->nbss; ++i) {
+        const wmlme_bss *q = &m->bss[i];
+        if (m->ssid_len && q->ssid_len == m->ssid_len && eq(q->ssid, m->ssid, m->ssid_len)) continue;
+        if (victim < 0 || q->rssi < m->bss[victim].rssi) victim = (int)i;
+    }
+    if (victim >= 0 && (want || m->bss[victim].rssi < b.rssi)) {m->bss[victim] = b; ++m->scan_evicted; ++m->scan_new;}
+}
+
+void wmlme_set_target(wmlme *m, const char *ssid)
+{
+    size_t n = 0;
+    while (ssid && ssid[n] && n < sizeof m->ssid) ++n;
+    m->ssid_len = (uint8_t)n; copy(m->ssid, ssid, n);
 }
 
 const wmlme_bss *wmlme_find(const wmlme *m, const char *ssid)

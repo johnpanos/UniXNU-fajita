@@ -39,6 +39,7 @@ typedef struct {
     struct {int used; uint32_t node; const char *part; const char *path;} caller[WRMTFS_MAX_CALLERS];
     // counters for the FW4 row
     uint32_t opens, iovecs, sectors_read, writes_refused, errors;
+    uint32_t callers_full;           // OPENs refused because all WRMTFS_MAX_CALLERS ids were taken
     char last_path[32];
 } wrmtfs;
 

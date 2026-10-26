@@ -9,7 +9,7 @@ static int seq(const char *a, const char *b) {while (*a && *a == *b) {++a; ++b;}
 void wpdm_init(wpdm *p)
 {
     p->count = 0;
-    p->requests = p->pfr = 0;
+    p->requests = p->pfr = p->names_more = p->list_cut = 0;
 }
 
 // ---- a minimal JSON reader: enough for the .jsn schema (objects, arrays, strings, integers, true/false/null) ----
@@ -232,6 +232,8 @@ long wpdm_handle(wpdm *p, const uint8_t *req, size_t len, uint8_t *out, size_t c
         ++n;
     }
     list[0] = (uint8_t)n;
+    if (n == 32 && total > offset + n) ++p->list_cut;
+    if (p->nnames >= 6) ++p->names_more;
     if (p->nnames < 6) {
         char *d = p->names[p->nnames++];
         size_t k = 0;
