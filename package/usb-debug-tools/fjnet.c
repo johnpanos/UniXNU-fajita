@@ -3,6 +3,8 @@
 // interface from the USB debug channel. Built by scripts/fajita/build-usbdbg-agent.sh next to fjdbg-agent.
 //   fjnet show IF           address, netmask, flags, MTU, MAC, counters of IF
 //   fjnet dhcp IF           DHCP DISCOVER/REQUEST on IF, then address + netmask + default route; prints "lease A.B.C.D gw G.G.G.G"
+//   fjnet sc [REGEX]        what configd's SCDynamicStore knows: keys matching REGEX (default Network/Interface) and their values
+//   fjnet http URL          a GET through CFNetwork (the stack apps use): status code, bytes, first line
 //   fjnet ping IP [COUNT]   ICMP echo through the normal routing table; prints "N/M received"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,6 +23,10 @@
 #include <sys/sockio.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CFNetwork/CFNetwork.h>
+#include <dlfcn.h>
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 static int show(const char *ifn)
 {
@@ -235,11 +241,70 @@ static int ping(const char *ip, int count)
     return ok ? 0 : 1;
 }
 
+static int sc(const char *re)
+{
+    // the iOS SDK marks SCDynamicStore unavailable although configd serves it: resolve at run time
+    void *h = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
+    CFTypeRef (*SCCreate)(CFAllocatorRef, CFStringRef, void *, void *) = h ? dlsym(h, "SCDynamicStoreCreate") : NULL;
+    CFArrayRef (*SCKeys)(CFTypeRef, CFStringRef) = h ? dlsym(h, "SCDynamicStoreCopyKeyList") : NULL;
+    CFPropertyListRef (*SCValue)(CFTypeRef, CFStringRef) = h ? dlsym(h, "SCDynamicStoreCopyValue") : NULL;
+    if (!SCCreate || !SCKeys || !SCValue) {printf("SystemConfiguration symbols missing\n"); return 1;}
+    CFTypeRef st = SCCreate(NULL, CFSTR("fjnet"), NULL, NULL);
+    if (!st) {printf("SCDynamicStoreCreate failed\n"); return 1;}
+    CFStringRef pat = CFStringCreateWithCString(NULL, re, kCFStringEncodingUTF8);
+    CFArrayRef keys = SCKeys(st, pat);
+    if (!keys) {printf("no keys match %s\n", re); return 1;}
+    printf("%ld keys match %s\n", (long)CFArrayGetCount(keys), re);
+    for (CFIndex i = 0; i < CFArrayGetCount(keys); i++) {
+        CFStringRef k = CFArrayGetValueAtIndex(keys, i);
+        CFPropertyListRef v = SCValue(st, k);
+        char kb[256], vb[1024] = "";
+        CFStringGetCString(k, kb, sizeof kb, kCFStringEncodingUTF8);
+        if (v) {
+            CFStringRef d = CFCopyDescription(v);
+            CFStringGetCString(d, vb, sizeof vb, kCFStringEncodingUTF8);
+            CFRelease(d); CFRelease(v);
+            for (char *c = vb; *c; c++) if (*c == '\n' || *c == '\t') *c = ' ';
+        }
+        printf("%s = %s\n", kb, vb);
+    }
+    return 0;
+}
+
+static int http(const char *url)
+{
+    CFStringRef us = CFStringCreateWithCString(NULL, url, kCFStringEncodingUTF8);
+    CFURLRef u = CFURLCreateWithString(NULL, us, NULL);
+    CFHTTPMessageRef req = CFHTTPMessageCreateRequest(NULL, CFSTR("GET"), u, kCFHTTPVersion1_1);
+    CFReadStreamRef rs = CFReadStreamCreateForHTTPRequest(NULL, req);
+    if (!CFReadStreamOpen(rs)) {printf("open failed\n"); return 1;}
+    uint8_t buf[2048];
+    long total = 0;
+    char first[120] = "";
+    time_t t0 = time(NULL);
+    for (;;) {
+        CFIndex n = CFReadStreamRead(rs, buf, sizeof buf);
+        if (n > 0) {if (!total) {size_t m = n < 100 ? (size_t)n : 100; memcpy(first, buf, m); first[m] = 0;} total += n;}
+        else break;
+        if (time(NULL) - t0 > 20) break;
+    }
+    CFHTTPMessageRef resp = (CFHTTPMessageRef)CFReadStreamCopyProperty(rs, kCFStreamPropertyHTTPResponseHeader);
+    long code = resp ? (long)CFHTTPMessageGetResponseStatusCode(resp) : -1;
+    CFErrorRef err = CFReadStreamCopyError(rs);
+    printf("http %ld bytes %ld", code, total);
+    if (err) {printf(" error %ld domain %s", (long)CFErrorGetCode(err), CFStringGetCStringPtr(CFErrorGetDomain(err), kCFStringEncodingUTF8));}
+    for (char *c = first; *c; c++) if (*c == '\n' || *c == '\r') *c = ' ';
+    printf(" first '%s'\n", first);
+    return code == 200 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && !strcmp(argv[1], "show")) return show(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "dhcp")) return dhcp(argv[2]);
+    if (argc >= 2 && !strcmp(argv[1], "sc")) return sc(argc > 2 ? argv[2] : "State:/Network/(Interface|Global).*");
+    if (argc >= 3 && !strcmp(argv[1], "http")) return http(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "ping")) return ping(argv[2], argc > 3 ? atoi(argv[3]) : 3);
-    fprintf(stderr, "usage: fjnet show IF | dhcp IF | ping IP [COUNT]\n");
+    fprintf(stderr, "usage: fjnet show IF | dhcp IF | sc [REGEX] | http URL | ping IP [COUNT]\n");
     return 2;
 }

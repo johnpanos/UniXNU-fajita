@@ -22,7 +22,7 @@ codesign --verify --strict "$T/fjdbg-agent"
 cp "$T/fjdbg-agent" "$OUT"
 # fjnet: the network commands iOS lacks (push to the phone with session.sh push; not embedded in the payload)
 clang -target arm64-apple-ios16.0 -isysroot "$GPU_LOCAL_SDK" -O2 -Wall -Wextra -Werror \
-  "$BOARD/package/usb-debug-tools/fjnet.c" -o "$T/fjnet"
+  -framework CoreFoundation -framework CFNetwork "$BOARD/package/usb-debug-tools/fjnet.c" -o "$T/fjnet"
 codesign --force --sign - --pagesize 4096 --identifier org.blu-sharky.fjnet \
   --entitlements "$BOARD/package/usb-debug-tools/fjdbg-agent-entitlements.plist" "$T/fjnet"
 cp "$T/fjnet" "$(dirname "$OUT")/fjnet"

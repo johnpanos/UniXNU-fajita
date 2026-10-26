@@ -114,6 +114,11 @@ stage_ios() {
   "$TD/session.sh" push "$ROOT/.cache/fajita-inputs/fjnet" $FJN >/dev/null 2>&1 || { ok=0; say "  push fjnet failed"; }
   o=$("$TD/session.sh" run $FJN show en0 2>&1); say "  show en0: $(echo "$o" | tr '\n' ' ')"
   echo "$o" | grep -q 'link' || ok=0
+  # does iOS itself (configd/IPConfiguration) pick the bare BSD interface up? Look before our own DHCP runs.
+  sleep 12
+  say "  configd before fjnet dhcp: $("$TD/session.sh" run $FJN show en0 2>&1 | grep -c 'inet ') inet address(es) on en0"
+  "$TD/session.sh" run $FJN sc 'State:/Network/.*' > "$RES/ios-sc-before.txt" 2>&1
+  say "  SCDynamicStore State:/Network keys before: $(head -1 "$RES/ios-sc-before.txt"); en0 keys: $(grep -c 'en0' "$RES/ios-sc-before.txt")"
   o=$("$TD/session.sh" run $FJN dhcp en0 2>&1); say "  dhcp: $(echo "$o" | tr '\n' ' ')"
   ip=$(echo "$o" | sed -n 's/^lease \([0-9.]*\) gw .*/\1/p'); gw=$(echo "$o" | sed -n 's/^lease .* gw \([0-9.]*\)$/\1/p')
   [ -n "$ip" ] || ok=0
@@ -121,6 +126,16 @@ stage_ios() {
     o=$("$TD/session.sh" run $FJN ping "$gw" 3 2>&1); say "  ping $gw: $(echo "$o" | tail -2 | tr '\n' ' ')"
     echo "$o" | grep -q '^3/3 received' || ok=0
   else ok=0; fi
+  sleep 5
+  "$TD/session.sh" run $FJN sc 'State:/Network/.*' > "$RES/ios-sc-after.txt" 2>&1
+  say "  SCDynamicStore after our lease: $(head -1 "$RES/ios-sc-after.txt"); en0 keys: $(grep -c 'en0' "$RES/ios-sc-after.txt"); IPv4 global: $(grep 'Global/IPv4 ' "$RES/ios-sc-after.txt" | cut -c1-200)"
+  if [ -n "${gw:-}" ]; then   # an app-level fetch through CFNetwork: a local server on this laptop (passt maps the gateway to the host) and the internet
+    ( cd "$RES" && exec python3 -I -m http.server 8099 --bind 0.0.0.0 ) >/dev/null 2>&1 & local hs=$!
+    sleep 1
+    say "  CFNetwork http://$gw:8099/: $("$TD/session.sh" run $FJN http "http://$gw:8099/" 2>&1 | tr '\n' ' ')"
+    kill $hs 2>/dev/null
+    say "  CFNetwork http://example.com/: $("$TD/session.sh" run $FJN http "http://example.com/" 2>&1 | tr '\n' ' ')"
+  fi
   say "  show en0 after: $("$TD/session.sh" run $FJN show en0 2>&1 | tr '\n' ' ')"
   say "  kcmd net: $("$TD/session.sh" call kcmd net 2>&1 | head -1)"
   kill -TERM "$b" 2>/dev/null; wait "$b" 2>/dev/null
