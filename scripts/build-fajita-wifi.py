@@ -23,6 +23,8 @@ WIFI = ROOT / 'drivers/FajitaWifi'
 WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-designator', '-Wno-reorder-init-list',
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
+# The stack above a booted modem (SMEM/SMP2P, GLINK, QRTR services, wlfw, ath10k, WPA2), host-tested in tests/test_stack.c.
+STACK = ['WifiSmem.c']
 INCLUDES = ['-I', str(KIT), '-I', str(WIFI), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 
@@ -82,6 +84,7 @@ def main():
         (c_rec, WIFI / 'WifiQmi.c', ['-mgeneral-regs-only']),
         (c_rec, WIFI / 'WifiQrtr.c', ['-mgeneral-regs-only']),
         (c_rec, WIFI / 'WifiBoard.c', ['-mgeneral-regs-only']),
+        *[(c_rec, WIFI / name, ['-mgeneral-regs-only']) for name in STACK],
     ]
     objects, commands = [], {}
     for rec, source, extra in units:
@@ -104,7 +107,7 @@ def main():
         (OBJ_ROOT / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
     sources = [KIT / 'FajitaWifiProbe.cpp', KIT / 'FajitaWifiBoard.h', WIFI / 'WifiMdt.c', WIFI / 'WifiMdt.h',
                WIFI / 'WifiQmi.c', WIFI / 'WifiQmi.h', WIFI / 'WifiQrtr.c', WIFI / 'WifiQrtr.h', WIFI / 'WifiBoard.c',
-               WIFI / 'WifiBoard.h']
+               WIFI / 'WifiBoard.h', *[WIFI / n for name in STACK for n in (name, name[:-2] + '.h')]]
     (OUT / 'build-report.json').write_text(json.dumps({
         'archive_sha256': digest,
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},

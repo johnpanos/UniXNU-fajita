@@ -1,5 +1,20 @@
 # fajita Wi-Fi: WCN3990 on SDM845 under UniXNU (iOS 16.7.16)
 
+## Current state (keep this updated; a restart starts here)
+
+Round 3 (stack above a booted modem; the modem boot itself is the user's). Worktree `../UniXNU-fajita-wifi`, branch
+`wifi-stack`, merged into `ios16-port` after each layer. Host tests: `scripts/check-fajita-wifi-host.py` (two binaries:
+`test_wifi` for the earlier protocol code, `test_stack` for the layers below).
+
+| Layer | Code | Host test | Status |
+| --- | --- | --- | --- |
+| 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
+| 2 GLINK over SMEM | | | next |
+| 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | | | |
+| 4 wlfw client | | | |
+| 5 ath10k CE/HTC/WMI | | | |
+| 6 iOS Ethernet + WPA2 + DHCP | | | |
+
 Goal: join a WPA2 network and pass IP traffic in iOS on the OnePlus 6T. The Wi-Fi radio (WCN3990) runs on the modem
 DSP, so this is a modem-remoteproc bring-up before it is a Wi-Fi driver. Status 2026-10-25: host-only phase (no phone
 yet). Research, design, protocol code and host tests are done; nothing runs on hardware.
