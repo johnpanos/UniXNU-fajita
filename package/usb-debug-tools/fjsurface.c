@@ -10,6 +10,7 @@
 //                                        (CGIOSurfaceContextCreate; w30r = RGB10 with kCGImagePixelFormatRGBCIF10, BGRA = 8-bit BGRA): fill white,
 //                                        a black square, flush, then count the words (zero / other) and print the seed.
 //   fjsurface --images PID [FILTER]      the images dyld loaded in another process (task_for_pid; whether Metal and the GPU plugin are in it)
+//   fjsurface --sample PID SECONDS [HZ]   sample another process's threads (stacks by count, unslid for tools/crash/dsc-sym.py --slide)
 // (IOSurfaceLookup by ID fails here for every surface: the kernel logs "IOSurface disallowing global lookups", as on any iPhone.)
 // Build: scripts/fajita/build-usbdbg-agent.sh; push with session.sh push (to a new name when the binary changed).
 #include <CoreFoundation/CoreFoundation.h>
@@ -271,6 +272,92 @@ static int images(int pid, const char *filter) {
   return 0;
 }
 
+// --sample PID SECONDS [HZ]: where another process's threads are (task_for_pid): every 1/HZ s (default 100) each thread is suspended, its
+// pc, lr and up to 14 frame-pointer return addresses read, and resumed. Prints the shared cache slide, then per thread its samples, how
+// many found it running, its name, and its distinct stacks by count (unslid: tools/crash/dsc-sym.py --slide SLIDE ADDR... names them).
+// For a daemon that spins: what it is doing, without symbols on the phone.
+#define SAMPLE_DEPTH 16
+struct sample_stack { uint64_t thread; uint32_t count, depth; uint64_t pc[SAMPLE_DEPTH]; };
+static int sample(int pid, double seconds, int hz) {
+  mach_port_t task = MACH_PORT_NULL;
+  kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+  if (kr) { printf("task_for_pid(%d) failed: %#x\n", pid, kr); return 1; }
+  struct task_dyld_info info; mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+  uint64_t slide = 0;
+  if (!task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &count)) {
+    struct dyld_all_image_infos all; mach_vm_size_t got = 0;
+    if (!mach_vm_read_overwrite(task, info.all_image_info_addr, sizeof all, (mach_vm_address_t)&all, &got)) slide = all.sharedCacheSlide;
+  }
+  enum { kMax = 4096 };
+  struct sample_stack *stacks = calloc(kMax, sizeof *stacks);
+  unsigned nstacks = 0, overflow = 0, rounds = 0;
+  struct { uint64_t id; uint32_t samples, running; char name[64]; } threads[256];
+  unsigned nthreads = 0;
+  const int n = (int)(seconds * hz);
+  for (int round = 0; round < n; ++round, ++rounds) {
+    thread_act_array_t list = NULL; mach_msg_type_number_t nlist = 0;
+    if (task_threads(task, &list, &nlist)) break;
+    for (mach_msg_type_number_t i = 0; i < nlist; ++i) {
+      thread_identifier_info_data_t ident; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT;
+      uint64_t id = thread_info(list[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&ident, &ic) ? (uint64_t)list[i] : ident.thread_id;
+      thread_basic_info_data_t basic; mach_msg_type_number_t bc = THREAD_BASIC_INFO_COUNT;
+      const int running = !thread_info(list[i], THREAD_BASIC_INFO, (thread_info_t)&basic, &bc) && basic.run_state == TH_STATE_RUNNING;
+      unsigned t = 0;
+      while (t < nthreads && threads[t].id != id) ++t;
+      if (t == nthreads && nthreads < 256) {
+        threads[t].id = id; threads[t].samples = threads[t].running = 0; threads[t].name[0] = 0;
+        thread_extended_info_data_t ext; mach_msg_type_number_t ec = THREAD_EXTENDED_INFO_COUNT;
+        if (!thread_info(list[i], THREAD_EXTENDED_INFO, (thread_info_t)&ext, &ec)) snprintf(threads[t].name, sizeof threads[t].name, "%s", ext.pth_name);
+        ++nthreads;
+      }
+      if (t < nthreads) { threads[t].samples++; threads[t].running += running; }
+      uint64_t pcs[SAMPLE_DEPTH] = {0}; uint32_t depth = 0;
+      if (!thread_suspend(list[i])) {
+        arm_thread_state64_t st; mach_msg_type_number_t sc = ARM_THREAD_STATE64_COUNT;
+        if (!thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sc)) {
+          pcs[depth++] = __darwin_arm_thread_state64_get_pc(st) & 0xfffffffffULL;
+          pcs[depth++] = __darwin_arm_thread_state64_get_lr(st) & 0xfffffffffULL;
+          uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
+          while (fp && depth < SAMPLE_DEPTH) {
+            uint64_t frame[2]; mach_vm_size_t got = 0;
+            if (mach_vm_read_overwrite(task, fp, sizeof frame, (mach_vm_address_t)frame, &got) || got != sizeof frame) break;
+            if (!frame[1]) break;
+            pcs[depth++] = frame[1] & 0xfffffffffULL;
+            if (frame[0] <= fp) break;
+            fp = frame[0];
+          }
+        }
+        thread_resume(list[i]);
+      }
+      unsigned k = 0;
+      for (; k < nstacks; ++k)
+        if (stacks[k].thread == id && stacks[k].depth == depth && !memcmp(stacks[k].pc, pcs, depth * sizeof *pcs)) break;
+      if (k == nstacks) { if (nstacks < kMax) { stacks[k].thread = id; stacks[k].depth = depth; memcpy(stacks[k].pc, pcs, sizeof pcs); ++nstacks; } else { ++overflow; continue; } }
+      stacks[k].count += running ? 1 : 0;
+      mach_port_deallocate(mach_task_self(), list[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof *list);
+    usleep((useconds_t)(1000000 / hz));
+  }
+  printf("sample pid %d: %u rounds over %.1f s, slide %#llx, %u threads, %u distinct stacks%s\n", pid, rounds, seconds, (unsigned long long)slide, nthreads,
+         nstacks, overflow ? " (table full: some dropped)" : "");
+  for (unsigned t = 0; t < nthreads; ++t) {
+    if (!threads[t].running) continue;
+    printf("thread %#llx %s: running %u of %u samples\n", (unsigned long long)threads[t].id, threads[t].name[0] ? threads[t].name : "-", threads[t].running, threads[t].samples);
+    for (unsigned shown = 0; shown < 6; ++shown) {   // its most frequent running stacks
+      int best = -1;
+      for (unsigned k = 0; k < nstacks; ++k)
+        if (stacks[k].thread == threads[t].id && stacks[k].count && (best < 0 || stacks[k].count > stacks[best].count)) best = (int)k;
+      if (best < 0) break;
+      printf("  %u:", stacks[best].count);
+      for (uint32_t d = 0; d < stacks[best].depth; ++d) printf(" %llx", (unsigned long long)(stacks[best].pc[d] - (stacks[best].pc[d] > slide ? slide : 0)));
+      printf("\n");
+      stacks[best].count = 0;
+    }
+  }
+  return 0;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   if (argc >= 2 && !strcmp(argv[1], "--scan"))
@@ -282,11 +369,12 @@ int main(int argc, char **argv) {
     return cgdraw(f, argc > 3 ? atoi(argv[3]) : 256, argc > 4 ? atoi(argv[4]) : 256);
   }
   if (argc >= 3 && !strcmp(argv[1], "--images")) return images(atoi(argv[2]), argc > 3 ? argv[3] : NULL);
+  if (argc >= 4 && !strcmp(argv[1], "--sample")) return sample(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 100);
   if (argc >= 2 && !strcmp(argv[1], "--share")) {
     uint32_t f = 'BGRA';
     if (argc > 4 && strlen(argv[4]) == 4) f = (uint32_t)argv[4][0] << 24 | (uint32_t)argv[4][1] << 16 | (uint32_t)argv[4][2] << 8 | (uint32_t)argv[4][3];
     return share(argc > 2 ? atoi(argv[2]) : 256, argc > 3 ? atoi(argv[3]) : 256, f);
   }
-  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER]\n");
+  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER] | --sample PID SECONDS [HZ]\n");
   return 2;
 }
