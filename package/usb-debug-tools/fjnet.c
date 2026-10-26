@@ -8,6 +8,7 @@
 //   fjnet ping IP [COUNT]   ICMP echo through the normal routing table; prints "N/M received"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -121,6 +122,87 @@ static int dhcp_msg(uint8_t *p, uint8_t type, const uint8_t mac[6], uint32_t xid
     return 300;
 }
 
+static uint16_t cksum(const void *p, int n);
+// net/bpf.h is not in the iPhoneOS SDK: the pieces used here, from XNU's bsd/net/bpf.h (user space: 32-bit time stamps)
+struct fj_timeval32 {int32_t tv_sec, tv_usec;};
+struct bpf_hdr {struct fj_timeval32 bh_tstamp; uint32_t bh_caplen, bh_datalen; unsigned short bh_hdrlen;};
+#define BPF_WORDALIGN(x) (((x) + 3) & ~3)
+#define BIOCGBLEN _IOR('B', 102, unsigned)
+#define BIOCSETIF _IOW('B', 108, struct ifreq)
+#define BIOCIMMEDIATE _IOW('B', 112, unsigned)
+#define BIOCSHDRCMPLT _IOW('B', 117, unsigned)
+// DHCP runs on raw frames through BPF, as configd's IPConfiguration does: DISCOVER/REQUEST from 0.0.0.0:68 to
+// 255.255.255.255:67 (a real server ignores anything else: the earlier UDP-socket version sent from a link-local address to
+// the link-local broadcast, which only passt answered), replies read back on UDP port 68.
+static int bpf_open(const char *ifn)
+{
+    for (int i = 0; i < 16; i++) {
+        char path[16];
+        snprintf(path, sizeof path, "/dev/bpf%d", i);
+        int fd = open(path, O_RDWR);
+        if (fd < 0) continue;
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof ifr);
+        strlcpy(ifr.ifr_name, ifn, sizeof ifr.ifr_name);
+        unsigned one = 1;
+        if (ioctl(fd, BIOCSETIF, &ifr) || ioctl(fd, BIOCIMMEDIATE, &one) || ioctl(fd, BIOCSHDRCMPLT, &one)) {close(fd); continue;}
+        return fd;
+    }
+    return -1;
+}
+static int dhcp_frame(uint8_t *f, const uint8_t mac[6], const uint8_t *msg, int mlen)
+{
+    memset(f, 0xff, 6); memcpy(f + 6, mac, 6); f[12] = 0x08; f[13] = 0x00;
+    uint8_t *ip = f + 14, *udp = ip + 20;
+    memset(ip, 0, 20);
+    ip[0] = 0x45; ip[8] = 64; ip[9] = 17;
+    const int iplen = 20 + 8 + mlen;
+    ip[2] = (uint8_t)(iplen >> 8); ip[3] = (uint8_t)iplen;
+    memset(ip + 16, 0xff, 4);                         // to 255.255.255.255, from 0.0.0.0
+    const uint16_t c = cksum(ip, 20);
+    ip[10] = (uint8_t)(c >> 8); ip[11] = (uint8_t)c;
+    udp[0] = 0; udp[1] = 68; udp[2] = 0; udp[3] = 67;
+    udp[4] = (uint8_t)((8 + mlen) >> 8); udp[5] = (uint8_t)(8 + mlen); udp[6] = udp[7] = 0;   // no UDP checksum (allowed for IPv4)
+    memcpy(udp + 8, msg, mlen);
+    return 14 + iplen;
+}
+// the next DHCP reply for xid within ms milliseconds: its BOOTP payload into out, or -1
+static int dhcp_recv(int fd, uint32_t xid, uint8_t *out, int cap, int ms)
+{
+    unsigned blen = 4096;
+    ioctl(fd, BIOCGBLEN, &blen);
+    uint8_t *buf = malloc(blen);
+    if (!buf) return -1;
+    struct timeval t0, t;
+    gettimeofday(&t0, NULL);
+    int got = -1;
+    for (;;) {
+        gettimeofday(&t, NULL);
+        const int left = ms - (int)((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_usec - t0.tv_usec) / 1000);
+        if (left <= 0) break;
+        struct pollfd pf = {fd, POLLIN, 0};
+        if (poll(&pf, 1, left) <= 0) break;
+        ssize_t n = read(fd, buf, blen);
+        for (uint8_t *p = buf; n > 0 && p < buf + n && got < 0;) {
+            const struct bpf_hdr *h = (const struct bpf_hdr *)p;
+            const uint8_t *e = p + h->bh_hdrlen;
+            const unsigned cl = h->bh_caplen;
+            if (cl >= 14 + 20 + 8 + 240 && e[12] == 0x08 && e[13] == 0x00 && e[14 + 9] == 17) {
+                const unsigned ihl = (e[14] & 15u) * 4u;
+                const uint8_t *u = e + 14 + ihl;
+                if (u + 8 <= e + cl && u[2] == 0 && u[3] == 68) {
+                    const int pl = (int)(e + cl - (u + 8));
+                    if (pl >= 240 && !memcmp(u + 8 + 4, &xid, 4) && u[8] == 2) {got = pl < cap ? pl : cap; memcpy(out, u + 8, got);}
+                }
+            }
+            p += BPF_WORDALIGN(h->bh_hdrlen + h->bh_caplen);
+        }
+        if (got >= 0) break;
+    }
+    free(buf);
+    return got;
+}
+
 static int dhcp(const char *ifn)
 {
     struct ifaddrs *l, *a;
@@ -130,31 +212,28 @@ static int dhcp(const char *ifn)
         if (!strcmp(a->ifa_name, ifn) && a->ifa_addr && a->ifa_addr->sa_family == AF_LINK)
             memcpy(mac, LLADDR((struct sockaddr_dl *)a->ifa_addr), 6);
     freeifaddrs(l);
-    const unsigned idx = if_nametoindex(ifn);
-    if (!idx) {fprintf(stderr, "no interface %s\n", ifn); return 1;}
-    // the interface needs an address (0.0.0.0 is refused) before sockets can send out of it: use link-local until the lease
-    struct in_addr tmp = {htonl(0xa9fe0001u)}, m16 = {htonl(0xffff0000u)};
-    set_addr(ifn, tmp, m16);
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    setsockopt(fd, IPPROTO_IP, 25 /* IP_BOUND_IF */, &idx, sizeof idx);
-    struct sockaddr_in me = {.sin_len = sizeof me, .sin_family = AF_INET, .sin_port = htons(68)};
-    if (bind(fd, (void *)&me, sizeof me)) perror("bind 68");
-    struct sockaddr_in bc = {.sin_len = sizeof bc, .sin_family = AF_INET, .sin_port = htons(67), .sin_addr = {htonl(0xa9feffffu)}};   // the link-local subnet broadcast: 255.255.255.255 is unroutable before the lease
+    if (!if_nametoindex(ifn)) {fprintf(stderr, "no interface %s\n", ifn); return 1;}
+    {   // the interface must be up for BPF to send
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof ifr);
+        strlcpy(ifr.ifr_name, ifn, sizeof ifr.ifr_name);
+        int c = socket(AF_INET, SOCK_DGRAM, 0);
+        if (!ioctl(c, SIOCGIFFLAGS, &ifr)) {ifr.ifr_flags |= IFF_UP; ioctl(c, SIOCSIFFLAGS, &ifr);}
+        close(c);
+    }
+    int fd = bpf_open(ifn);
+    if (fd < 0) {fprintf(stderr, "dhcp: no /dev/bpf for %s (%s)\n", ifn, strerror(errno)); return 1;}
     const uint32_t xid = (uint32_t)getpid() * 2654435761u;
-    uint8_t tx[300], rx[600];
-    struct in_addr offer = {0}, srv = {0}, mask = {0}, gw = {0}, none = {0};
+    uint8_t tx[300], fr[400], rx[600];
+    struct in_addr offer = {0}, srv = {0}, mask = {0}, gw = {0};
     for (int stage = 1; stage <= 2; stage++) {
         int got = 0;
         for (int tries = 0; tries < 5 && !got; tries++) {
-            int n = dhcp_msg(tx, stage == 1 ? 1 : 3, mac, xid, offer, srv);
-            if (sendto(fd, tx, n, 0, (void *)&bc, sizeof bc) < 0) perror("sendto");
-            struct pollfd pf = {fd, POLLIN, 0};
-            if (poll(&pf, 1, 3000) <= 0) continue;
-            ssize_t r = recv(fd, rx, sizeof rx, 0);
-            if (r < 245 || memcmp(rx + 4, &xid, 4)) continue;
+            const int n = dhcp_msg(tx, stage == 1 ? 1 : 3, mac, xid, offer, srv);
+            const int fl = dhcp_frame(fr, mac, tx, n);
+            if (write(fd, fr, fl) != fl) perror("bpf write");
+            const int r = dhcp_recv(fd, xid, rx, sizeof rx, 3000);
+            if (r < 240) continue;
             uint8_t type = 0;
             struct in_addr m = {0}, g = {0}, s = {0};
             for (uint8_t *o = rx + 240; o < rx + r && *o != 255;) {
@@ -168,24 +247,14 @@ static int dhcp(const char *ifn)
             }
             if (stage == 1 && type == 2) {memcpy(&offer, rx + 16, 4); srv = s; mask = m; gw = g; got = 1;}
             if (stage == 2 && type == 5) {memcpy(&offer, rx + 16, 4); if (m.s_addr) mask = m; if (g.s_addr) gw = g; got = 1;}
-            if (stage == 2 && type == 6) {fprintf(stderr, "NAK\n"); return 1;}
+            if (stage == 2 && type == 6) {fprintf(stderr, "NAK\n"); close(fd); return 1;}
         }
-        if (!got) {fprintf(stderr, "dhcp: no %s\n", stage == 1 ? "OFFER" : "ACK"); return 1;}
+        if (!got) {fprintf(stderr, "dhcp: no %s\n", stage == 1 ? "OFFER" : "ACK"); close(fd); return 1;}
     }
     close(fd);
-    // drop the link-local placeholder, then the lease
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof ifr);
-    strlcpy(ifr.ifr_name, ifn, sizeof ifr.ifr_name);
-    struct sockaddr_in *s = (void *)&ifr.ifr_addr;
-    s->sin_len = sizeof *s; s->sin_family = AF_INET; s->sin_addr = tmp;
-    int c = socket(AF_INET, SOCK_DGRAM, 0);
-    ioctl(c, SIOCDIFADDR, &ifr);
-    close(c);
     if (!mask.s_addr) mask.s_addr = htonl(0xffffff00u);
     if (set_addr(ifn, offer, mask)) return 1;
     if (gw.s_addr && add_default(gw)) fprintf(stderr, "default route failed\n");
-    (void)none;
     char a1[32], a2[32];
     inet_ntop(AF_INET, &offer, a1, sizeof a1);
     inet_ntop(AF_INET, &gw, a2, sizeof a2);
