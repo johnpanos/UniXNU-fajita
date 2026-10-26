@@ -3,6 +3,8 @@
 // fjbundle --find DIR [MAXDEPTH]: every file under DIR (default depth 8): size, mtime (s, and seconds from now), data protection
 //   class (F_GETPROTECTIONCLASS; ? = open failed), flags; the first line is the clock (time(), gettimeofday). For stores that grow
 //   (Biome segments under /private/var/mobile/Library/Biome) and timestamps from before/after a clock jump.
+// fjbundle --settime UNIXSECONDS|now+N: settimeofday, as timed does after a network time fix (to reproduce what a clock jump does to
+//   daemons on a boot without Wi-Fi); prints the time before and after.
 // fjbundle --fds PID|NAME: the open vnodes of a process (proc_pidinfo PROC_PIDLISTFDS + PROC_PIDFDVNODEPATHINFO): fd, offset, size, path.
 // fjbundle --lookup [--ping] [--watch SUBSTR] SERVICE...: bootstrap_look_up each Mach service (a job disabled in launchd's overrides gives
 //   BOOTSTRAP_UNKNOWN_SERVICE 1102); --ping also sends it an empty XPC message and waits up to 3 s for any answer, which makes launchd
@@ -173,6 +175,14 @@ int main(int argc, char **argv) {
     find_walk(argv[2], 0, argc > 3 ? atoi(argv[3]) : 8, &files, &bytes);
     printf("%s: %lld files, %lld bytes\n", argv[2], files, bytes);
     return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--settime")) {
+    struct timeval before, tv = {0, 0}; gettimeofday(&before, NULL);
+    tv.tv_sec = !strncmp(argv[2], "now+", 4) ? before.tv_sec + atol(argv[2] + 4) : atol(argv[2]);
+    int r = settimeofday(&tv, NULL); int e = errno;
+    struct timeval after; gettimeofday(&after, NULL);
+    printf("settimeofday(%ld) = %d (%s): before %ld, after %ld\n", (long)tv.tv_sec, r, r ? strerror(e) : "ok", (long)before.tv_sec, (long)after.tv_sec);
+    return r ? 1 : 0;
   }
   if (argc == 3 && !strcmp(argv[1], "--fds")) {
     int pid = atoi(argv[2]); if (pid <= 0) pid = find_process(argv[2]);
