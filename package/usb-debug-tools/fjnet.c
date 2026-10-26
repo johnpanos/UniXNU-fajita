@@ -60,6 +60,8 @@ static int set_addr(const char *ifn, struct in_addr ip, struct in_addr mask)
     s->sin_family = AF_INET; s->sin_len = sizeof *s; s->sin_addr = ip;
     s = (void *)&r.ifra_mask;
     s->sin_family = AF_INET; s->sin_len = sizeof *s; s->sin_addr = mask;
+    s = (void *)&r.ifra_broadaddr;                  // limited broadcasts need the interface to have a broadcast address
+    s->sin_family = AF_INET; s->sin_len = sizeof *s; s->sin_addr.s_addr = ip.s_addr | ~mask.s_addr;
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     int rc = ioctl(fd, SIOCAIFADDR, &r);
     if (rc) perror("SIOCAIFADDR");
@@ -134,7 +136,7 @@ static int dhcp(const char *ifn)
     setsockopt(fd, IPPROTO_IP, 25 /* IP_BOUND_IF */, &idx, sizeof idx);
     struct sockaddr_in me = {.sin_len = sizeof me, .sin_family = AF_INET, .sin_port = htons(68)};
     if (bind(fd, (void *)&me, sizeof me)) perror("bind 68");
-    struct sockaddr_in bc = {.sin_len = sizeof bc, .sin_family = AF_INET, .sin_port = htons(67), .sin_addr = {htonl(0xffffffffu)}};
+    struct sockaddr_in bc = {.sin_len = sizeof bc, .sin_family = AF_INET, .sin_port = htons(67), .sin_addr = {htonl(0xa9feffffu)}};   // the link-local subnet broadcast: 255.255.255.255 is unroutable before the lease
     const uint32_t xid = (uint32_t)getpid() * 2654435761u;
     uint8_t tx[300], rx[600];
     struct in_addr offer = {0}, srv = {0}, mask = {0}, gw = {0}, none = {0};
