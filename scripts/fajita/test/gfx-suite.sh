@@ -100,6 +100,19 @@ m['start']=[l for l in open('$O/start.txt') if 'settle:' in l][-1].split('settle
 scene() {   # scene NAME CPU-PROCS STEP...
   local name=$1 procs=$2; shift 2
   python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "$@" 2>&1 | tee -a $O/suite.log
+  # A background process that took over BUSY_PCT (40) % of a core in the scene's last CPU windows and still does: sample it now
+  # (proc-sample.sh, 3 s) into SCENE-sample-NAME.txt, so a daemon spinning beside the scene is named with its stacks (SAMPLE=0: off).
+  [ "${SAMPLE:-1}" = 1 ] || return 0
+  for b in $(python3 -I -c "
+import json,sys
+r=json.load(open('$O/$name.json')); own=set('$procs'.split(','))|{'kernel_task','SpringBoard','launchd'}
+seen={}
+for c in r.get('cpu',[])[-2:]:
+    for p in c['procs']:
+        if p['name'] not in own and not p['name'].startswith(('ngpu-metal','fjsurface')) and p['ms']/c['ms']*100>${BUSY_PCT:-40}: seen[p['name']]=1
+print(' '.join(seen))" 2>/dev/null); do
+    timeout 100 $TD/proc-sample.sh $b 3 > $O/$name-sample-$b.txt 2>&1 && log "$name: $b was busy: sampled ($O/$name-sample-$b.txt)"
+  done
 }
 home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1; }
 open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
