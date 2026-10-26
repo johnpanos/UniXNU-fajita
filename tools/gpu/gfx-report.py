@@ -217,6 +217,22 @@ def scene_metrics(rec, ft_frames, refs):
     m['resp'] = st.median(rs) if rs else 0
     m['empty_windows'] = [w['spec'] for w in ws if len(w['frames']) < 3]
     m['ontime'] = 1 - m['over16'] / len(iv) if iv else 0
+    # Pacing: where each retired swap lands against the panel's frame starts (rd_ptr), over the motion windows. A display timer locked
+    # to the panel retires its frames at a steady phase; a free-running one drifts through the whole period.
+    import bisect
+    vs = rec.get('vsync') or []
+    phases = []
+    for x in rec.get('retire') or []:
+        if any(w['start'] <= x <= w['end'] for w in ws):
+            i = bisect.bisect_left(vs, x)
+            if 0 < i < len(vs):
+                phases.append((vs[i] - x) / 1000)
+    if len(phases) > 10:
+        hist = [0] * 8
+        for ph in phases:
+            hist[min(7, int(ph / tvm * 8))] += 1
+        m['phase_hist'] = hist
+        m['phase_spread'] = pct(phases, 90) - pct(phases, 10)
     # GPU over the motion windows (each governor sample covers the 20 ms before its stamp)
     gs = [g for g in rec.get('gov', []) if any(w['start'] < g['us'] <= w['end'] + 20000 for w in ws)]
     busy, alw = sum(g['busy'] for g in gs), sum(g['always'] for g in gs)
@@ -409,6 +425,9 @@ def report(run, refs, quiet=False):
                 L.append('    slow frames: ' + ' '.join('%s %.1f' % (k, v) for k, v in m['ft_slow'].items()))
             if m.get('present_stages'):
                 L.append('    presenter (median): ' + m['present_stages'])
+        if m.get('phase_hist'):
+            L.append('  pacing: retire-to-next-frame-start spread (p10-p90) %.1f ms of %.1f; by eighths of the period %s' % (
+                m['phase_spread'], m['vsync_ms'], m['phase_hist']))
         if m.get('slot_busy') is not None:
             L.append('  job ring: submissions refused for a job slot %s, for ring space %s (retried by the client: waits), most jobs outstanding %s of 8' % (
                 m['slot_busy'], m['ring_full'], m['peak_jobs']))

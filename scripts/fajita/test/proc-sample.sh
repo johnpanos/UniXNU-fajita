@@ -3,7 +3,8 @@
 # each thread suspended, its pc, lr and frame-pointer chain read, resumed; default 5 s at 100 Hz), then every address symbolized on the host
 # against the shared cache (tools/crash/dsc-sym.py with the process's slide). Prints the running threads and their most frequent stacks,
 # top frame first; "all" also the waiting threads (a client blocked in an XPC call). For a daemon that spins (coreduetd, healthappd, mobileassetd in the gfx suite's scenes): what it is doing.
-# Output also in $FAJITA_WORK/proc-sample/NAME.txt. fjsurface comes from $FAJITA_OUT/tools (scripts/fajita/build-usbdbg-agent.sh).
+# Frames of the GPU plugin (NativeAdrenoMetal+OFF) are named from its unstripped copy in SYMS (default ~/src/UniXNU-fajita-stack/build/
+# adreno-metal-plugin: it must be the build the phone runs). Output also in $FAJITA_WORK/proc-sample/NAME.txt. fjsurface comes from $FAJITA_OUT/tools (scripts/fajita/build-usbdbg-agent.sh).
 TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
 W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}; OUTD=${FAJITA_OUT:-$BOARD/.cache/fajita-out}; SS=$TD/session.sh
 [ -n "$1" ] || { sed -n 2,6p "$0"; exit 2; }
@@ -21,8 +22,21 @@ import re, subprocess, sys
 raw, board = sys.argv[1], sys.argv[2]
 lines = open(raw, errors='replace').read().splitlines()
 slide = next((m.group(1) for l in lines for m in [re.search(r'slide (0x[0-9a-f]+)', l)] if m), '0x0')
-addrs = sorted({a for l in lines if l.startswith('  ') and ':' in l for a in l.split(':', 1)[1].split()})
+frames = sorted({a for l in lines if l.startswith('  ') and ':' in l for a in l.split(':', 1)[1].split()})
+addrs = [a for a in frames if '+' not in a]
 names = {}
+# Frames of images outside the shared cache (NAME+OFFSET): the GPU plugin's from its unstripped copy (SYMS, default the stack's build)
+import os
+syms = os.environ.get('SYMS') or os.path.expanduser('~/src/UniXNU-fajita-stack/build/adreno-metal-plugin')
+for a in frames:
+    if '+' not in a: continue
+    image, off = a.split('+', 1)
+    obj = os.path.join(syms, image + '.unstripped')
+    if os.path.exists(obj):
+        r = subprocess.run(['llvm-symbolizer', '--obj=' + obj, '--functions=linkage', '--no-inlines', '0x' + off], capture_output=True, text=True)
+        fn = r.stdout.split('\n')[0].strip()
+        d = subprocess.run(['llvm-cxxfilt', fn], capture_output=True, text=True).stdout.strip() if fn else ''
+        names[a] = (image + ' ' + (d or fn))[:110]
 if addrs:
     r = subprocess.run(['python3', board + '/tools/crash/dsc-sym.py', '--demangle'] + addrs, capture_output=True, text=True, timeout=300)
     for l in r.stdout.splitlines():

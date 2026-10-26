@@ -289,6 +289,27 @@ static int sample(int pid, double seconds, int hz, int all) {
     struct dyld_all_image_infos all; mach_vm_size_t got = 0;
     if (!mach_vm_read_overwrite(task, info.all_image_info_addr, sizeof all, (mach_vm_address_t)&all, &got)) slide = all.sharedCacheSlide;
   }
+  // The images outside the shared cache (the main executable, a plugin bundle): their load addresses and names, so a frame of one
+  // prints as NAME+0xOFFSET (symbolize it with the image's unstripped copy).
+  struct { uint64_t base; char name[64]; } own[64];
+  unsigned nown = 0;
+  {
+    struct dyld_all_image_infos all; mach_vm_size_t got = 0;
+    if (!task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &count) &&
+        !mach_vm_read_overwrite(task, info.all_image_info_addr, sizeof all, (mach_vm_address_t)&all, &got)) {
+      struct dyld_image_info *list = calloc(all.infoArrayCount, sizeof *list);
+      if (list && !mach_vm_read_overwrite(task, (mach_vm_address_t)all.infoArray, all.infoArrayCount * sizeof *list, (mach_vm_address_t)list, &got))
+        for (uint32_t i = 0; i < all.infoArrayCount && nown < 64; i++) {
+          const uint64_t base = (uint64_t)(uintptr_t)list[i].imageLoadAddress;
+          if (base - slide >= 0x180000000ULL && base - slide < 0x200000000ULL) continue;   // in the shared cache
+          char path[1024] = {0};
+          if (mach_vm_read_overwrite(task, (mach_vm_address_t)list[i].imageFilePath, sizeof path - 1, (mach_vm_address_t)path, &got)) continue;
+          const char *leaf = strrchr(path, '/');
+          own[nown].base = base; snprintf(own[nown].name, sizeof own[nown].name, "%s", leaf ? leaf + 1 : path); ++nown;
+        }
+      free(list);
+    }
+  }
   enum { kMax = 4096 };
   struct sample_stack *stacks = calloc(kMax, sizeof *stacks);
   unsigned nstacks = 0, overflow = 0, rounds = 0;
@@ -351,7 +372,15 @@ static int sample(int pid, double seconds, int hz, int all) {
         if (stacks[k].thread == threads[t].id && stacks[k].count && (best < 0 || stacks[k].count > stacks[best].count)) best = (int)k;
       if (best < 0) break;
       printf("  %u:", stacks[best].count);
-      for (uint32_t d = 0; d < stacks[best].depth; ++d) printf(" %llx", (unsigned long long)(stacks[best].pc[d] - (stacks[best].pc[d] > slide ? slide : 0)));
+      for (uint32_t d = 0; d < stacks[best].depth; ++d) {
+        const uint64_t pc = stacks[best].pc[d];
+        int at = -1;
+        for (unsigned k = 0; k < nown; ++k)
+          if (own[k].base <= pc && (at < 0 || own[k].base > own[at].base)) at = (int)k;
+        if (pc - slide >= 0x180000000ULL && pc - slide < 0x200000000ULL) at = -1;
+        if (at >= 0) printf(" %s+%llx", own[at].name, (unsigned long long)(pc - own[at].base));
+        else printf(" %llx", (unsigned long long)(pc - (pc > slide ? slide : 0)));
+      }
       printf("\n");
       stacks[best].count = 0;
     }
