@@ -22,11 +22,16 @@
 #define DROPBEAR_DSS 0
 /* Darwin has no setresgid(): the pre-auth process is not privilege-separated (as on macOS builds). */
 #define DROPBEAR_SVR_DROP_PRIVS 0
-/* Single-user: only the account dropbear runs as (root) can log in, which also lets port forwarding work without privsep. */
-#define DROPBEAR_SVR_MULTIUSER 0
+/* Multi-user dropbear (non-multiuser mode refuses to run on a kernel with getgroups). Without privsep, Unix-socket stream
+ * forwarding is off; TCP forwarding (-L/-R) stays. ssh-start passes -G wheel, so only root (gid 0) can log in. */
+#define DROPBEAR_SVR_MULTIUSER 1
+#define DROPBEAR_SVR_LOCALSTREAMFWD 0
+#define DROPBEAR_SVR_REMOTESTREAMFWD 0
 
 /* iOS has no /bin/sh: root logs in to the add-on's bash (dropbear-fajita.patch). */
 #define DROPBEAR_LOGIN_SHELL FAJITA_SSH_ROOT "/bin/bash"
+/* authorized_keys lives in the 0700 state directory (-D); the permission walk stops there (dropbear-fajita.patch). */
+#define DROPBEAR_AUTHKEYS_TRUSTED_DIR FAJITA_SSH_STATE
 
 #define SFTPSERVER_PATH FAJITA_SSH_ROOT "/libexec/sftp-server"
 #define DROPBEAR_PATH_SSH_PROGRAM FAJITA_SSH_ROOT "/bin/dbclient"

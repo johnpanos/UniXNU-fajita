@@ -30,3 +30,20 @@ diff -ru a/src/svr-auth.c b/src/svr-auth.c
  	setusershell();
  	while ((listshell = getusershell()) != NULL) {
  		TRACE(("test shell is '%s'", listshell))
+diff -ru a/src/svr-authpubkey.c b/src/svr-authpubkey.c
+--- a/src/svr-authpubkey.c
++++ b/src/svr-authpubkey.c
+@@ -595,6 +595,13 @@
+ 		if (strcmp(path, ses.authstate.pw_dir) == 0 || strcmp(path, "/") == 0) {
+ 			break;
+ 		}
++#ifdef DROPBEAR_AUTHKEYS_TRUSTED_DIR
++		/* fajita: the keys live in a root-only 0700 state directory on Data; the iOS directories above it (/private/var is
++		 * group-writable on this Data volume) are not the key owner's to vouch for. Stop at the state directory. */
++		if (strcmp(path, DROPBEAR_AUTHKEYS_TRUSTED_DIR) == 0) {
++			break;
++		}
++#endif
+ 	}
+ 
+ 	/* all looks ok, return success */

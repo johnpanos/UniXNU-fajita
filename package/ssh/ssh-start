@@ -11,15 +11,15 @@ R=/private/var/ngpu/ssh
 S=/private/var/ssh
 PATH=$R/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-mkdir -p "$S" && chmod 700 "$S"
-echo "ssh-start: $(date) pid $$"
-
-# toybox applets as links next to it (toybox with no arguments lists them); the add-on cannot carry links.
+# toybox applets as links next to it (toybox with no arguments lists them); the add-on cannot carry links, so until they exist
+# every tool is called through toybox.
 cd "$R/bin" || exit 1
 for c in $(./toybox); do
-  [ -e "$c" ] || [ -L "$c" ] || ln -s toybox "$c"
+  [ -e "$c" ] || [ -L "$c" ] || ./toybox ln -s toybox "$c"
 done
 cd /
+mkdir -p "$S" && chmod 700 "$S"
+echo "ssh-start: $(date) pid $$"
 
 # Host keys: made here on first start, kept on Data across boots and reflashes of the payload.
 for t in ed25519 ecdsa rsa; do
@@ -32,10 +32,10 @@ done
 
 # authorized_keys = the keys baked into the add-on at build time (etc/authorized_keys, from the builder's ~/.ssh/*.pub) plus any
 # added on the phone (authorized_keys.local, kept across boots). dropbear reads it from $S (-D), as root.
-{
-  [ -f "$R/etc/authorized_keys" ] && cat "$R/etc/authorized_keys"
-  [ -f "$S/authorized_keys.local" ] && cat "$S/authorized_keys.local"
-} > "$S/authorized_keys.new" && chmod 600 "$S/authorized_keys.new" && mv -f "$S/authorized_keys.new" "$S/authorized_keys"
+for f in "$R/etc/authorized_keys" "$S/authorized_keys.local"; do
+  if [ -f "$f" ]; then cat "$f"; fi
+done > "$S/authorized_keys.new"
+chmod 600 "$S/authorized_keys.new" && mv -f "$S/authorized_keys.new" "$S/authorized_keys"
 echo "ssh-start: $(grep -c '^[a-z]' "$S/authorized_keys" 2>/dev/null || echo 0) authorized keys"
 
 # root's home (dropbear starts the login shell there)
@@ -53,5 +53,5 @@ keys=()
 for t in ed25519 ecdsa rsa; do [ -s "$S/dropbear_${t}_host_key" ] && keys+=(-r "$S/dropbear_${t}_host_key"); done
 echo "ssh-start: dropbear on port $PORT"
 # -F foreground (the supervisor restarts it), -E log to stderr (dropbear.log: every connection, auth success and failure),
-# -s -g no password logins (also compiled out), -D the authorized_keys directory, -T 3 auth tries per connection, -K 30 keepalive.
-exec "$R/bin/dropbear" -F -E -s -g -T 3 -K 30 -p "$PORT" -D "$S" -P "$S/dropbear.pid" "${keys[@]}" 2>> "$S/dropbear.log"
+# -s -g no password logins (also compiled out), -G wheel root only, -D the authorized_keys directory, -T 3 auth tries per connection, -K 30 keepalive.
+exec "$R/bin/dropbear" -F -E -s -g -G wheel -T 3 -K 30 -p "$PORT" -D "$S" -P "$S/dropbear.pid" "${keys[@]}" 2>> "$S/dropbear.log"
