@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # tools/crash/dsc-disasm.py [--cache DSC] IMAGE-SUBSTR|- OFFSET [COUNT] [--back N]: disassemble COUNT (default 40) arm64
 # instructions of a dyld shared cache image at image-relative OFFSET (hex), e.g. the "WebKit +0x1e6dac" from dsc-addr.py.
-# --grep RE: only the matching instructions of COUNT (search an image: e.g. COUNT 900000 and RE '#0x30d\\]').
+# --syms names bl/b targets (dyld stubs followed) through dsc-sym.py. --grep RE: only the matching instructions of COUNT (search an image: e.g. COUNT 900000 and RE '#0x30d\\]').
 # Reads the main cache and its .NN subcaches' mappings directly (no extraction). Needs python3-capstone.
 #   tools/crash/dsc-disasm.py WebKit.framework/WebKit 1e6dac 30 --back 20
-import argparse, glob, os, struct
+import argparse, glob, os, struct, sys
 import capstone
 BOARD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ap = argparse.ArgumentParser()
@@ -12,6 +12,7 @@ ap.add_argument('--cache', default=os.path.join(BOARD, '.cache/dsc-20H392/dyld_s
 ap.add_argument('--data', action='store_true', help='dump COUNT 64-bit words instead of disassembling')
 ap.add_argument('--back', type=int, default=0)
 ap.add_argument('--strings', action='store_true', help='annotate adrp+add/ldr targets that are C strings, CFStrings or selectors')
+ap.add_argument('--syms', action='store_true', help='name bl/b targets (through dyld stubs) with dsc-sym.py')
 ap.add_argument('--grep', help='print only the instructions matching this regular expression (search COUNT instructions)')
 ap.add_argument('image'); ap.add_argument('offset'); ap.add_argument('count', nargs='?', type=int, default=40)
 a = ap.parse_args()
@@ -77,7 +78,24 @@ def describe(addr):
         if t: return '@' + repr(t)
     return None
 md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
-md.detail = a.strings
+md.detail = a.strings or a.syms
+out = []
+def stub_target(t):
+    """A dyld stub (adrp x16; ldr x16, [x16, #o]; br x16) -> the pointer it loads, else t."""
+    w = read(t, 12)
+    if not w or len(w) < 12: return t
+    i0, i1, i2 = struct.unpack('<III', w)
+    if (i0 & 0x9f00001f) != 0x90000010 or i2 not in (0xd61f0200, 0xd71f0a1f):
+        return t
+    imm = ((i0 >> 5) & 0x7ffff) << 2 | (i0 >> 29) & 3
+    if imm & (1 << 20): imm -= 1 << 21
+    page = (t & ~0xfff) + (imm << 12)
+    if (i1 & 0xffc003ff) == 0x91000210:   # branch island: adrp x16; add x16, x16, #o; br x16
+        return stub_target(page + ((i1 >> 10) & 0xfff))
+    if (i1 & 0xffc003ff) != 0xf9400210:
+        return t
+    p = read(page + ((i1 >> 10) & 0xfff) * 8, 8)
+    return struct.unpack('<Q', p)[0] & 0xfffffffff if p else t
 pages = {}
 import re
 pat = re.compile(a.grep) if a.grep else None
@@ -100,6 +118,20 @@ while pos < len(data):   # disasm stops at an undecodable word (data in text): s
                         w = read(target, 8)
                         if w: d = describe(struct.unpack('<Q', w)[0] & 0xfffffffff)
                     if d: line += '    ; ' + d
-        if not pat or pat.search(line): print(line)
+        if a.syms and i.mnemonic in ('bl', 'b') and i.operands and i.operands[0].type == capstone.arm64.ARM64_OP_IMM:
+            line += '    ;@' + '%x' % stub_target(i.operands[0].imm)
+        if not pat or pat.search(line): out.append(line)
         last = i.address - va + 4
     pos = max(last, pos) + 4 if last <= pos else last
+if a.syms:
+    import subprocess
+    ts = sorted({l.rsplit(';@', 1)[1] for l in out if ';@' in l})
+    names = {}
+    if ts:
+        r = subprocess.run([sys.executable, os.path.join(BOARD, 'tools/crash/dsc-sym.py'), '--cache', a.cache, '--demangle'] + ts,
+                           capture_output=True, text=True)
+        for l in r.stdout.splitlines():
+            k, _, v = l.partition(':')
+            names[k.strip().lower().replace('0x', '')] = v.strip()
+    out = [l.rsplit(';@', 1)[0] + '    ; ' + names.get(l.rsplit(';@', 1)[1], l.rsplit(';@', 1)[1])[:120] if ';@' in l else l for l in out]
+print('\n'.join(out))

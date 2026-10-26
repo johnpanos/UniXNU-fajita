@@ -12,6 +12,7 @@
 //   fjsurface --images PID [FILTER]      the images dyld loaded in another process (task_for_pid; whether Metal and the GPU plugin are in it)
 //   fjsurface --sample PID SECONDS [HZ [all]]   sample another process's threads (stacks by count, unslid for tools/crash/dsc-sym.py
 //                                        --slide); all: waiting threads too (who is blocked in an XPC call to a daemon)
+//   fjsurface --watch-ca PID SECONDS [US]  the render server's display timer, vbl threshold, next update and swap ring, polled (see watch_ca)
 // (IOSurfaceLookup by ID fails here for every surface: the kernel logs "IOSurface disallowing global lookups", as on any iPhone.)
 // Build: scripts/fajita/build-usbdbg-agent.sh; push with session.sh push (to a new name when the binary changed).
 #include <CoreFoundation/CoreFoundation.h>
@@ -24,9 +25,11 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 extern kern_return_t mach_vm_read_overwrite(vm_map_t, mach_vm_address_t, mach_vm_size_t, mach_vm_address_t, mach_vm_size_t *);
+extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
 
 static void fourcc(uint32_t f, char out[5]) {
   for (int i = 0; i < 4; i++) { char c = (char)(f >> (24 - 8 * i)); out[i] = (c >= 32 && c < 127) ? c : '.'; }
@@ -395,6 +398,106 @@ static int sample(int pid, double seconds, int hz, int all) {
   return 0;
 }
 
+// --watch-ca PID SECONDS [US [SERVER [TIMER]]]: the render server's display-timer state, polled every US microseconds (default 200), one line per
+// change. Offsets are QuartzCore 20H392's (tools/crash/dsc-disasm.py --syms; NOTES-gfx.md "CA's display timer"):
+//   IOMFBServer S (found by its vtable pointer, unslid 0x1d5b29c28 or 0x1d5b39ee0, in the task's writable memory):
+//     +0x2e0 the last timer tick's host time (written by every vsync_callback), +0x2d8 the vbl threshold (ticks before it are dropped),
+//     +0x2b0 the next update time (double, CA time; inf = nothing due), +0x308 idle ticks left before the timer stops, +0x60 the display D
+//   IOMFBDisplay D: +0x258 can_update failures (no free swap), +0x358/+0x35c/+0x360 the swap ring (head, tail, count)
+//   _CADisplayTimer: the S field whose +0xd8 holds an interval of 14-20 ms in ticks; +0xe0 its next deadline
+// SERVER and TIMER (the addresses an earlier window printed) skip the search of the task's memory.
+//   timing shmem R = [D+0x4c0]: +0x28/+0x30 the phase reference times, +0x38 its period (IOMFBDisplay::timing_reference; zero = no
+//     reference: the timer runs at its own phase, not the panel's)
+//   D+0x448..0x450 CA's FrameInfo records awaiting frame info (count, the oldest's swap id), D+0x9f2 flags (bit 35: records are kept)
+// A line: "t TICKS tick T thr THR next NEXT idle N cant C ring H/T/N dl DEADLINE ref R28 R30 R38 fi COUNT ID flags F" (host ticks, 19.2 MHz; NEXT in CA s).
+static int readq(mach_port_t task, uint64_t a, void *out, size_t n) {
+  mach_vm_size_t got = 0;
+  return mach_vm_read_overwrite(task, a, n, (mach_vm_address_t)out, &got) || got != n;
+}
+static int watch_ca(int pid, double seconds, int us, uint64_t S, uint64_t T) {
+  mach_port_t task = MACH_PORT_NULL;
+  if (task_for_pid(mach_task_self(), pid, &task)) { printf("task_for_pid(%d) failed\n", pid); return 1; }
+  struct task_dyld_info info; mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT; uint64_t slide = 0;
+  struct dyld_all_image_infos all;
+  if (!task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &count) && !readq(task, info.all_image_info_addr, &all, sizeof all))
+    slide = all.sharedCacheSlide;
+  // The two server vtables (IOMFBServer's address point, the other class's) and both two slots earlier, in case the address point is
+  // there; every object found is printed with its last tick, and the one with the newest tick (the live display's server) is watched.
+  const uint64_t vt[4] = {0x1d5b29c28ULL + slide, 0x1d5b39ee0ULL + slide, 0x1d5b29c18ULL + slide, 0x1d5b39ed0ULL + slide};
+  uint64_t D = 0;
+  if (S && (readq(task, S + 0x60, &D, 8) || !D)) S = 0;   // a server address from an earlier window: still valid?
+  if (S) printf("server %#llx (given) display %#llx\n", (unsigned long long)S, (unsigned long long)D);
+  const int given = S != 0;
+  if (!S) T = 0;
+  mach_vm_address_t addr = 0; mach_vm_size_t size = 0;
+  enum { kChunk = 1 << 20 };
+  uint64_t *buf = malloc(kChunk), best = 0;
+  unsigned found = 0;
+  for (; !given;) {
+    vm_region_basic_info_data_64_t bi; mach_msg_type_number_t bc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(task, &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &bc, &obj)) break;
+    if ((bi.protection & VM_PROT_WRITE) && !(addr - slide >= 0x180000000ULL && addr - slide < 0x200000000ULL))
+      for (mach_vm_size_t o = 0; o < size; o += kChunk) {
+        const size_t n = size - o < kChunk ? (size_t)(size - o) : kChunk;
+        if (readq(task, addr + o, buf, n)) continue;
+        for (size_t i = 0; i < n / 8; ++i) {
+          int k = -1;
+          for (int v = 0; v < 4; ++v) if (buf[i] == vt[v]) k = v;
+          if (k < 0) continue;
+          const uint64_t at = addr + o + i * 8;
+          uint64_t d = 0, tick = 0;
+          if (readq(task, at + 0x60, &d, 8) || !d) continue;
+          readq(task, at + 0x2e0, &tick, 8);
+          if (found++ < 16) printf("candidate %#llx vtable %c display %#llx tick %llu\n", (unsigned long long)at, "abcd"[k], (unsigned long long)d, (unsigned long long)tick);
+          if (!S || tick > best) { S = at; D = d; best = tick; }
+        }
+      }
+    addr += size;
+  }
+  free(buf);
+  if (found) printf("server %#llx display %#llx (of %u candidates)\n", (unsigned long long)S, (unsigned long long)D, found);
+  if (!S) { printf("no IOMFBServer found (slide %#llx)\n", (unsigned long long)slide); return 1; }
+  uint64_t f[0x80];
+  if (T) printf("timer %#llx (given)\n", (unsigned long long)T);
+  else if (!readq(task, S, f, sizeof f))
+    for (int i = 0; i < 0x80 && !T; ++i) {
+      uint64_t iv = 0;
+      if (f[i] > 0x100000000ULL && !readq(task, f[i] + 0xd8, &iv, 8) && iv > 268800 && iv < 384000) { T = f[i]; printf("timer %#llx at server+%#x interval %llu\n", (unsigned long long)T, i * 8, (unsigned long long)iv); }
+    }
+  uint64_t R = 0;   // the display's timing shmem (D+0x4c0): the phase reference IOMFBDisplay::add_timing keeps (fed only by frame info)
+  if (!readq(task, D + 0x4c0, &R, 8) && R) printf("timings %#llx\n", (unsigned long long)R);
+  struct { uint64_t tick, thr, idle, dl, r0, r1, r2, fin, flags; double next; uint32_t cant, h, t, n, fid; } prev = {0}, cur;
+  const uint64_t end = mach_absolute_time() + (uint64_t)(seconds * 19200000.0);
+  unsigned lines = 0;
+  while (mach_absolute_time() < end) {
+    uint8_t sb[0x60]; uint32_t db[3];
+    memset(&cur, 0, sizeof cur);
+    if (readq(task, S + 0x2b0, sb, sizeof sb)) break;
+    memcpy(&cur.next, sb, 8); memcpy(&cur.thr, sb + 0x28, 8); memcpy(&cur.tick, sb + 0x30, 8);
+    uint32_t idle; memcpy(&idle, sb + 0x58, 4); cur.idle = idle;
+    if (!readq(task, D + 0x258, &cur.cant, 4) && !readq(task, D + 0x358, db, sizeof db)) { cur.h = db[0]; cur.t = db[1]; cur.n = db[2]; }
+    if (T) readq(task, T + 0xe0, &cur.dl, 8);
+    uint64_t fv[2], fp = 0;   // CA's per-swap FrameInfo records (D+0x448 begin, +0x450 end; record +0: its swap id) and D+0x9f2's flags
+    if (!readq(task, D + 0x448, fv, sizeof fv) && fv[1] >= fv[0] && fv[1] - fv[0] < 0x10000) {
+      cur.fin = (fv[1] - fv[0]) / 8;
+      if (cur.fin && !readq(task, fv[0], &fp, 8) && fp) readq(task, fp, &cur.fid, 4);
+    }
+    readq(task, D + 0x9f2, &cur.flags, 8);
+    uint64_t rb[3];
+    if (R && !readq(task, R + 0x28, rb, sizeof rb)) { cur.r0 = rb[0]; cur.r1 = rb[1]; cur.r2 = rb[2]; }
+    if (memcmp(&cur, &prev, sizeof cur)) {
+      printf("t %llu tick %llu thr %llu next %.6f idle %llu cant %u ring %u/%u/%u dl %llu ref %llu %llu %llu fi %llu %u flags %#llx\n", (unsigned long long)mach_absolute_time(),
+             (unsigned long long)cur.tick, (unsigned long long)cur.thr, cur.next, (unsigned long long)cur.idle, cur.cant, cur.h, cur.t, cur.n,
+             (unsigned long long)cur.dl, (unsigned long long)cur.r0, (unsigned long long)cur.r1, (unsigned long long)cur.r2,
+             (unsigned long long)cur.fin, cur.fid, (unsigned long long)cur.flags);
+      prev = cur; ++lines;
+    }
+    usleep((useconds_t)us);
+  }
+  printf("watch-ca: %u lines over %.1f s\n", lines, seconds);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   if (argc >= 2 && !strcmp(argv[1], "--scan"))
@@ -406,12 +509,14 @@ int main(int argc, char **argv) {
     return cgdraw(f, argc > 3 ? atoi(argv[3]) : 256, argc > 4 ? atoi(argv[4]) : 256);
   }
   if (argc >= 3 && !strcmp(argv[1], "--images")) return images(atoi(argv[2]), argc > 3 ? argv[3] : NULL);
+  if (argc >= 4 && !strcmp(argv[1], "--watch-ca")) return watch_ca(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 200,
+                                                                       argc > 5 ? strtoull(argv[5], NULL, 0) : 0, argc > 6 ? strtoull(argv[6], NULL, 0) : 0);
   if (argc >= 4 && !strcmp(argv[1], "--sample")) return sample(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 100, argc > 5 && !strcmp(argv[5], "all"));
   if (argc >= 2 && !strcmp(argv[1], "--share")) {
     uint32_t f = 'BGRA';
     if (argc > 4 && strlen(argv[4]) == 4) f = (uint32_t)argv[4][0] << 24 | (uint32_t)argv[4][1] << 16 | (uint32_t)argv[4][2] << 8 | (uint32_t)argv[4][3];
     return share(argc > 2 ? atoi(argv[2]) : 256, argc > 3 ? atoi(argv[3]) : 256, f);
   }
-  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER] | --sample PID SECONDS [HZ [all]]\n");
+  fprintf(stderr, "usage: fjsurface --scan [MAXID] [MINBYTES] | --dump ID FILE | --share [W H [FOURCC]] | --cg FOURCC [W H [CGBITMAPINFO]] | --images PID [FILTER] | --sample PID SECONDS [HZ [all]] | --watch-ca PID SECONDS [US [SERVER [TIMER]]]\n");
   return 2;
 }

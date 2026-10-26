@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gfx-scene.py OUT.json [--cpu NAME,...] [--settle S] [--tool PATH] STEP...: run one scene of the gfx suite on the held session and
+"""gfx-scene.py OUT.json [--cpu NAME,...] [--settle S] [--tool PATH] [--cawatch FJSURFACE] STEP...: run one scene of the gfx suite on the held session and
 record everything the analyzer (tools/gpu/gfx-report.py) needs, in one JSON file.
 
 Steps (run in order; touch coordinates are panel pixels, 2x the half-resolution screenshot's):
@@ -22,6 +22,9 @@ Recorded (all times in us of the mach clock, the kernel log's):
   cpu      `ngpu-metal cpu` windows back to back over the scene (--cpu: the processes whose threads are shown; --tool: the binary,
            default /private/var/ngpu/sbin/ngpu-metal): per core, per process, per thread with run/wait shares
   counters display and hand-off counters before and after (offers, completions, reclaimed, retire_lost, flips), kcmd gpu status
+  ca       (--cawatch, instead of cpu: the userland agent runs one command at a time) the render server's display-timer state,
+           `fjsurface --watch-ca` windows back to back: each change of its last tick, vbl threshold, next update, idle countdown,
+           can_update failures, swap ring and timer deadline (raw lines; tools/gpu/ca-timer.py classifies every tick)
 A ring that wrapped during the scene (more entries than it holds) is reported in the JSON's "overflow" and on stderr, never dropped
 silently. Env: KM (the running kernel's kernel.macho for the symbols; default the build output), FAJITA_USBDBG_HUB (hub socket)."""
 import json
@@ -120,7 +123,11 @@ COUNTERS = [('latch_n', 'fajita_dpu_latch_n', 0, 4), ('vsync_n', 'fajita_dpu_vsy
             ('flips_refused', 'fajita_dpu_flips', 2, 4), ('scanned_writes', 'fajita_dpu_flips', 3, 4),
             ('gpu_fallbacks', 'native_legacy_gpu_fallbacks', 0, 4), ('copies', 'native_legacy_copy_n', 0, 8),
             ('slot_busy', 'native_adreno_submit_backpressure', 0, 4), ('ring_full', 'native_adreno_submit_backpressure', 1, 4),
-            ('peak_jobs', 'native_adreno_submit_backpressure', 2, 4)]
+            ('peak_jobs', 'native_adreno_submit_backpressure', 2, 4),
+            ('fi_sent', 'native_legacy_frame_info', 0, 4), ('fi_clients', 'native_legacy_frame_info', 1, 4),
+            ('fi_failed', 'native_legacy_frame_info', 2, 4), ('fi_noclient', 'native_legacy_frame_info', 3, 4),
+            ('fi_id_differs', 'native_legacy_frame_info', 4, 4), ('fi_last_id', 'native_legacy_frame_info', 5, 4),
+            ('fi_leaf292', 'native_legacy_frame_info_leaf', 0, 4), ('fi_leaf211', 'native_legacy_frame_info_leaf', 1, 4)]
 
 
 def counters():
@@ -233,6 +240,37 @@ class CpuSampler(threading.Thread):
                 time.sleep(0.5)
 
 
+class CaWatcher(threading.Thread):
+    """`fjsurface --watch-ca PID WINDOW` back to back until stopped; the first window finds the server and timer, later ones reuse them."""
+
+    def __init__(self, tool, window=3.0):
+        super().__init__(daemon=True)
+        self.tool, self.window, self.stop, self.lines, self.errors, self.server, self.timer = tool, window, False, [], [], '', ''
+
+    def run(self):
+        ok, ps = hub('run', '/usr/sbin/ngpu-metal', 'ps', timeout=15)
+        pid = next((l.split()[0] for l in ps.splitlines() if len(l.split()) > 1 and l.split()[1] == 'backboardd'), None)
+        if not pid:
+            self.errors.append('no backboardd in ps')
+            return
+        while not self.stop:
+            args = [self.tool, '--watch-ca', pid, '%.1f' % self.window, '200'] + ([self.server] if self.server else []) + \
+                   ([self.timer] if self.server and self.timer else [])
+            ok, out = hub('run', *args, timeout=int(self.window) + 30)
+            for l in out.splitlines():
+                m = re.match(r'server (0x[0-9a-f]+)', l)
+                if m:
+                    self.server = m.group(1)
+                m = re.match(r'timer (0x[0-9a-f]+)', l)
+                if m:
+                    self.timer = m.group(1)
+                if l.startswith('t '):
+                    self.lines.append(l)
+            if not self.server:
+                self.errors.append(out.strip()[:200])
+                return
+
+
 def main():
     a = sys.argv[1:]
     if not a or a[0] in ('-h', '--help'):
@@ -240,7 +278,7 @@ def main():
         return 2
     out = a.pop(0)
     global fjbundle
-    settle, cpu_names, tool = 1.0, ['backboardd'], '/private/var/ngpu/sbin/ngpu-metal'
+    settle, cpu_names, tool, cawatch = 1.0, ['backboardd'], '/private/var/ngpu/sbin/ngpu-metal', None
     while a and a[0].startswith('--'):
         o = a.pop(0)
         if o == '--settle':
@@ -249,6 +287,8 @@ def main():
             cpu_names = [x for x in a.pop(0).split(',') if x]
         elif o == '--tool':
             tool = a.pop(0)
+        elif o == '--cawatch':
+            cawatch = a.pop(0)
         elif o == '--fjbundle':
             fjbundle = a.pop(0)
         else:
@@ -258,7 +298,7 @@ def main():
     c0 = counters()
     ok, p = hub('kcmd', 'gpu', 'perf', 'begin', timeout=10)
     rec['perf_begin'] = p.strip()
-    sampler = CpuSampler(tool, cpu_names) if tool != 'none' else None
+    sampler = CaWatcher(cawatch) if cawatch else CpuSampler(tool, cpu_names) if tool != 'none' else None
     if sampler:
         sampler.start()
         time.sleep(0.3)   # the first window is open before the first gesture
@@ -321,9 +361,12 @@ def main():
     ok, g = hub('kcmd', 'gpu', 'gov', timeout=10)
     rec['gov_status'] = g.strip()
     if sampler:
-        sampler.join(timeout=30)
-        rec['cpu'] = sampler.windows
-        rec['cpu_errors'] = sampler.errors
+        sampler.join(timeout=40)
+        if cawatch:
+            rec['ca'], rec['ca_errors'], rec['ca_server'] = sampler.lines, sampler.errors, sampler.server
+        else:
+            rec['cpu'] = sampler.windows
+            rec['cpu_errors'] = sampler.errors
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     json.dump(rec, open(out, 'w'))
     lat = rec.get('latch', [])

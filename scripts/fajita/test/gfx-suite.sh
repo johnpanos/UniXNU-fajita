@@ -8,6 +8,8 @@
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
 # DIAG=1 (measure with a diagnostic in gpu-env anyway, the report marked DIAG), WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
+# PLAN_S/FORCE=1 (the run's planned length against the session's remaining autoreset time, see below),
+# CAWATCH=1 (the render server's display timer per scene, fjsurface --watch-ca, instead of the CPU windows: tools/gpu/ca-timer.py),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -17,7 +19,7 @@ TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
 W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}; OUTD=${FAJITA_OUT:-$BOARD/.cache/fajita-out}
 SS=$TD/session.sh; H=$TD/hc
 export KM=${KM:-$OUTD/unixnu/fajita-ios16/kernel/kernel.macho}
-usage() { sed -n 2,13p "$0"; exit 2; }
+usage() { sed -n 2,15p "$0"; exit 2; }
 [ $# -ge 1 ] || usage
 
 if [ "$1" = ab ]; then
@@ -39,6 +41,22 @@ $TD/gpu-status.sh >/dev/null; [ $? -eq 2 ] && { echo "gfx-suite: no run holds th
 [ -f "$KM" ] || { echo "gfx-suite: no kernel $KM (KM=)"; exit 1; }
 log() { echo "[$(date +%T)] $*" | tee -a $O/suite.log; }
 : > $O/suite.log
+# The session's own end: a --test image resets itself sheng-autoreset s after XNU booted (wifi-test.sh: WIFI_AUTORESET, default 900), and a
+# suite that runs past it measures a dead phone (b0final, 2026-10-26: reset at 15:30, the rest of the scenes ran against fastboot). The
+# remaining time is printed and a run planned longer than that is refused (PLAN_S, default 45 s a scene x REPEAT + 240 s of warm-up and
+# settling; FORCE=1 runs anyway); before every scene the cycle is checked and the suite stops when it ended.
+SESS=$(cat $W/session.current 2>/dev/null); CYC=$W/logs/$SESS/cycle.txt
+session_end() { grep -aE '^\[[0-9:]+\] RESULT:|back in fastboot' "$CYC" 2>/dev/null | head -1; }
+OUTK=${KM%/unixnu/*}; AR=$(grep -o 'sheng-autoreset=[0-9]*' "$OUTK/build.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+BOOTT=$(grep -a -m1 'XNU booting' "$CYC" 2>/dev/null | grep -o '[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}')
+nsc=$(echo $SCENES | wc -w); PLAN=${PLAN_S:-$(( nsc * ${REPEAT:-1} * 45 + 240 ))}
+if [ -n "$AR" ] && [ -n "$BOOTT" ]; then
+  left=$(( $(date -d "$BOOTT" +%s) + AR - $(date +%s) ))
+  log "session $SESS: booted $BOOTT, autoreset $AR s: ${left} s left, this run needs about $PLAN s"
+  [ $left -lt $PLAN ] && [ "${FORCE:-0}" != 1 ] && { log "!! the session resets in $left s, before this run ($PLAN s) can finish: boot with WIFI_AUTORESET (or FAJITA_AUTORESET) larger, or FORCE=1"; exit 1; }
+else
+  log "session $SESS: autoreset unknown (no sheng-autoreset in $OUTK/build.txt or no boot time in $CYC)"
+fi
 
 # 1. Tools on the phone, under names that change with their contents.
 push_tool() {   # push_tool NAME -> prints the phone path
@@ -49,6 +67,7 @@ push_tool() {   # push_tool NAME -> prints the phone path
 }
 NGPU=$(push_tool ngpu-metal) || exit 1
 FJB=$(push_tool fjbundle) || exit 1
+CAW=(); if [ "${CAWATCH:-0}" = 1 ]; then FJS=$(push_tool fjsurface) || exit 1; CAW=(--cawatch "$FJS"); fi
 T=20 $SS run $NGPU cpu 0.2 backboardd 2>&1 | grep -q "cpu over" || { echo "gfx-suite: !! $NGPU cpu does not run"; exit 1; }
 log "tools: $NGPU $FJB"
 
@@ -121,7 +140,7 @@ m['diag']=' '.join(l.strip() for l in open('$O/start.txt') if l.startswith('DIAG
 # 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
 scene() {   # scene NAME CPU-PROCS STEP...
   local name=$1 procs=$2; shift 2
-  python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "$@" 2>&1 | tee -a $O/suite.log
+  python3 -I $TD/gfx-scene.py $O/$name.json --cpu "$procs" --tool $NGPU --fjbundle $FJB "${CAW[@]}" "$@" 2>&1 | tee -a $O/suite.log
   # A background process that took over BUSY_PCT (40) % of a core in the scene's last CPU windows and still does: sample it now
   # (proc-sample.sh, 3 s) into SCENE-sample-NAME.txt, so a daemon spinning beside the scene is named with its stacks (SAMPLE=0: off).
   [ "${SAMPLE:-1}" = 1 ] || return 0
@@ -163,7 +182,10 @@ run_scene() {   # run_scene SCENE SUFFIX
 }
 for r in $(seq 1 ${REPEAT:-1}); do
   sfx=""; [ $r -gt 1 ] && sfx=-r$r
-  for s in $SCENES; do log "scene $s$sfx"; run_scene $s "$sfx"; done
+  for s in $SCENES; do
+    e=$(session_end); [ -n "$e" ] && { log "!! session $SESS ended at $(grep -o '[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}' <<<"$e" | head -1) (autoreset?): $e -- stopping, scenes from $s$sfx on not measured"; exit 1; }
+    log "scene $s$sfx"; run_scene $s "$sfx"
+  done
 done
 home
 

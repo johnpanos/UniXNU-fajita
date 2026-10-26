@@ -172,6 +172,7 @@ drifts (retire-to-vsync spread over 0-16 ms), so a little jitter turns into a mi
 | CA_FORCE_TIMER=1 (CADeviceUseVBL) | hw vsync counters | no vsync client registers either way; CA keeps its own display timer |
 | 59.94 Hz IOMFBDisplayRefresh (fajita-refresh-us) | pending a same-build A/B | CA's swap period median 16.65 ms with or without it |
 | job ring back-pressure (43c46a6's retry) | kernel counters per scene | 0 refused submissions in every scene (8 of 8 outstanding reached without a refusal): not a bottleneck |
+| frame info to the render server (Presentation_time, Vbl_FrameTime per latched frame; d6763c9, fajita-frame-info) | same build, boot arg off/on (fi0/fi1), 5 scenes x2 | works (CA asks SupportedFrameInfo, registers the type-3 source; every latch delivered) but no measurable change: >16.7 and >33 within noise, no phase lock in the retire-to-frame-start histogram. Not merged |
 
 ### Background CPU (a CPU bottleneck beside the scenes)
 
@@ -180,3 +181,158 @@ healthappd 59-139% and healthd 22-59% (b0's applib-r2 at 37 fps against 48.6 on 
 scenes on two boots, mobileassetd 63-98% and kbd 40-50% when the App Library first opens, mediaserverd 58-97% on www.apple.com (its
 video, decoded on the CPU), CalendarWidgetExtension 25-72%, ReportCrash after an app crash, Spotlight 37-54% in Maps. The suite now
 samples any background process over 40% after a scene (proc-sample.sh: thread stacks, symbolized against the shared cache).
+
+### CA's display timer (static model, QuartzCore 20H392; to be measured with `--cawatch`)
+
+Read with `tools/crash/dsc-disasm.py --syms --strings QuartzCore.framework/QuartzCore OFF N` (offsets image-relative; S = the
+IOMFBServer, D = its IOMFBDisplay at S+0x60, T = the `_CADisplayTimer`).
+
+- **The timer** is a Mach timer on its own port (`display_timer_callback` +0x36cc8, a CFMachPort callback on the render server's
+  display thread). Each firing: now = mach_absolute_time; with D' = T+0xe0 (this firing's deadline) and I = T+0xd8 (the interval),
+  if 0 <= now - D' <= I it re-arms at align(D' - slack) + I (`get_phase` against the timing reference, `mk_timer_arm_leeway`,
+  leeway 0) **before** calling the client, and passes D' as the tick time. A firing more than one interval late (the previous
+  callback ran > 2 I) re-phases from now (D' := now or now - I) and the skipped deadlines are gone: the LATE class.
+- **The client is the renderer itself.** `IOMFBServer::timer_callback` (+0xccb24) aligns the phase (`_CADisplayTimerAlignPhase`
+  with `IOMFBDisplay::timing_reference`) and tail-calls `IOMFBServer::vsync_callback(fb = NULL, frame#, T, I, S)` (+0x361ec), which
+  calls `Server::render_for_time` synchronously on the same thread. So a frame's whole CPU side (prepare, encode, the commit wait
+  for translation) runs on the timer thread; a frame over one interval makes the next callback late (still the next deadline), a
+  frame over two loses ticks.
+- **Gates in vsync_callback, in order:** S+0x2e0 := T (every tick); if S+0x2d8 (the vbl threshold) > T the tick is dropped
+  (S+0x30d |= 1): THRESHOLD. Otherwise, with S+0x2b0 the next update time (a double in CA time; inf when nothing is due): if inf,
+  the idle countdown S+0x308 drops by one and at 0 the timer stops (`set_vsync_disabled`); if the next update is later than T + I
+  (the frame this tick would show), CA only collects (`Render::collect`): NOTDUE. Else S+0x2b0 := inf and render_for_time(T + I).
+- **The threshold** (`IOMFBServer::update_vbl_threshold` +0x27d464, vtable +0x1c0) = t + max(vbl_delta, flag ? 4 frames : 0),
+  vbl_delta = one panel period (`IOMFBServer::vbl_delta` +0x27c9e0, display vtable +0x2d0). render_for_time sets it at the end of
+  a frame: on the timer path (arg 5 = 0) only when `CADisplayEnableAllQuantaMultiples`, to target - half a period (harmless); on the
+  **immediate path** (arg 5 = 1, `IOMFBServer::immediate_render`'s block +0x27d52c, entered from `Server::context_changed` +0x4ba18
+  when a client's commit asks for an immediate update) to **now + one period**: an immediate render just after a tick drops the next
+  tick, the classic 2-tick gap with nothing slow anywhere.
+- **can_update** (`IOMFBDisplay::can_update` +0xa1804 -> `can_update_` +0x3a944) walks CA's swap ring (D+0x358 head, +0x35c tail,
+  +0x360 count, capped at 2 in flight; 0x30-byte entries from D+0x3a8, swap id at +0x3c0) and frees each entry whose swap
+  `IOMobileFramebufferSwapWait` (or `swap_wait_timeout`, by the CADeviceUseVBL flag) reports done; when none is free the frame is
+  refused and D+0x258 counts it: CANT. With our display handing the presenter one swap at a time and the retire ~2 ms before a
+  vsync, a frame whose previous swap retires after the tick waits a whole period here.
+- **The phase reference**: `IOMFBDisplay::timing_reference` (+0x3840c) reads CA's own timing shmem (D+0x4c0, made by
+  `initialize_timings`: +0x28/+0x30 reference times, +0x38 period); zero means no reference and the timer free-runs at its own
+  phase (the drifting retire-to-vsync phase seen in b0). It is fed only by `IOMFBDisplay::add_timing` (+0x2b933c), called only from
+  `IOMFBServer::frame_info_callback` (+0x386d4), and only after `IOMFBDisplay::collect_frame_info(swap_id)` (+0x3b880) finds CA's
+  record of that swap: an exact match on the swap id CA got from the swap (records with lower ids are discarded). d6763c9's frame
+  info sent the family's completed generation as the id; if that is not CA's swap id every record misses and add_timing never
+  runs, which would explain fi1's "works but no phase lock". To check with `--cawatch` (the `ref` fields) before any rework.
+- **CADeviceUseVBL** (`___CADeviceUseVBL_block_invoke` +0xe90e4): CA_FORCE_TIMER (nonzero) or a ChipID in {0x7000, 0x7001, 0x8000,
+  0x8001, 0x8002, 0x8003, 0x8004, 0x8010} sets the flag (0x8015, the iPhone X we present as, does not); it is read once, when
+  IOMFBServer/EAGLServer and AppleDisplay are built, which is before the GPU plugin's gpu-env setenv: that is why CA_FORCE_TIMER
+  in gpu-env had no effect. Experiment (approved, default off, not for landing without numbers): boot-arg `fajita-ca-force-timer=1`
+  (patches/xnu/zzt-fajita-ca-force-timer.patch) gives backboardd alone CA_FORCE_TIMER=1 at exec. Its effects (static): S+0x30d bit
+  1, D+0x220 bit 5, SwapWait instead of swap_wait_timeout in can_update_, and set_next_update's generic Server path when no IOMFB
+  vsync source is registered (S+0x268).
+
+**Measuring it:** `gfx-scene.py --cawatch /private/var/ngpu/sbin/fjsurface-SHA ...` records `fjsurface --watch-ca` (S, D, T and the
+timing shmem polled every 200 us, found by S's vtable pointer) in place of the CPU windows; `tools/gpu/ca-timer.py SCENE.json`
+classifies every tick (RENDER, CANT, THRESHOLD, NOTDUE, IDLE, LATE), lists each 2+ tick gap between renders with its ticks'
+classes and the retire ring around it, says whether the phase reference was ever set and histograms the ticks' phase against the
+panel's rd_ptr ring. Pending a free phone (the daemons agent's Data reset).
+
+### Ready for the phone (after the Data reset: prime-done, REBASE, new settled b0 first)
+
+| item | build / how | host evidence | on the phone |
+| --- | --- | --- | --- |
+| CA timer gates and phase reference | any build; `CAWATCH=1 gfx-suite.sh` (or gfx-scene.py --cawatch), `tools/gpu/ca-timer.py` | static model above | which gate makes each 2-tick gap; whether frame info ever sets the phase reference |
+| CA_FORCE_TIMER (CADeviceUseVBL) experiment | gfx 33d12c3 kernel (.cache/fajita-out); boot-arg `fajita-ca-force-timer=1` vs off, same build | patch in the kernel (strings present) | A/B REPEAT=2 against the new b0; landing needs the lead's approval |
+| metal2vulkan draw-cost (johnpanos/metal2vulkan draw-cost f35f75b1 = 1ff8f4b3 + bench fix) | stack f6ad4e9 (fork fajita-gfx-m2v; NativeMetal gfx-m2v 3d54a97: two bridge patches refreshed), payload in .cache/fajita-out-m2v (built rc 0 from board 33d12c3) | encode bench STEADY=1 (lavapipe, callgrind): 35333 -> 34357 instructions per draw (-2.8%), 19.5 -> 10.8 allocations per draw | frame-trace commit wait per draw, REPEAT=2 against b0 |
+| frame info with CA's swap id | same 33d12c3 kernel: `fajita-frame-info=0` (ios16-port behaviour), `1` (default here), `2` | swap_wait_gated: generation and request +788 share numbering | fi_id_differs, CA's FrameInfo records in --cawatch, phase reference set or not |
+| CA frame capture for the host replay | `ca-capture.sh [FRAMES [SKIP]]` (needs fajita-ssh=1) | - | pulls backboardd's command buffers over Wi-Fi, builds frames.json for command-replay |
+
+### Frame info with CA's exact swap id (fajita-frame-info=2)
+
+swap_wait_gated (the original family, 20H392) waits for a swap by comparing the waited id with the display's completed
+generation (+5220) and the current request's own id (request +788, `ldr w8, [x8, #0x314]` at 0xfffffff004c114b4): the request's
+word at +788 is the id SwapBegin gave CA, and the completed generation follows the same numbering. So mode 1 (the generation at
+the latch) should mostly carry the right id already; mode 2 sends the id read from the request that completed last (read in
+finishTransfer before completeCurrentSwap), qualified in build-native-legacy-display.py (swap_id=788, swap_id_checks), and counts
+in native_legacy_frame_info[4] the frames where the two differ ([5]: the last id sent; gfx-scene records them as fi_*). If they
+never differ, the missing phase lock has another cause: `--cawatch` now also reads CA's FrameInfo records (D+0x448..0x450, the
+oldest's id) and D+0x9f2's flags (bit 35: finish_update keeps a record per swap only when set). Records that pile up = ids never
+match; no records = CA keeps none, and frame info is ignored whatever its id. Arms by boot arg on one kernel: fajita-frame-info=0
+(as ios16-port), 1, 2; fajita-ca-force-timer=0/1.
+
+### Two swaps in flight (design, not coded)
+
+Today the display hands the presenter one swap at a time: the next offer waits for this one's COMPLETE_SWAP and retire (in flip
+mode the retire is at the DPU latch unless retireEarly), so swap N+1's copy is committed only after N's round trip, even though
+CA's ring (`can_update_`, two entries) already has N+1 submitted. Accepting a second in-flight swap needs:
+- **Presenter (NativeGOPPresenter):** the single `Swap swap` becomes a FIFO of two entries, each with offered/delivered, sequence,
+  target, deliveredTask and deliveredAt. waitSwap delivers the oldest offered-undelivered entry; completeSwap matches by sequence and
+  must complete in order (a later one finishing first is held). freeTarget must also exclude the targets of delivered-uncompleted
+  entries. With three scan-out buffers (front, pending flip, queued) a second copy has a target only while no flip is pending: full
+  pipelining wants a fourth buffer (10.1 MB at 1080x2340) or the second offer is refused when no target is free (then it behaves
+  as today).
+- **Display (NativeLegacyDisplay):** `gpuRequest` and the `transferred` latch become a two-entry in-flight list; kickSwapQueue offers
+  the request behind the one in flight (the family's pending head stays N; N+1 is found through NATIVE_LEGACY_REQUEST_NEXT); a
+  finishTransfer for N+1 that arrives before N's (a failed GPU copy of N falling back to the CPU) waits until N is completed, because
+  activateOnlyPendingSwap only completes the pending head.
+- **The frozen-screen fixes (11232f7, 8a71b82):** both rely on one latch. With two in flight: a client that died takes both requests
+  (each finishTransfer then takes the why==1 path: drop, count, and kick only when nothing else is in flight); the presenter's
+  reclaim must fail every entry delivered to the dead task, oldest first, so the display completes them in order; a reclaimed
+  entry's target is freed with it. The "keep the latch set while completion can reenter" rule becomes "no new offer while a
+  completion is running".
+- **What it can buy:** only the gap between N's retire and N+1's offer (COMPLETE_SWAP ~1 ms, the kick and the presenter's wake); the
+  copy still waits on the GPU for CA's own N+1 work (offer -> copy start 7.7 ms today is mostly that). Worth it only if the CAWATCH
+  pass shows CANT ticks whose previous retire lands within a couple of ms after the tick. About 150-200 lines across two drivers with
+  the wedge invariants above: not small, so not coded until the watcher says CANT is a real share of the gaps.
+
+### Watcher check (session-144333, fresh Data before the final reset, home swipes, fajita-frame-info=1)
+
+- `--watch-ca` finds 4 server objects (all of the second vtable class); the live one (newest tick) ticks every 320352 ticks
+  (16.685 ms), its timer's deadline one interval ahead, next update 0 at a commit and inf at the render, the swap ring turning.
+- **Frame info is ignored, whatever its id:** CA keeps no FrameInfo records (D+0x9f2 bit 35 clear, flags 0x8407c20801), so
+  collect_frame_info finds nothing and add_timing never runs: the phase reference stays 0. The display sent 294 frame infos to a
+  registered client with ids equal to the generation (fi_id_differs 0). fajita-frame-info=2 cannot change that; what sets bit 35
+  is the next question (finish_update keeps a record only then).
+- Ticks sit in one phase bin against the panel's rd_ptr (330 of 414 in bin 3) over this 20 s scene: the 59.94 Hz timer and the
+  panel run at nearly the same period, so the drift is slow, not absent.
+- One home scene, 414 ticks: RENDER 305, IDLE 78, LATE 15 (the render on the timer thread ran past the next tick), CANT 10, STOPPED
+  6 (the timer had stopped while idle). Of the 22 gaps of 2+ ticks between renders, 15 are LATE and 10 have a CANT tick; most CANT
+  ticks have the previous swap retiring 1.0-1.4 ms after the tick (the two-swaps case).
+- **Why CA ignored frame info (found from the check):** EAGLServer's constructor sets IOMFBDisplay::set_frame_info_enabled from
+  `IOMobileFramebufferFrameInfo(fb, callback, server, 1) == 0`; that call registers the type-3 notification and sends
+  ChangeFrameInfo (selector 73), whose backend slots (292 at registration, 211 for ChangeFrameInfo) were guarded leaves returning
+  kIOReturnUnsupported (console: UNIMPLEMENTED SLOT 292, then 211, at 163 s). So the call failed and CA disabled frame info for the
+  boot, while the display kept delivering it to the registered client. With frame info on, both slots now return success
+  (native_legacy_frame_info_leaf counts them; gfx-scene records fi_leaf292/fi_leaf211). That is what fi1 and fi2 test now; d6763c9's
+  null result predates it.
+
+## Final-Data baseline and arms (2026-10-26, Data after the daemons agent's reset, ios16-port 4dc7801 merged, stack a5b51ef)
+
+**Blank web content:** on the final Data the plugin's m2v cache directory did not exist: the plugin made it with one mkdir of
+`~/Library/Caches/com.apple.backboardd`, whose parent chain a fresh Data store lacks in part, so every candidate after it was tried
+(temp directories). NativeMetal ec8c726 creates the whole path and logs the directory it used and why others were refused. With it
+(the b0 image) Safari draws news.ycombinator.com and apple.com fully; backboardd's cache is `/var/mobile/Library/Caches/
+com.apple.backboardd/m2v`, Safari's WebKit GPU process uses its container's tmp/m2v. The old-stand-ins A/B (sbxold) was not
+needed to make pages draw; whether the sandbox change alone blanked them is not proven either way.
+
+**b0 (b0f):** arm image .cache/fajita-out-gfx-b0 (fajita-frame-info=0, autoreset 3000 s), REPEAT=2, full suite, settled start
+(busiest other process 21% mobileassetd). ALL 7640 frames, 51.2 fps, 1% low 10.8, 0.1% low 6.3, >16.7 970, >33 142.
+
+**CAWATCH pass (cawatch-b0, b0 image, 9 scenes):** first cause of each 2+ tick gap between renders: LATE 178 (the render on the timer
+thread ran past the next tick: the CPU side of a frame over one period), NOTDUE 90 (a client's commit came after the tick), CANT 23,
+IDLE 11, THRESHOLD 0. Phase reference never set (frame info off); the timer's phase against the panel drifts from scene to scene.
+In web-heavy the timer's own interval was 22.9 ms (CA lowered the rate). So the 2-tick gaps are mostly render-server CPU time per
+frame and late client commits, not the swap hand-off.
+
+| arm (all on the final Data) | scenes | ALL fps | 1% low | 0.1% low | >16.7 | >33 |
+| --- | --- | --- | --- | --- | --- | --- |
+| b0 (frame info off) | all 9 x2, Wi-Fi | 51.2 | 10.8 | 6.3 | 970 | 142 |
+| fi1 (frame info, generation id, slots 292/211 answered) | all 9 x2, Wi-Fi | 50.6 | 10.3 | 6.6 | 942 | 181 |
+| fi2 (frame info, request swap id) | all 9 x2, Wi-Fi | 51.3 | 10.4 | 6.9 | 941 | 158 |
+| b0, offline five (home applib settings calendar maps x2) | 5 x2 of the Wi-Fi run | 49.5 | 10.4 | 6.5 | 647 | 69 |
+| fi1, offline five | 5 x2 of the Wi-Fi run | 49.7 | 10.0 | 6.9 | 595 | 80 |
+| fi2, offline five | 5 x2 of the Wi-Fi run | 49.8 | 9.8 | 6.7 | 595 | 76 |
+| timer (CA_FORCE_TIMER), offline five | 5 x2, NO Wi-Fi boot | 50.5 | 9.6 | 5.7 | 550 | 66 |
+| m2v (draw-cost translator), offline five | 5 x2, NO Wi-Fi boot | 52.2 | 10.9 | 6.0 | 433 | 58 |
+
+fi1/fi2: CA now registers frame info (slots 292 and 211 answered: 3 and 6 calls), fi2's id never differed from the generation; no
+measurable change, >33 slightly worse in fi1. timer and m2v could not join Wi-Fi (KittyCorner's 2.4 GHz BSS: SAE commits unanswered,
+a Wi-Fi agent owns it), so they ran the five offline scenes on boots without Wi-Fi: not full results, and a boot without Wi-Fi has
+less background work than b0's. Against b0's same scenes m2v has a third fewer frames over a vsync (433 vs 647) and +2.7 fps, and
+beats the timer arm booted the same way (550): the strongest candidate; the web scenes are to be rerun for both once Wi-Fi works.
