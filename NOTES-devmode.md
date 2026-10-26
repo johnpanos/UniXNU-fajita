@@ -37,6 +37,8 @@ Layout on the phone:
   `etc/profile` `etc/bashrc` `etc/authorized_keys` `etc/motd` `share/terminfo`. toybox applet links are made in `bin/` at start.
 - `/private/var/ssh/` state on persistent Data, root 0700: `dropbear_{ed25519,ecdsa,rsa}_host_key`, `authorized_keys`,
   `authorized_keys.local` (keys added on the phone, kept), `ssh.log` (supervisor + ssh-start), `dropbear.log` (connections).
+  A Data reset (`dreset=1`, done once on 2026-10-26, NOTES-daemons.md) drops this directory: the host keys are made anew on the next
+  SSH boot, so the phone's host key changes (remove the old entry from the host's known_hosts), and `authorized_keys.local` is gone.
 
 Start-up: launchd runs the debug agent as com.apple.wifid; with `fajita-wifid=1` its child keeps the USB channel while the job execs
 Apple's wifid. With `fajita-ssh=1` the agent (either path) forks an SSH supervisor (`package/usb-debug-tools/fjdbg-agent.c`,
