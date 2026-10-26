@@ -1,5 +1,10 @@
 // fjbundle --ls DIR...: list directories (iOS here has no ls); each prints its entry count and names.
 // fjbundle --stat PATH...: lstat/stat flags and open(2) results per path.
+// fjbundle --lookup [--ping] [--watch SUBSTR] SERVICE...: bootstrap_look_up each Mach service (a job disabled in launchd's overrides gives
+//   BOOTSTRAP_UNKNOWN_SERVICE 1102); --ping also sends it an empty XPC message and waits up to 3 s for any answer, which makes launchd
+//   start an on-demand job; --watch samples the process table every 20 ms meanwhile for an executable path containing SUBSTR (an
+//   on-demand job may exit again before ps sees it).
+// fjbundle --rm PATH...: unlink files, then rmdir directories (iOS here has no rm), each with its result.
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle: probe CFBundle's view of a framework, as WebKit's XPC service entry does it (CFBundleGetBundleWithIdentifier then
 // CFBundleGetFunctionPointerForName). Usage: fjbundle FRAMEWORK-BINARY-PATH BUNDLE-ID [SYMBOL]
@@ -9,16 +14,87 @@
 #include <dlfcn.h>
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <unistd.h>
+#include <mach/mach.h>
+// servers/bootstrap.h is not in the CI SDK
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_look_up(mach_port_t, const char *, mach_port_t *);
+#include <dispatch/dispatch.h>
+
+// libxpc (in libSystem); the connection constructor is marked unavailable on iOS in the SDK headers, so these are declared here.
+typedef void *fj_xpc_t;
+extern fj_xpc_t fj_xpc_create_mach_service(const char *, dispatch_queue_t, uint64_t) __asm__("_xpc_connection_create_mach_service");
+extern void xpc_connection_set_event_handler(fj_xpc_t, void (^)(fj_xpc_t));
+extern void xpc_connection_resume(fj_xpc_t);
+extern void xpc_connection_cancel(fj_xpc_t);
+extern fj_xpc_t xpc_dictionary_create(const char *const *, const fj_xpc_t *, size_t);
+extern void xpc_connection_send_message_with_reply(fj_xpc_t, fj_xpc_t, dispatch_queue_t, void (^)(fj_xpc_t));
+extern char *xpc_copy_description(fj_xpc_t);
+extern int proc_listallpids(void *, int);
+extern int proc_pidpath(int, void *, uint32_t);
+
+// The first process whose executable path contains `what`, or 0.
+static int find_process(const char *what) {
+  static int pids[4096]; char path[1024];
+  int n = proc_listallpids(pids, sizeof pids);
+  for (int i = 0; i < n && i < 4096; i++)
+    if (pids[i] > 0 && proc_pidpath(pids[i], path, sizeof path) > 0 && strstr(path, what)) return pids[i];
+  return 0;
+}
 
 extern int __getdirentries64(int, void *, size_t, off_t *);
 
 int main(int argc, char **argv) {
+  if (argc >= 3 && !strcmp(argv[1], "--rm")) {
+    int bad = 0;
+    for (int i = 2; i < argc; i++) {
+      struct stat st; int r = lstat(argv[i], &st) ? -1 : S_ISDIR(st.st_mode) ? rmdir(argv[i]) : unlink(argv[i]);
+      printf("%s: %s\n", argv[i], r ? strerror(errno) : "removed"); bad += r != 0;
+    }
+    return bad ? 1 : 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--lookup")) {
+    int at = 2, ping = 0, bad = 0; const char *watch = NULL;
+    for (; at < argc && !strncmp(argv[at], "--", 2); at++) {
+      if (!strcmp(argv[at], "--ping")) ping = 1;
+      else if (!strcmp(argv[at], "--watch") && at + 1 < argc) watch = argv[++at];
+    }
+    for (int i = at; i < argc; i++) {
+      mach_port_t port = MACH_PORT_NULL;
+      kern_return_t kr = bootstrap_look_up(bootstrap_port, argv[i], &port);
+      printf("%s: look_up %d%s", argv[i], kr, kr == 0 ? " (found)" : kr == 1102 ? " (unknown service: disabled or not loaded)" : "");
+      if (kr) bad++;
+      if (!kr && ping) {
+        dispatch_queue_t q = dispatch_queue_create("fjbundle.ping", NULL);
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        fj_xpc_t c = fj_xpc_create_mach_service(argv[i], q, 0);
+        xpc_connection_set_event_handler(c, ^(fj_xpc_t e) { (void)e; });
+        xpc_connection_resume(c);
+        char *answer = calloc(1, 160); strcpy(answer, "none");
+        xpc_connection_send_message_with_reply(c, xpc_dictionary_create(NULL, NULL, 0), q, ^(fj_xpc_t r) {
+          char *d = xpc_copy_description(r); snprintf(answer, 160, "%.150s", d ? d : "?"); free(d);
+          dispatch_semaphore_signal(done); });
+        long waited = 1; int seen = 0;
+        for (int tick = 0; tick < 150 && waited; tick++) {   // 3 s in 20 ms steps, sampling the process table for --watch
+          waited = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC));
+          if (watch && !seen) seen = find_process(watch);
+        }
+        if (watch) printf("; %s pid %d%s", watch, seen, seen ? " (ran)" : " (not seen)");
+        printf("; ping %s: %s", waited ? "no answer in 3 s" : "answered", answer);
+        xpc_connection_cancel(c);
+        if (!waited) free(answer);   // a late reply block may still write it otherwise
+      }
+      printf("\n");
+      if (port) mach_port_deallocate(mach_task_self(), port);
+    }
+    return bad ? 1 : 0;
+  }
   if (argc >= 3 && !strcmp(argv[1], "--ls")) {
     for (int i = 2; i < argc; i++) {
       DIR *d = opendir(argv[i]); int n = 0;

@@ -194,6 +194,9 @@ board_args = [
   # PMIC keys (power, volume up/down) as HID consumer usages through NativeHidInput's report 2; the battery as an IOPMPowerSource
   # (AppleSmartBattery) for powerd, from the bq27411 gauge on i2c10 (read only). NOTES-pmic.md.
   "fajita-pmic-keys=1","native-hid-buttons=1","fajita-pmic-batt=1","fajita-pmic-bq=2",
+  # The App cryptex (Cryptex1,AppOS, the third root window) at /private/preboot/Cryptexes/App (package/BootCryptexMount.c): Safari's history,
+  # bookmarks, inspector, fetcher, password and AutoFill daemons run from it. Needs the three-window userdata (scripts/fajita/userdata-windows.py).
+  "fajita-appos=1",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,

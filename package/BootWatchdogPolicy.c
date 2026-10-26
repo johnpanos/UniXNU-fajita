@@ -34,15 +34,20 @@ static const char lite_jobs[]=
  // keeps creating corpses for it ("Too many corpses"); syncdefaultsd (iCloud key-value sync, no account here) aborts the same way.
  "com.apple.aggregated,com.apple.syncdefaultsd,"
  // com.apple.fairplayd.H2 is the iPhone X label of the fairplayd job that is disabled above as .A2 (lookups of com.apple.fairplayd.versioned hung).
- "com.apple.fairplayd.H2";
+ "com.apple.fairplayd.H2,"
+ // webpushd's program is in the App cryptex, but with the cryptex mounted launchd still never spawns it (its service is found; a message to it
+ // gets no answer and no process appears; neither dropping its StandardErrorPath nor adding a Program changed that, 2026-10-26): a lookup of
+ // it would hang like the others did, so it stays disabled. NOTES-wifi.md section 9.
+ "com.apple.webkit.webpushd";
 // Jobs whose program is under /System/Cryptexes/App or /System/Cryptexes/OS: the OS volume's symlinks lead to /private/preboot/Cryptexes/...,
 // which exists only when package/BootCryptexMount.c mounted the App cryptex (fajita-appos=1) and, for OS, made its link (fajita-appos=2).
 // Without them launchd cannot start these jobs, and a lookup of their Mach services never returns (MobileSafari's main thread hung on
 // com.apple.Safari.History.Service), so with sheng-lite=1 they are disabled unless their cryptex is there: then the lookups fail at once.
 // scripts/fajita/test/cryptex-jobs.sh lists them.
 static const char app_cryptex_jobs[]=
- "com.apple.Safari.History,com.apple.webinspectord,com.apple.safarifetcherd,com.apple.webkit.webpushd,com.apple.SafariBookmarksSyncAgent,"
+ "com.apple.Safari.History,com.apple.webinspectord,com.apple.safarifetcherd,com.apple.SafariBookmarksSyncAgent,"
  "com.apple.Safari.passwordbreachd,com.apple.WebBookmarks.webbookmarksd,com.apple.AuthenticationServicesCore.AuthenticationServicesAgent";
+// adattributiond (/System/Cryptexes/OS/...): with fajita-appos=2 the OS link resolves its program, but launchd does not spawn it either (as webpushd).
 static const char os_cryptex_jobs[]="com.apple.webkit.adattributiond";
 extern int fajita_boot_cryptex_mount(void *process, uint64_t scratch);
 extern volatile int fajita_appos_stage;
