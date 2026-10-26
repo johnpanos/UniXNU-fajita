@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // fajita network interface: a BSD ifnet "en0" (IFT_ETHER, family ETHERNET) that iOS's network stack, configd's
 // IPConfiguration agent (ipconfig / DHCP), routing and the sockets above treat as an Ethernet interface, with a pluggable
-// frame backend. `fajita-net=usb` uses the USB network channel (drivers/NativeDwc3/UsbNet.h: fajita_usbnet_send and
+// frame backend. `fajita-net=wifi` waits for the Wi-Fi station (FajitaWifiDev.cpp: MAC, HTT tx, rx into fajita_net_input).
+// `fajita-net=usb` uses the USB network channel (drivers/NativeDwc3/UsbNet.h: fajita_usbnet_send and
 // fajita_usbnet_register_rx, `usb-net=1`) so DHCP and ping can be proven against the laptop (scripts/fajita/test/net-test.sh,
 // passt) before the Wi-Fi radio carries frames; the Wi-Fi data path will call fajita_net_input and fajita_net_set_backend.
 //
@@ -49,6 +50,8 @@ extern u_char etherbroadcastaddr[ETHER_ADDR_LEN];
 int fajita_net_start(void);
 int fajita_net_input(const void *frame, size_t len);
 void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len), void *ctx);
+// The interface's MAC (before it attaches): fajita-net=wifi uses the station's.
+void fajita_net_set_mac(const uint8_t mac[6]);
 // [0] ifnet attached, [1] frames in, [2] frames out, [3] dropped in, [4] dropped out, [5] backend errors
 volatile uint32_t fajita_net_state[8];
 }
@@ -245,6 +248,12 @@ void worker(void *, wait_result_t)
         gSend = usbSend;
         fajita_usbnet_register_rx(usbRx, nullptr);
     }
+    if (!strcmp(mode, "wifi")) {
+        // the Wi-Fi station (FajitaWifiDev.cpp) sets the MAC and the backend once it is associated and keyed
+        IOLog("fajita-net: en0 waits for the Wi-Fi link\n");
+        for (unsigned i = 0; i < 1200 && !gSend; ++i) IOSleep(500);
+        if (!gSend) {IOLog("fajita-net: no Wi-Fi link in 600 s\n"); return;}
+    }
     if (!attach()) {IOLog("fajita-net: ifnet attach failed\n"); return;}
     if (fajita_usbdbg_register_kcmd) fajita_usbdbg_register_kcmd("net", kcmdNet, "fajita-net interface counters");
     IOLog("fajita-net: en0 attached (%s), mac %02x:%02x:%02x:%02x:%02x:%02x\n", mode, gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
@@ -271,6 +280,12 @@ extern "C" int fajita_net_input(const void *frame, size_t len)
     if (!gRingLock) return -1;
     ringPush(frame, len);
     return 0;
+}
+
+extern "C" void fajita_net_set_mac(const uint8_t mac[6])
+{
+    if (fajita_net_state[0]) return;   // attached: the address is fixed
+    memcpy(gMac, mac, ETHER_ADDR_LEN);
 }
 
 extern "C" void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len), void *ctx)

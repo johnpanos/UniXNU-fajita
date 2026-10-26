@@ -33,6 +33,10 @@ int fajita_wifi_dev_start(void);
 void fajita_wifi_dev_poll(void);
 void fajita_wifi_dev_kcmd(void);
 void read_random(void *buffer, unsigned int numBytes);
+// FajitaNet.cpp (fajita-net=wifi): the BSD en0 over this station until the IO80211 interface exists
+int fajita_net_input(const void *frame, size_t len);
+void fajita_net_set_backend(int (*send)(void *ctx, const void *frame, size_t len), void *ctx);
+void fajita_net_set_mac(const uint8_t mac[6]);
 }
 
 namespace {
@@ -185,11 +189,24 @@ void ioWr(void *, uint32_t off, uint32_t v) {*reinterpret_cast<volatile uint32_t
 void ioBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory");}
 uint32_t devNow(void *) {return static_cast<uint32_t>(nowMs64());}
 void devRandom(void *, uint8_t *out, uint32_t n) {read_random(out, n);}
-void devRx(void *, const uint8_t *, uint32_t) {}
+void devRx(void *, const uint8_t *eth, uint32_t len) {fajita_net_input(eth, len);}   // poll thread, gLock held: a ring push
+uint32_t gTxOk, gTxErr;
+// en0's start routine (its own thread): one Ethernet frame to the AP
+int wifiSend(void *, const void *frame, size_t len)
+{
+    if (!gLock) return -1;
+    IOLockLock(gLock);
+    const int r = wdev_tx(&gDev, static_cast<const uint8_t *>(frame), static_cast<uint32_t>(len));
+    IOLockUnlock(gLock);
+    if (r) ++gTxErr; else ++gTxOk;
+    return r ? -3 : 0;
+}
 void devLink(void *, unsigned st, unsigned reason)
 {
     gLastLink = st; gLinkReason = reason;
     note("FW7 mlme %s reason %u", wmlme_state_name(st), reason);
+    if (st == WMLME_CONNECTED) {fajita_net_set_mac(gDev.mac); fajita_net_set_backend(wifiSend, nullptr);}   // fajita-net=wifi: en0 attaches
+    else if (st == WMLME_FAILED || st == WMLME_IDLE) fajita_net_set_backend(nullptr, nullptr);
 }
 void devLog(void *, const char *step, int rc, uint32_t val) {note("FW6 %s rc %d t+%u ms", step, rc, val);}
 void *devAlloc(size_t n, void *) {void *p = IOMalloc(n ? n : 1); if (p) bzero(p, n ? n : 1); return p;}
@@ -202,7 +219,7 @@ void scanRow()
     if (gReqSsid[0]) {
         const wmlme_bss *b = wmlme_find(&m, gReqSsid);
         if (b) snprintf(best, sizeof best, "%s %02x:%02x:%02x:%02x:%02x:%02x %u MHz %d dBm%s", gReqSsid, b->bssid[0], b->bssid[1], b->bssid[2],
-                        b->bssid[3], b->bssid[4], b->bssid[5], b->freq, b->rssi, b->rsn_ok ? " wpa2-psk" : " (rsn?)");
+                        b->bssid[3], b->bssid[4], b->bssid[5], b->freq, b->rssi, !b->rsn_ok ? " (rsn?)" : b->akm == WWPA_AKM_SAE ? " wpa3-sae" : " wpa2-psk");
         else snprintf(best, sizeof best, "%s NOT SEEN", gReqSsid);
         static unsigned rsnShown;
         if (b && !b->rsn_ok && rsnShown != gScans && m.state == WMLME_SCAN_DONE) {   // once per scan: why the RSN element is not usable
@@ -310,9 +327,9 @@ extern "C" void fajita_wifi_dev_poll(void)
         if (gScans) scanRow();
         if (gConnects) {
             const wmlme &m = gDev.mlme;
-            row(11, "FW7 link %s reason %u akm %u pmf %u sae commit%u confirm%u token%u status%u auth%u assoc%u eapol rx%u tx%u keys %u authorized %d aid %u",
+            row(11, "FW7 link %s reason %u akm %u pmf %u sae commit%u confirm%u token%u status%u auth%u assoc%u eapol rx%u tx%u keys %u authorized %d aid %u data rx%u tx%u/%u",
                 wmlme_state_name(m.state), m.reason, m.akm, m.pmf, m.sae_commits, m.sae_confirms, m.sae_tokens, m.sae_status, m.auth_tx,
-                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid);
+                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr);
         }
     }
     IOLockUnlock(gLock);

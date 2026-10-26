@@ -74,6 +74,7 @@ build() {
   [ -n "$mac" ] && args+=("fajita-wifi-mac=$mac")
   for s in "${want[@]}"; do [ "$s" = lower ] && args+=(fajita-wifi-ro=1); done   # the read-only survey (FWR rows)
   for s in "${want[@]}"; do [ "$s" = qmp ] && args+=(fajita-wifi-qmp=1); done     # the AOSS QMP link-up (FWQ rows)
+  for s in "${want[@]}"; do case $s in dhcp|ping|tput|stability) args+=(fajita-net=wifi); break;; esac; done   # en0 over the station
   [ -n "${WIFI_EXTRA_ARGS:-}" ] && args+=($WIFI_EXTRA_ARGS)   # e.g. fajita-wifi-blk=1024
   [ -n "${WIFI_MSS_DRY:-}" ] && args+=(fajita-wifi-mss-dry=1)   # modem stage: map and read the MSS registers only, write nothing
   say "build: --test ${args[*]} (autoreset backstop)"
@@ -200,14 +201,23 @@ evaluate() {
     assoc) check_from_log assoc 'FW7 mlme connected' 'SAE / association / 4-way handshake did not complete (FW7 link row: where it stopped)'
            r=$(con_has 'FW7 link '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     dhcp)
-      local o; o=$(ios ipconfig getifaddr en1 2>/dev/null || true)
-      if echo "$o" | grep -qE '([0-9]+\.){3}[0-9]+'; then verdict dhcp PASS "lease $o"
-      else verdict dhcp FAIL "no DHCP lease on the Wi-Fi interface (en1): ${o:-none}"; fi ;;
+      # en0 (fajita-net=wifi) attaches once the station is keyed; fjnet (package/usb-debug-tools/fjnet.c) does DHCP on it
+      local FJN=/private/var/ngpu/sbin/fjnet o
+      [ -x "$ROOT/.cache/fajita-inputs/fjnet" ] || "$TD/../build-usbdbg-agent.sh" "$ROOT/.cache/fajita-inputs/fjdbg-agent" >/dev/null 2>&1
+      $HUB call --timeout 60 push "$ROOT/.cache/fajita-inputs/fjnet" $FJN 755 >/dev/null 2>&1 || say "  push fjnet failed"
+      for i in 1 2 3 4 5 6; do grep -aq 'fajita-net: en0 attached' "$CON" && break; sleep 5; done
+      say "  $(grep -a 'fajita-net' "$CON" | tail -1)"
+      o=$($HUB call --timeout 40 run $FJN dhcp en0 2>&1); say "  fjnet dhcp en0: $(echo "$o" | tr '\n' ' ' | cut -c1-200)"
+      WIFI_IP=$(echo "$o" | sed -n 's/^lease \([0-9.]*\) gw .*/\1/p'); WIFI_GW=$(echo "$o" | sed -n 's/^lease .* gw \([0-9.]*\)$/\1/p')
+      if [ -n "$WIFI_IP" ]; then verdict dhcp PASS "lease $WIFI_IP gw ${WIFI_GW:-?} over Wi-Fi"
+      else verdict dhcp FAIL "no DHCP lease on en0 over Wi-Fi"; fi ;;
     ping)
-      local gw o; gw=$(ios route -n get default 2>/dev/null | awk '/gateway/{print $2}')
-      [ -n "$gw" ] && o=$(ios ping -c 3 -t 3 "$gw" 2>/dev/null)
-      if echo "$o" | grep -q '3 packets received\|0.0% packet loss'; then verdict ping PASS "gateway $gw reachable"
-      else verdict ping FAIL "gateway ${gw:-unknown} not reachable"; fi ;;
+      local FJN=/private/var/ngpu/sbin/fjnet o gw=${WIFI_GW:-}
+      [ -n "$gw" ] && o=$($HUB call --timeout 30 run $FJN ping "$gw" 3 2>&1)
+      say "  fjnet ping ${gw:-?}: $(echo "$o" | tail -2 | tr '\n' ' ')"
+      if echo "$o" | grep -q '^3/3 received'; then verdict ping PASS "gateway $gw reachable over Wi-Fi"
+      else verdict ping FAIL "gateway ${gw:-unknown} not reachable"; fi
+      o=$($HUB call --timeout 30 run $FJN http "http://example.com/" 2>&1); say "  CFNetwork http://example.com/: $(echo "$o" | tr '\n' ' ' | cut -c1-160)" ;;
     tput)
       # TCP throughput against this laptop: iOS has no iperf, so time a bulk GET from a tiny laptop-side server.
       # Until the link exists this reports FAIL; see NOTES-wifi.md for the laptop-side helper plan.
