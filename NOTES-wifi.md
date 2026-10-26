@@ -2,6 +2,14 @@
 
 ## Current state (keep this updated; a restart starts here)
 
+Layer 5 notes (from ath10k, for the restart): WCN3990 hw_params target_64bit, shadow_reg_support (src write index via
+0x32000 + 4*ce for CE0/3/4/5/7), rri_on_ddr (read indices in a host DMA word per CE, enabled by ctrl1 bit 19; used for
+DIS_INTR pipes), use_fw_tx_credits = false (one HTC credit total, all on WMI control), CE regs at membase+0x240000 +
+0x1000*ce (wcn3990_ce_regs in hw.c), desc meta mask 0xfff0 lsb 4. Core start order: htc init, htt tx/rx alloc, hif start
+(irq enable, rx post on every pipe with a dest ring), htc wait READY, htt connect, wmi connect, htc SETUP_COMPLETE_EX,
+wmi service ready, wmi init, wmi ready, htt rx ring refill, htt setup. DMA for the CE rings goes through the apps SMMU
+(SID 0x40): open hardware item, the glue takes a DMA allocator callback.
+
 Round 3 (stack above a booted modem; the modem boot itself is the user's). Kernel hook: `FajitaWifiProbe.cpp` calls
 `fajita_wifi_stack(stage)` (FajitaWifiStack.cpp) for `fajita-wifi>=3` after stage 2; it never returns (one poll loop owns
 every protocol object). For the modem boot: `fajita_wifi_smp2p_bits(&v)` (inbound bits, ready = bit 2) and
@@ -18,7 +26,7 @@ before msa_ready with `msa-assign?`); the board file is `image/bdwlan.<id>` (cns
 | 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
 | 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | `WifiRouter`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` + kernel glue `package/FajitaWifiStack.cpp` | `tests/t_qrtr.c` (simulated modem router; real .jsn, real wlanmdsp.mbn via FAT, real EFS backup) | done |
 | 4 wlfw client | `WifiWlfw.[ch]`, `WifiSnoc.[ch]` (snoc CE tables); stage 5 in FajitaWifiStack.cpp | `tests/t_wlfw.c` (fixture server, every request decoded; real bdwlan.102 == board-2.bin id 0x102) | done |
-| 5 ath10k CE/HTC/WMI | | | next |
+| 5 ath10k CE/HTC/WMI | in progress: 5a CE (64-bit desc, RRI on DDR, shadow write idx) + HTC; 5b WMI-TLV init/ready/scan; 5c assoc + HTT | target simulator (register file + DMA arena) planned | next |
 | 6 iOS Ethernet + WPA2 + DHCP | | | |
 
 Goal: join a WPA2 network and pass IP traffic in iOS on the OnePlus 6T. The Wi-Fi radio (WCN3990) runs on the modem
