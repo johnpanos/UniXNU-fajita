@@ -105,13 +105,35 @@ check_from_log() {   # $1 stage  $2 pass-regex  $3 description
   else verdict "$s" FAIL "$desc (no match for /$re/ in console)"; fi
 }
 
+# Which layer of the link stopped, from the last FW3 row (FajitaWifiStack.cpp), lowest first.
+layers() {
+  local r; r=$(con_has 'FW3 ' | tail -1)
+  [ -n "$r" ] || { say "  layer: no FW3 row (stack not reached: fajita-wifi<3, or the worker stopped at stage 2)"; return; }
+  say "  $r"
+  case $r in
+    *'smem FAILED'*)        say "  layer: SMEM (map or header: SBL did not initialise it?)" ;;
+    *'glink smem items FAILED'*) say "  layer: SMEM allocation of the GLINK descriptor/fifo (hwlock or partition full)" ;;
+    *'fifo1 no'*)           say "  layer: modem not up (it never allocated its GLINK fifo 480): stage 2 / SMP2P ready" ;;
+    *'glink v?'*)           say "  layer: GLINK version handshake (APCS IPC bit 12 kick or the modem's interrupt)" ;;
+    *'GLINK-FAULT'*)        say "  layer: GLINK protocol fault (unknown command or corrupt indices)" ;;
+    *'ipcrtr closed'*)      say "  layer: GLINK IPCRTR channel open" ;;
+    *'hello 0'*)            say "  layer: QRTR HELLO from the modem" ;;
+    *'servers -'*)          say "  layer: the modem announced no QMI servers yet" ;;
+    *)                      say "  layer: link up; servers announced: ${r##*servers }" ;;
+  esac
+}
+
 evaluate() {
   for s in "${want[@]}"; do case $s in
     power) check_from_log power 'FW1 .*rmb pbl' 'stage 1 power/regs did not report'
            local r; r=$(con_has 'FW1 res'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     modem) check_from_log modem 'FW2 .*auth[1-9].*ready' 'MSS did not reach AUTH_COMPLETE + ready' ;;
-    link)  check_from_log link  'FW3 .*glink v1.*servers.*wlfw' 'no GLINK/QRTR link with wlfw announced' ;;
-    servers) check_from_log servers 'FW4 .*(pdr|tftp|rmtfs)' 'AP QMI servers did not serve the modem' ;;
+    link)  check_from_log link  'FW3 smp2p .* glink v1 .* ipcrtr open qrtr hello 1 .* servers ([0-9a-f]+,)*45(,|$| )' \
+             'no GLINK/QRTR link with wlfw (0x45) announced'
+           layers ;;
+    servers) check_from_log servers 'FW4 pdr [1-9][0-9]* tftp rrq[1-9]' 'the modem did not use pd-mapper and TFTP'
+           local r; r=$(con_has 'FW4 '); [ -n "$r" ] && say "  $(echo "$r" | tail -1)"
+           r=$(con_has 'FW4 services'); [ -n "$r" ] && say "  $(echo "$r" | tail -1)" ;;
     wlfw)  check_from_log wlfw  'FW5 .*ready fw_status' 'wlfw handshake did not reach FW_READY' ;;
     scan)  check_from_log scan  "FW6 .*scan.*$ssid" "scan did not see $ssid" ;;
     assoc) check_from_log assoc 'FW7 .*(ptk|gtk|connect)' '4-way handshake / association did not complete' ;;
@@ -141,7 +163,13 @@ session_start
 push_psk
 # give the staged probe time to run from the boot progress monitor (it waits for the watchdog arm, then runs the stages)
 say "waiting up to ${WIFI_SETTLE:-180}s for the bring-up stages to log"
-for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do grep -aq "FW$maxN\|FW1 .*rmb\|not yet implemented" "$CON" 2>/dev/null && break; sleep 5; done
+# Wait for the deepest requested stage's pass row (the link and the services come up seconds after FW3/FW4 first log),
+# or a row that says it will not get there.
+declare -A DONE_RE=( [1]='FW1 .*rmb' [2]='FW2 ' [3]='FW3 smp2p .* servers [0-9a-f]' [4]='FW4 pdr [1-9][0-9]* tftp rrq[1-9]'
+                     [5]='FW5 ' [6]='FW6 ' [7]='FW7 ' )
+for i in $(seq 1 $(( ${WIFI_SETTLE:-180} / 5 )) ); do
+  grep -aqE "${DONE_RE[$maxN]}|not yet implemented|FAILED|reserve\?" "$CON" 2>/dev/null && break; sleep 5
+done
 evaluate
 session_end; trap - EXIT
 

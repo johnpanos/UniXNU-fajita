@@ -2,7 +2,12 @@
 
 ## Current state (keep this updated; a restart starts here)
 
-Round 3 (stack above a booted modem; the modem boot itself is the user's). Worktree `../UniXNU-fajita-wifi`, branch
+Round 3 (stack above a booted modem; the modem boot itself is the user's). Kernel hook: `FajitaWifiProbe.cpp` calls
+`fajita_wifi_stack(stage)` (FajitaWifiStack.cpp) for `fajita-wifi>=3` after stage 2; it never returns (one poll loop owns
+every protocol object). For the modem boot: `fajita_wifi_smp2p_bits(&v)` (inbound bits, ready = bit 2) and
+`fajita_wifi_smp2p_set(mask, v)` (outbound stop bit 0). Compile check without a build: `scripts/check-fajita-wifi-kernel.py`.
+Notes for the phone run: TFTP offers at most blksize 8192 (GLINK fifo is 16 KiB; tqftpserv allows 65464) and the modem
+must accept the smaller OACK; `/readwrite/` is RAM only; rmtfs refuses writes (counted as `wr-refused` in FW4). Worktree `../UniXNU-fajita-wifi`, branch
 `wifi-stack`, merged into `ios16-port` after each layer. Host tests: `scripts/check-fajita-wifi-host.py` (two binaries:
 `test_wifi` for the earlier protocol code, `test_stack` for the layers below).
 
@@ -10,8 +15,8 @@ Round 3 (stack above a booted modem; the modem boot itself is the user's). Workt
 | --- | --- | --- | --- |
 | 1 SMEM + SMP2P | `WifiSmem.[ch]` | `tests/t_smem.c` (synthetic SMEM, both ends) | done |
 | 2 GLINK over SMEM | `WifiGlink.[ch]` (also fixed `glink_intent` to 16 B) | `tests/t_glink.c` (loopback, AP + simulated modem) | done |
-| 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | | | next |
-| 4 wlfw client | | | |
+| 3 QRTR + pd-mapper / TFTP / rmtfs (ro) | `WifiRouter`, `WifiPdmap`, `WifiTftp`, `WifiRmtfs` + kernel glue `package/FajitaWifiStack.cpp` | `tests/t_qrtr.c` (simulated modem router; real .jsn, real wlanmdsp.mbn via FAT, real EFS backup) | done |
+| 4 wlfw client | | | next |
 | 5 ath10k CE/HTC/WMI | | | |
 | 6 iOS Ethernet + WPA2 + DHCP | | | |
 

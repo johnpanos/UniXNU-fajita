@@ -35,6 +35,8 @@ extern unsigned int phys_reserve_held[8] __attribute__((weak_import));
 extern uint64_t phys_reserve_window[3] __attribute__((weak_import));
 vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+// FajitaWifiStack.cpp: stages 3.. (SMEM/GLINK/QRTR, the AP services, ...) once the modem is up; never returns.
+void fajita_wifi_stack(unsigned stage) __attribute__((weak));
 }
 
 namespace {
@@ -147,6 +149,7 @@ void worker(void *, wait_result_t) {
     static const char *names[] = {"", "", "modem remoteproc", "SMEM/GLINK/QRTR", "AP QMI servers (pdr/tftp/rmtfs)",
                                   "wlfw handshake", "CE/HTC/WMI", "connect + data"};
     for (unsigned s = 2; s <= gStage && s <= 7; ++s) {stagePending(s, names[s]); break;}
+    if (gStage >= 3 && fajita_wifi_stack) fajita_wifi_stack(gStage);
     // Touch the freestanding entry points so the archive keeps them (and a bad prototype fails the kernel link, not a run).
     if (gDump) {
         wmdt_image img; (void)wmdt_parse(nullptr, 0, &img);

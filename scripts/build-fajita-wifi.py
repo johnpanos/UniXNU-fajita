@@ -24,7 +24,8 @@ WARNINGS = ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-de
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-unknown-warning-option',
             '-Wno-missing-designated-field-initializers']
 # The stack above a booted modem (SMEM/SMP2P, GLINK, QRTR services, wlfw, ath10k, WPA2), host-tested in tests/test_stack.c.
-STACK = ['WifiSmem.c', 'WifiGlink.c']
+KIT_UNITS = ['FajitaWifiStack.cpp']
+STACK = ['WifiSmem.c', 'WifiGlink.c', 'WifiRouter.c', 'WifiPdmap.c', 'WifiTftp.c', 'WifiRmtfs.c', 'WifiFat.c']
 INCLUDES = ['-I', str(KIT), '-I', str(WIFI), '-I', str(ROOT / '.cache/xnu-work/osfmk')]
 
 
@@ -80,6 +81,7 @@ def main():
     cpp_rec, c_rec = record('iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'), record('osfmk/DEVELOPMENT/startup.o.json')
     units = [
         (cpp_rec, KIT / 'FajitaWifiProbe.cpp', []),
+        *[(cpp_rec, KIT / name, []) for name in KIT_UNITS],
         (c_rec, WIFI / 'WifiMdt.c', ['-mgeneral-regs-only']),
         (c_rec, WIFI / 'WifiQmi.c', ['-mgeneral-regs-only']),
         (c_rec, WIFI / 'WifiQrtr.c', ['-mgeneral-regs-only']),
@@ -105,7 +107,7 @@ def main():
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if digest != previous:
         (OBJ_ROOT / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
-    sources = [KIT / 'FajitaWifiProbe.cpp', KIT / 'FajitaWifiBoard.h', WIFI / 'WifiMdt.c', WIFI / 'WifiMdt.h',
+    sources = [KIT / 'FajitaWifiProbe.cpp', KIT / 'FajitaWifiBoard.h', *[KIT / n for n in KIT_UNITS], WIFI / 'WifiMdt.c', WIFI / 'WifiMdt.h',
                WIFI / 'WifiQmi.c', WIFI / 'WifiQmi.h', WIFI / 'WifiQrtr.c', WIFI / 'WifiQrtr.h', WIFI / 'WifiBoard.c',
                WIFI / 'WifiBoard.h', *[WIFI / n for name in STACK for n in (name, name[:-2] + '.h')]]
     (OUT / 'build-report.json').write_text(json.dumps({
