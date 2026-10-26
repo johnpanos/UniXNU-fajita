@@ -5,6 +5,18 @@
 Round 5 (lead): A = an iOS Ethernet interface proven over USB (IOEthernetController subclass, frames tunnelled over the
 fjdbg channel to a host bridge), B = the apps_smmu read-only survey. Modem boot, SCM and ath10k WMI are the user's.
 
+**A, iOS Ethernet over USB (stopped 2026-10-25 by the safety filter; per the lead, not to be retried):** nothing of the
+driver, gadget, hub or host bridge is written or committed. Findings for whoever picks it up:
+- IONetworkingFamily is not in the prelink today. A trial prelink with `com.apple.iokit.IONetworkingFamily` added to the
+  ios16/board.toml roots binds cleanly (dependencies: com.apple.kpi.* only; +16 KiB); not added to the board yet. Its
+  symbols are stripped in the 20H392 kernelcache.
+- Host backend without root: `passt` (installed) speaks the qemu stream format (u32 BE length + Ethernet frame) on a UNIX
+  socket and gives the guest DHCP, DNS forwarding and NAT; unprivileged ICMP is allowed here (ping_group_range 0..2^31-1).
+  A tap + dnsmasq + NAT route would need one sudo step instead.
+- Tunnel design: a new fjdbg channel 7 (NET), one Ethernet frame per frame in both directions (a 1514-byte frame fits
+  kMaxData 1536); device side a TX via queueFrame with a reserve so replies are never starved and an RX ring filled from
+  onBulkOut; host side a hub op that turns a socket into the frame stream, relayed to passt by a small bridge.
+
 **B, apps_smmu survey (done 2026-10-25, read only, on the phone):** `scripts/fajita/test/smmu-survey.py` (hub `read32`
 only; `--raw` saves the words, `--from-raw` decodes offline). Run on the ios16-port test build (usb-debug=3, GPU on),
 in iOS userland, so the state is UEFI's plus NativeUfs/NativeDwc3's:
