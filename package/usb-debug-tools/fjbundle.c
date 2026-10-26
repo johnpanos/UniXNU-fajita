@@ -1,5 +1,11 @@
 // fjbundle --ls DIR...: list directories (iOS here has no ls); each prints its entry count and names.
 // fjbundle --stat PATH...: lstat/stat flags and open(2) results per path.
+// fjbundle --find DIR [MAXDEPTH]: every file under DIR (default depth 8): size, mtime (s, and seconds from now), data protection
+//   class (F_GETPROTECTIONCLASS; ? = open failed), flags; the first line is the clock (time(), gettimeofday). For stores that grow
+//   (Biome segments under /private/var/mobile/Library/Biome) and timestamps from before/after a clock jump.
+// fjbundle --settime UNIXSECONDS|now+N: settimeofday, as timed does after a network time fix (to reproduce what a clock jump does to
+//   daemons on a boot without Wi-Fi); prints the time before and after.
+// fjbundle --fds PID|NAME: the open vnodes of a process (proc_pidinfo PROC_PIDLISTFDS + PROC_PIDFDVNODEPATHINFO): fd, offset, size, path.
 // fjbundle --lookup [--ping] [--watch SUBSTR] SERVICE...: bootstrap_look_up each Mach service (a job disabled in launchd's overrides gives
 //   BOOTSTRAP_UNKNOWN_SERVICE 1102); --ping also sends it an empty XPC message and waits up to 3 s for any answer, which makes launchd
 //   start an on-demand job; --watch samples the process table every 20 ms meanwhile for an executable path containing SUBSTR (an
@@ -24,6 +30,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 #include <signal.h>
 #include <mach/mach.h>
@@ -54,6 +62,40 @@ static int find_process(const char *what) {
 }
 
 extern int __getdirentries64(int, void *, size_t, off_t *);
+
+// sys/proc_info.h is not in the iPhoneOS SDK: the parts --fds uses (xnu bsd/sys/proc_info.h).
+extern int proc_pidinfo(int, int, uint64_t, void *, int);
+extern int proc_pidfdinfo(int, int, int, void *, int);
+struct fj_proc_fdinfo { int32_t proc_fd; uint32_t proc_fdtype; };
+struct fj_vinfo_stat { uint32_t dev; uint16_t mode, nlink; uint64_t ino; uid_t uid; gid_t gid; int64_t at, atn, mt, mtn, ct, ctn, bt, btn;
+  off_t size; int64_t blocks; int32_t blksize; uint32_t flags, gen, rdev; int64_t qspare[2]; };
+struct fj_vnode_fdinfowithpath { uint32_t openflags, status; off_t offset; int32_t type; uint32_t guardflags;
+  struct fj_vinfo_stat st; int vtype, vpad; fsid_t fsid; char path[1024]; };
+
+static time_t find_now;
+static void find_walk(const char *dir, int depth, int maxdepth, long long *files, long long *bytes) {
+  DIR *d = opendir(dir);
+  if (!d) { printf("%s/: cannot open: %s\n", dir, strerror(errno)); return; }
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char p[2048]; snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (lstat(p, &st)) { printf("%s: lstat: %s\n", p, strerror(errno)); continue; }
+    if (S_ISDIR(st.st_mode)) {
+      printf("%s/ mode %o mtime %ld (%+ld)\n", p, st.st_mode & 07777, (long)st.st_mtime, (long)(st.st_mtime - find_now));
+      if (depth < maxdepth) find_walk(p, depth + 1, maxdepth, files, bytes);
+      continue;
+    }
+    int pc = -2, fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd >= 0) { pc = fcntl(fd, F_GETPROTECTIONCLASS); close(fd); }
+    char pcs[16]; if (pc == -2) snprintf(pcs, sizeof pcs, "?(%d)", errno); else snprintf(pcs, sizeof pcs, "%d", pc);
+    printf("%s size %lld mtime %ld (%+ld) birth %ld pclass %s flags %#x mode %o uid %d\n", p, (long long)st.st_size,
+           (long)st.st_mtime, (long)(st.st_mtime - find_now), (long)st.st_birthtimespec.tv_sec, pcs, st.st_flags, st.st_mode & 07777, st.st_uid);
+    (*files)++; *bytes += st.st_size;
+  }
+  closedir(d);
+}
 
 int main(int argc, char **argv) {
   if (argc == 4 && !strcmp(argv[1], "--kill")) {
@@ -123,6 +165,39 @@ int main(int argc, char **argv) {
       while ((e = readdir(d))) { n++; { strncat(line, " ", sizeof line - strlen(line) - 1); strncat(line, e->d_name, sizeof line - strlen(line) - 1); } }
       closedir(d);
       printf("%s: %d entries:%s\n", argv[i], n, line);
+    }
+    return 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--find")) {
+    struct timeval tv; gettimeofday(&tv, NULL); find_now = time(NULL);
+    printf("now time() %ld gettimeofday %ld.%06d\n", (long)find_now, (long)tv.tv_sec, (int)tv.tv_usec);
+    long long files = 0, bytes = 0;
+    find_walk(argv[2], 0, argc > 3 ? atoi(argv[3]) : 8, &files, &bytes);
+    printf("%s: %lld files, %lld bytes\n", argv[2], files, bytes);
+    return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--settime")) {
+    struct timeval before, tv = {0, 0}; gettimeofday(&before, NULL);
+    tv.tv_sec = !strncmp(argv[2], "now+", 4) ? before.tv_sec + atol(argv[2] + 4) : atol(argv[2]);
+    int r = settimeofday(&tv, NULL); int e = errno;
+    struct timeval after; gettimeofday(&after, NULL);
+    printf("settimeofday(%ld) = %d (%s): before %ld, after %ld\n", (long)tv.tv_sec, r, r ? strerror(e) : "ok", (long)before.tv_sec, (long)after.tv_sec);
+    return r ? 1 : 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--fds")) {
+    int pid = atoi(argv[2]); if (pid <= 0) pid = find_process(argv[2]);
+    if (pid <= 0) { printf("no process %s\n", argv[2]); return 1; }
+    static struct fj_proc_fdinfo fds[4096];
+    int n = proc_pidinfo(pid, 1 /* PROC_PIDLISTFDS */, 0, fds, sizeof fds);
+    if (n <= 0) { printf("pid %d: PROC_PIDLISTFDS: %s\n", pid, strerror(errno)); return 1; }
+    n /= (int)sizeof fds[0];
+    printf("pid %d: %d fds\n", pid, n);
+    for (int i = 0; i < n; i++) {
+      if (fds[i].proc_fdtype != 1 /* PROX_FDTYPE_VNODE */) { printf("  fd %d type %u\n", fds[i].proc_fd, fds[i].proc_fdtype); continue; }
+      struct fj_vnode_fdinfowithpath vi;
+      int r = proc_pidfdinfo(pid, fds[i].proc_fd, 2 /* PROC_PIDFDVNODEPATHINFO */, &vi, sizeof vi);
+      if (r != (int)sizeof vi) { printf("  fd %d vnode: %d (%s)\n", fds[i].proc_fd, r, strerror(errno)); continue; }
+      printf("  fd %d off %lld size %lld oflags %#x %s\n", fds[i].proc_fd, (long long)vi.offset, (long long)vi.st.size, vi.openflags, vi.path);
     }
     return 0;
   }

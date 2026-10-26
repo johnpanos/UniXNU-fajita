@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // FajitaRtc: the OnePlus 6T wall clock. Reads the PM8998 RTC over SPMI (drivers/NativeSpmi) and serves it as the "IORTC" resource,
 // the service the platform expert asks for the UTC time of day: as on Apple's ARM platforms (AppleARMPE, whose PMU RTC answers
-// the same calls), ArmDTPlatform::getUTCTimeOfDay calls its platform function "getGMTTimeOfDay" (clock_sec_t *, clock_nsec_t *),
+// the same calls), IOPlatformExpert::getUTCTimeOfDay calls its platform function "getGMTTimeOfDay" (clock_sec_t *, clock_nsec_t *),
 // so clock_initialize_calendar (bsd_init) starts the calendar from it, and settimeofday reaches "setGMTTimeOfDay" through
-// PESetUTCTimeOfDay.
+// PESetUTCTimeOfDay. Both, and IOKitInitializeTime's wait for IORTC in the BCM2837 configuration, come from
+// patches/xnu/zzu-fajita-rtc-calendar.patch; without it the calendar started at 1970 on every boot (NOTES-daemons.md).
 //
 // The RTC counter is read-only here (and to mainline Linux on this board): wall time is the counter plus an offset kept in a
 // two-block record at the end of userdata (NativeUfs native_ufs_rtc_*, format in RtcCore.h). No PMIC register is ever written.

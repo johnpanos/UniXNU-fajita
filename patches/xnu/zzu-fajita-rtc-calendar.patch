@@ -1,0 +1,78 @@
+Start the calendar from FajitaRtc. The fajita kernel is built in the BCM2837 configuration, where IOKitInitializeTime does
+not wait for the IORTC resource, and ArmDTPlatform has no RTC of its own, so the base IOPlatformExpert answered
+getUTCTimeOfDay with 0: every boot started at 1970-01-01 (only a network time fix moved it, mid-boot, to the real date), and
+daemons that keep time-ordered stores (Biome streams: coreduetd, dasd) and history (healthd) recorded 1970 and 2026 stamps
+interleaved. With this patch:
+- IOKitInitializeTime waits (30 s at most, as on every other target) for IORTC when the device tree has /arm-io/rtc;
+  FajitaRtc publishes it within ~0.3 s of the calendar's start, before launchd.
+- IOPlatformExpert::getUTCTimeOfDay/setUTCTimeOfDay ask the IORTC resource's "getGMTTimeOfDay"/"setGMTTimeOfDay" platform
+  functions (the ones Apple's ARM RTCs answer), so settimeofday (timed's network fix) also reaches the RTC record
+  (fajita-rtc=2). An RTC that is not ready (fajita-rtc=0) falls back to the old answer.
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -490,9 +490,29 @@
+ 	return true;
+ }
+ 
++// fajita: a platform expert without an RTC of its own (ArmDTPlatform) asks the published IORTC resource (FajitaRtc), through
++// the platform functions Apple's ARM RTCs answer ("getGMTTimeOfDay" (clock_sec_t *, clock_nsec_t *), "setGMTTimeOfDay"
++// (clock_sec_t *)); an RTC that is not ready (FajitaRtc's fajita-rtc=0) falls back to getGMTTimeOfDay (0) as before.
++static IOService *
++fajitaRTCResource(void)
++{
++	IOService * resources = IOService::getResourceService();
++	return resources ? OSDynamicCast(IOService, resources->getProperty("IORTC")) : NULL;
++}
++
+ void
+ IOPlatformExpert::getUTCTimeOfDay(clock_sec_t * secs, clock_nsec_t * nsecs)
+ {
++	IOService * rtc = fajitaRTCResource();
++	if (rtc != NULL && rtc != this) {
++		clock_sec_t s = 0;
++		clock_nsec_t ns = 0;
++		if (rtc->callPlatformFunction("getGMTTimeOfDay", false, &s, &ns, NULL, NULL) == kIOReturnSuccess && s != 0) {
++			*secs = s;
++			*nsecs = ns;
++			return;
++		}
++	}
+ 	*secs = getGMTTimeOfDay();
+ 	*nsecs = 0;
+ }
+@@ -500,6 +520,13 @@
+ void
+ IOPlatformExpert::setUTCTimeOfDay(clock_sec_t secs, __unused clock_nsec_t nsecs)
+ {
++	IOService * rtc = fajitaRTCResource();
++	if (rtc != NULL && rtc != this) {
++		clock_sec_t s = secs;
++		if (rtc->callPlatformFunction("setGMTTimeOfDay", false, &s, NULL, NULL, NULL) == kIOReturnSuccess) {
++			return;
++		}
++	}
+ 	setGMTTimeOfDay(secs);
+ }
+ 
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -81,6 +81,17 @@
+ #ifndef BCM2837
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
++#else
++	// fajita: a BCM2837-configured kernel on a board with an RTC node (/arm-io/rtc, FajitaRtc): wait for it as the other
++	// targets do, so the calendar starts from the wall clock instead of 1970 (it publishes IORTC within a second).
++	{
++		IORegistryEntry * rtc = IORegistryEntry::fromPath("/arm-io/rtc", gIODTPlane);
++		if (rtc != NULL) {
++			rtc->release();
++			IOService::waitForService(
++				IOService::resourceMatching("IORTC"), &t );
++		}
++	}
+ #endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(

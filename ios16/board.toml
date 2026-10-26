@@ -197,6 +197,10 @@ board_args = [
   # The App cryptex (Cryptex1,AppOS, the third root window) at /private/preboot/Cryptexes/App (package/BootCryptexMount.c): Safari's history,
   # bookmarks, inspector, fetcher, password and AutoFill daemons run from it. Needs the three-window userdata (scripts/fajita/userdata-windows.py).
   "fajita-appos=1",
+  # The wall clock from the PM8998 RTC (drivers/FajitaRtc, patches/xnu/zzu-fajita-rtc-calendar.patch): the calendar starts at the
+  # real date instead of 1970, and a network time fix (timed's settimeofday) updates the offset record in the userdata reserve.
+  # Without it Biome streams interleaved 1970 and real stamps and coreduetd/healthappd spun (NOTES-daemons.md).
+  "fajita-rtc=2",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,
