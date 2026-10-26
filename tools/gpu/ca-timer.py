@@ -86,8 +86,8 @@ def main():
         if len(s) < 10:
             print('%s: no ca lines (gfx-scene.py --cawatch)%s' % (rec.get('scene', path), ' ' + str(rec.get('ca_errors')) if rec.get('ca_errors') else ''))
             continue
-        tk = sorted({x['tick'] for x in s})
-        d = sorted(b - a for a, b in zip(tk, tk[1:]) if b > a)
+        # the timer's own interval (its next deadline minus the tick it just fired), not the tick spacing, which late ticks stretch
+        d = sorted(x['dl'] - x['tick'] for x in s if x['dl'] > x['tick'] > 0)
         period = d[len(d) // 2] if d else 320000
         res = classify(s, period)
         counts = {}
