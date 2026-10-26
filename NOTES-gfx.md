@@ -172,6 +172,7 @@ drifts (retire-to-vsync spread over 0-16 ms), so a little jitter turns into a mi
 | CA_FORCE_TIMER=1 (CADeviceUseVBL) | hw vsync counters | no vsync client registers either way; CA keeps its own display timer |
 | 59.94 Hz IOMFBDisplayRefresh (fajita-refresh-us) | pending a same-build A/B | CA's swap period median 16.65 ms with or without it |
 | job ring back-pressure (43c46a6's retry) | kernel counters per scene | 0 refused submissions in every scene (8 of 8 outstanding reached without a refusal): not a bottleneck |
+| frame info to the render server (Presentation_time, Vbl_FrameTime per latched frame; d6763c9, fajita-frame-info) | same build, boot arg off/on (fi0/fi1), 5 scenes x2 | works (CA asks SupportedFrameInfo, registers the type-3 source; every latch delivered) but no measurable change: >16.7 and >33 within noise, no phase lock in the retire-to-frame-start histogram. Not merged |
 
 ### Background CPU (a CPU bottleneck beside the scenes)
 
