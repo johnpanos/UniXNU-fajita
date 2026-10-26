@@ -349,8 +349,8 @@ void survey()
     rowAdd("FWM survey bad-access %u (reads of unmapped offsets)", gBadAccess);
 }
 
-// The WCN3990's rails and RF clock as RPMh resources (cmd-db names; the VRM registers are enable +0, voltage mV +4, mode +8; the
-// clock's enable is +0): read-only here, so a log shows what the firmware left on before anything is voted.
+// The WCN3990's rails and RF clock as RPMh resources (cmd-db names; the VRM registers of qcom-rpmh-regulator.c are voltage in mV +0,
+// enable +4, mode +8; clk-rpmh.c's VRM clocks enable at +4 with the value 1; a read-back carries bit 31 as a completion flag): read-only here, so a log shows what the firmware left on before anything is voted.
 void railsRow(const char *when)
 {
     static const char *const kNames[] = {"ldoa5", "ldoa7", "ldoa17", "ldoa25", "ldoa23", "rfclka1", "rfclka2", "rfclka3"};
@@ -364,10 +364,36 @@ void railsRow(const char *when)
         const uint32_t cmd[3][3] = {{kMsgReadResp, addr, 0}, {kMsgReadResp, addr + 4, 0}, {kMsgReadResp, addr + 8, 0}};
         uint32_t resp[3] = {};
         const int t = fajita_rpmh_send(3, cmd, resp);
-        snprintf(line + strlen(line), sizeof line - strlen(line), " %s@%x:%s en%u %umV mode%u", name, addr, t < 0 ? "ERR" : "ok", resp[0], resp[1], resp[2]);
+        snprintf(line + strlen(line), sizeof line - strlen(line), " %s@%x:%s %umV en%u mode%u", name, addr, t < 0 ? "ERR" : "ok", resp[0] & 0x7fffffffu, resp[1] & 0x7fffffffu, resp[2] & 0x7fffffffu);
         if (strlen(line) > 120) {rowAdd("FWM rails (%s)%s", when, line); line[0] = 0;}
     }
     if (line[0]) rowAdd("FWM rails (%s)%s", when, line);
+}
+
+// fajita-wifi-rails=1 (experiment): vote the WCN3990's supplies and its RF reference clock on through RPMh, as ath10k_snoc's
+// ath10k_hw_power_on does (regulators in the order of ath10k_regulators, then the clock), right after the modem is up. Never
+// un-voted. VRM registers: enable +0, voltage in mV +4 (qcom-rpmh-regulator.c); the clock (clk-rpmh.c VRM) enable +0 = 1.
+void railsOn()
+{
+    static const struct {const char *name; uint32_t mv;} kRails[] = {{"ldoa5", 800}, {"ldoa7", 1800}, {"ldoa17", 1304}, {"ldoa25", 3312}, {"ldoa23", 3312}};
+    if (!fajita_rpmh_lookup || !fajita_rpmh_send) {rowAdd("FWM rails-on: no RPMh helpers"); return;}
+    for (const auto &r : kRails) {
+        uint32_t addr = 0;
+        uint8_t aux[16] = {};
+        unsigned n = sizeof aux;
+        if (fajita_rpmh_lookup(r.name, &addr, aux, &n) || !addr) {rowAdd("FWM rails-on: %s not in cmd-db", r.name); continue;}
+        const uint32_t cmd[3][3] = {{kMsgWriteResp, addr, r.mv}, {kMsgWriteResp, addr + 4, 1}, {kMsgWriteResp, addr + 8, 7}};
+        const int t = fajita_rpmh_send(3, cmd, nullptr);
+        rowAdd("FWM rails-on %s %u mV tcs%d", r.name, r.mv, t);
+    }
+    uint32_t addr = 0;
+    uint8_t aux[16] = {};
+    unsigned n = sizeof aux;
+    if (!fajita_rpmh_lookup("rfclka2", &addr, aux, &n) && addr) {
+        const uint32_t cmd[1][3] = {{kMsgWriteResp, addr + 4, 1}};
+        rowAdd("FWM rails-on rfclka2 tcs%d", fajita_rpmh_send(1, cmd, nullptr));
+    }
+    railsRow("after vote");
 }
 
 bool setup()
@@ -448,6 +474,11 @@ extern "C" int fajita_wifi_modem(void)
     }
     rowAdd("%s", row);
     strlcpy(fajita_wifi_rows[2], row, sizeof fajita_wifi_rows[2]);
+    {
+        unsigned rails = 0;
+        PE_parse_boot_argn("fajita-wifi-rails", &rails, sizeof rails);
+        if (rails && !rc) railsOn();
+    }
     // No register survey while the modem runs: the QDSP6SS/RMB windows are not safe to read once the MBA has locked the XPUs
     // (the first successful boot ended in an unhandled SError right after this row). After a failure the modem is in reset.
     if (rc) survey();
