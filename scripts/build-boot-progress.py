@@ -68,6 +68,11 @@ diag_source = ROOT / 'kits/fajita/BootDiagExport.c'
 diag_obj = OUT / 'BootDiagExport.o'
 diag_command = [str(diag_source) if arg == str(policy_source) else str(diag_obj) if arg == str(policy_obj) else arg for arg in policy_command]
 subprocess.run(diag_command, cwd=policy_record['directory'], check=True, timeout=90)
+# The App cryptex mount (fajita-appos=<n>, called by the watchdog policy): the same BSD-side flags.
+cryptex_source = ROOT / 'kits/fajita/BootCryptexMount.c'
+cryptex_obj = OUT / 'BootCryptexMount.o'
+cryptex_command = [str(cryptex_source) if arg == str(policy_source) else str(cryptex_obj) if arg == str(policy_obj) else arg for arg in policy_command]
+subprocess.run(cryptex_command, cwd=policy_record['directory'], check=True, timeout=90)
 
 # UFS diagnostic log writer (sheng-log=1) and the fastboot reset (sheng-autoreset=<seconds>): fajita's BootReset.c is a plain PSCI reset.
 extra_objs = []
@@ -84,10 +89,11 @@ subprocess.run(stub_command, cwd=policy_record['directory'], check=True, timeout
 
 archive = OUT / 'libBootProgress.a'
 archive.unlink(missing_ok=True)
-subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(fault_obj), str(policy_obj), str(diag_obj), str(stub_obj), *extra_objs], check=True, timeout=30)
+subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(fault_obj), str(policy_obj), str(diag_obj), str(cryptex_obj), str(stub_obj), *extra_objs], check=True, timeout=30)
 (OUT / 'build-report.json').write_text(json.dumps({
     'watchdog_policy_sha256': hashlib.sha256(policy_source.read_bytes()).hexdigest(),
     'diag_sha256': hashlib.sha256(diag_source.read_bytes()).hexdigest(),
+    'cryptex_sha256': hashlib.sha256(cryptex_source.read_bytes()).hexdigest(),
     'fault_sha256': hashlib.sha256(fault_source.read_bytes()).hexdigest(),
     'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
     'lifecycle_sha256': hashlib.sha256((source.parent / 'BootProgressLifecycle.h').read_bytes()).hexdigest(),

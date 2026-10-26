@@ -764,7 +764,7 @@ backup. Keep every run unattended and self-recovering (`--test`, autoreset + wat
   GPU addon path; keep it additive + default-off and clear it with the lead/GPU agent before committing.
 - iOS option (a) IO80211 remains research; (b) IOEthernetController is the first target.
 
-## 9. Safari: WebKit XPC services crashed at launch, the hang, the black page (all fixed 2026-10-26)
+## 9. Safari: WebKit XPC services crashed at launch, the hang, the black page (all fixed 2026-10-26); the App cryptex mounted
 
 Symptom: Safari opens; tapping a favorite gives a blank page, and every `com.apple.WebKit.Networking` / `WebContent` process dies
 at once: `CRASH ... sig11 ... E92000005 F8` (NULL + 8 read in CoreFoundation, called from WebKit +0x1e6dac).
@@ -801,12 +801,39 @@ Second blocker, the Safari hang (fixed 2026-10-26): after tapping a favorite Mob
 image (`087-86715-047.dmg`: Safari.History, webbookmarksd, passwordbreachd, webinspectord, safarifetcherd, webpushd,
 AuthenticationServicesAgent, SafariBookmarksSyncAgent). launchd cannot start those jobs, so lookups of their Mach services never return.
 `com.apple.fairplayd.H2` (the iPhone X label; the list had the iPad's `.A2`) did the same to an AccountStore thread.
-Fix: `package/BootWatchdogPolicy.c` adds the nine Cryptex-program jobs and `fairplayd.H2` to the `sheng-lite` disable list (already on),
-so their lookups fail at once; the policy buffer grew to 4096. `scripts/fajita/test/cryptex-jobs.sh` (held session) lists the jobs whose
-program is under /System/Cryptexes. Proper fix, not done: publish AppOS as a third window (board.toml `[userdata] windows`,
-build-fajita-verified-root.py, NativeUfs) and mount it at `/private/preboot/Cryptexes/App`; the files are decmpfs type 14 (LZBITMAP), so a
-host-side extraction into the Data seed is not an option without an LZBITMAP decoder. Result: Safari stays responsive, apple.com loads over
-Wi-Fi (padlock, title "iPhone Duo - Apple", tab switcher shows the page), no CRASH rows.
+First fix (c643ac2): `package/BootWatchdogPolicy.c` put the nine Cryptex-program jobs and `fairplayd.H2` on the `sheng-lite` disable
+list, so their lookups failed at once instead of hanging.
+
+Proper fix (2026-10-26, the App cryptex mounted): AppOS is the third root window of userdata, after SystemOS (`ios16/board.toml`
+`[userdata] windows`; the OS and SystemOS offsets do not move), with its own owner-signed policy built and block-verified like the other two
+(`build-fajita-verified-root.py --image appos:087-86715-047.dmg:9E10DDA7-90D9-4677-844A-E984BB1CCD0A:...:2560`, stack a43c5be
+`build-verified-root-probe.py --extra-policy appos`). NativeUfs needed no change (up to four windows; policies match by window size). It
+publishes SystemOS, AppOS, OS in that order (`NativeUfs: AppOS volume 9E10DDA7-... ready`). `package/BootCryptexMount.c` (`fajita-appos=1`,
+on by default in board_args; called from the watchdog policy step after the Data mount, before launchd): the mount points live on Data
+(`/private/var/db/fajita-preboot/Cryptexes/App`), a read-only bindfs view of them is mounted over `/private/preboot` (the sealed OS volume has
+an empty directory there and no Preboot volume exists), then the AppOS APFS volume read-only at `/private/preboot/Cryptexes/App`, with the
+SystemOS mount's payload; it checks read-only, apfs, the selected device, authorization, and a program reachable through
+`/System/Cryptexes/App`. Never panics: the kernel log line `fajita appos: mode 1 stage 8 status 0 device /dev/disk5s1` and BootLog row `C`
+report it (stage 8 = mounted and checked; stage 5 status 2 = no AppOS volume, e.g. a two-window userdata). The App jobs are disabled only
+when the mount did not reach stage 8, so a kernel without the cryptex still never hangs Safari. `fajita-appos=2` also links
+`Cryptexes/OS` to `/` (SystemOS is the union at `/`), for adattributiond's `/System/Cryptexes/OS/...` program.
+
+Userdata: `scripts/fajita/userdata-windows.py` writes only the manifest block and the AppOS window (a 10 MiB sparse image;
+`fastboot flash userdata .cache/fajita-out/userdata-windows/userdata-windows.simg`, under phone.lock). Its two-window manifest
+(`--windows OS,SystemOS`) is byte-identical to the one read off the phone (`ufspart.py read userdata 4194304 1 --to F`, sha256
+`7fcc6240...`); the three-window one is `7e82317e...`. The phone has the three-window image since 2026-10-26 07:17. **A kernel without the AppOS
+policy (any build before this change) finds no policy for the AppOS window and publishes no root**: merge ios16-port first, or flash the
+two-window manifest back (`userdata-windows.py --windows OS,SystemOS`, 4 KiB).
+
+Result (sessions 071820, 072707, 072954, Wi-Fi up): `scripts/fajita/test/cryptex-jobs.sh --ping` (looks up each job's first Mach service,
+sends it a message, watches the process table) shows Safari.History, webbookmarksd, webinspectord, safarifetcherd, passwordbreachd,
+SafariBookmarksSyncAgent and AuthenticationServicesAgent run from the cryptex (webinspectord exits again when idle). MobileSafari's main thread
+idles in its run loop (spindump) and apple.com loads and draws, product images included (`.cache/appos/safari-apple3.png`). Not solved:
+**webpushd** (App) and **adattributiond** (OS, tried with `fajita-appos=2`): their services are found (look_up 0) but a message gets no answer
+and launchd never spawns a process (20 ms sampling, no CRASH row); the binary runs when started by hand. Ruled out by an overlay of their
+plists (the GPU addon's `daemons/` union over /System/Library/LaunchDaemons): webpushd without `StandardErrorPath`, adattributiond with an
+explicit `Program`. Both stay disabled (a never-answered lookup is what hung Safari), as does `fairplayd.H2`. Next step there: launchd's own
+view of the job (an xpc_pipe `print` like launchctl's), which this board has no tool for yet.
 
 Third blocker, the black page (fixed 2026-10-26): the page loads (padlock, title "Apple" / "Example Domain", find-on-page counts its text)
 but the content area is black. Earlier findings that still hold: not the GPU process as such, not the plugin's CPU-held textures

@@ -26,12 +26,17 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 [ipsw.sha256]
 "087-86698-044.dmg" = "80f426d5b8fca8552f95be427434f1911dbb4c2c6d28aad94f2426ddd0c92483"             # OS
 "087-86593-047.dmg" = "9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849"             # Cryptex1,SystemOS
+"087-86715-047.dmg" = "391f2df322c3172b021b2874f6da5c3e78b70b3df8f502e1a4af2b1d715c4608"             # Cryptex1,AppOS (raw APFS)
 "087-86698-044.dmg.trustcache" = "63e01c03b31e1532a5581a24865490673f0b5c297b0199fe0095637c6100ef4b"  # StaticTrustCache
 "087-86593-047.dmg.trustcache" = "9cc478fe3525e2683b5b9ea1eea0851eaebebdab21d206556233400e59d2e361"  # Cryptex1,SystemTrustCache
 "DeviceTree.d221ap.im4p" = "889e838319619c10f5f7f6ef25f9ff2a3a652a3c078803038ba678efa1201b79"
 
-# The second root image of userdata: the OS and SystemOS disk images of 20H392 behind a version 2 manifest at 16 GiB,
+# The second root image of userdata: the OS, SystemOS and AppOS disk images of 20H392 behind a version 2 manifest at 16 GiB,
 # after the iPadOS image (8.74 GiB at 0). The kernel finds it with native-ufs-root-base=16384 (drivers/NativeUfs).
+# AppOS (Cryptex1,AppOS, 10 MiB: Safari's daemons) is the third window, after SystemOS, so the OS and SystemOS offsets are those of
+# the two-window image: scripts/fajita/userdata-windows.py writes just the manifest and the AppOS window (a ~10 MiB sparse image).
+# The kernel mounts it at /private/preboot/Cryptexes/App with fajita-appos=1 (package/BootCryptexMount.c). A kernel without the
+# AppOS policy (built before it) refuses a three-window image: it finds no policy for the AppOS window and publishes no root.
 [userdata]
 first_lba = 0x186f40
 last_lba = 0x3ad1ffa
@@ -40,6 +45,7 @@ base_mib = 16384
 windows = [
   { name = "OS", component = "OS" },
   { name = "SystemOS", component = "Cryptex1,SystemOS" },
+  { name = "AppOS", component = "Cryptex1,AppOS" },
 ]
 
 [kernel]
@@ -60,8 +66,8 @@ archives = [
   { run = "build-fajita-storage.py --ipsw-build 20H392", when = "XNU_NATIVE_VIRTIO_BLOCK" },
   { run = "build-arm-driver.py NativeRamBlock", when = "XNU_NATIVE_RAM_BLOCK" },
   { run = "build-native-virtio-bindings.py --component NativeRamBlock --directory build/native-ram-block", when = "XNU_NATIVE_RAM_BLOCK" },
-  # owner keys, OS and SystemOS policies over the 20H392 images, libVerifiedRootProbe.a
-  { run = "build-fajita-verified-root.py --ipsw-build 20H392 --image os:087-86698-044.dmg:DADD93F8-DBBF-4B17-A1DF-0F11E64172F7:6e87bfcaa8eca952e00b719f333d1f1060715a63566112267ad8730e1ed98906:1375753 --image systemos:087-86593-047.dmg:96096B28-B6DC-4BC7-9D3A-2632A0FE53F1:9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849:669696", when = "XNU_VERIFIED_ROOT_PROBE" },
+  # owner keys, OS, SystemOS and AppOS policies over the 20H392 images, libVerifiedRootProbe.a
+  { run = "build-fajita-verified-root.py --ipsw-build 20H392 --image os:087-86698-044.dmg:DADD93F8-DBBF-4B17-A1DF-0F11E64172F7:6e87bfcaa8eca952e00b719f333d1f1060715a63566112267ad8730e1ed98906:1375753 --image systemos:087-86593-047.dmg:96096B28-B6DC-4BC7-9D3A-2632A0FE53F1:9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849:669696 --image appos:087-86715-047.dmg:9E10DDA7-90D9-4677-844A-E984BB1CCD0A:391f2df322c3172b021b2874f6da5c3e78b70b3df8f502e1a4af2b1d715c4608:2560", when = "XNU_VERIFIED_ROOT_PROBE" },
   { run = "build-arm-driver.py NativeUfs", when = "XNU_NATIVE_UFS" },
   { run = "build-native-spmi.py", when = "XNU_BOOT_PROGRESS" },   # libNativeSpmi.a: SPMI PMIC arbiter v5 bus (drivers/NativeSpmi); idle until called
   { run = "build-fajita-rtc.py", when = "XNU_BOOT_PROGRESS" },    # libFajitaRtc.a: PM8998 RTC wall clock as IORTC (drivers/FajitaRtc, fajita-rtc=<n>)
@@ -188,6 +194,9 @@ board_args = [
   # PMIC keys (power, volume up/down) as HID consumer usages through NativeHidInput's report 2; the battery as an IOPMPowerSource
   # (AppleSmartBattery) for powerd, from the bq27411 gauge on i2c10 (read only). NOTES-pmic.md.
   "fajita-pmic-keys=1","native-hid-buttons=1","fajita-pmic-batt=1","fajita-pmic-bq=2",
+  # The App cryptex (Cryptex1,AppOS, the third root window) at /private/preboot/Cryptexes/App (package/BootCryptexMount.c): Safari's history,
+  # bookmarks, inspector, fetcher, password and AutoFill daemons run from it. Needs the three-window userdata (scripts/fajita/userdata-windows.py).
+  "fajita-appos=1",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,

@@ -94,7 +94,7 @@ default.
 ```
 userdata (LUN 0, 4096-byte LBAs 0x186f40..0x3ad1ffa, 229.2 GiB)
 0         SHNGROOT v1 manifest, OS, SystemOS of 21H461      about 8.74 GiB, unchanged
-16 GiB    SHNGROOT v2 manifest, OS, SystemOS of 20H392      about 7.0 GiB
+16 GiB    SHNGROOT v2 manifest, OS, SystemOS, AppOS of 20H392   about 7.8 GiB (AppOS since 2026-10-26: NOTES-wifi.md section 9)
 ...       free
 end - 1 GiB - store   persistent Data store (sheng-data-persist, off on fajita)
 end - 1 GiB           reserve: log export region and the 32 MiB log (sheng-log)

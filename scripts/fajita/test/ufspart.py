@@ -6,6 +6,8 @@
   ufspart.py backup [--out DIR] [NAME...] read each partition twice, chunk by chunk (kcmd ufspart read + readv, each chunk
                                           CRC-checked), require both passes identical, write DIR/NAME.img + DIR/manifest.json
                                           (default DIR .cache/efs-backup, names modemst1 modemst2 fsg fsc persist)
+  ufspart.py read NAME OFF COUNT --to F   COUNT 4096-byte blocks at block OFF of NAME (any size, chunked and CRC-checked) into F,
+                                          e.g. the iOS 16 root manifest: read userdata 4194304 1 --to manifest.bin (16 GiB in)
   ufspart.py verify [--out DIR]           re-check the backup against the phone's GPT (size, LUN, range, type and unique
                                           GUIDs) and against the manifest's sha256; exit 1 on any mismatch
 
@@ -94,12 +96,21 @@ def read_part(p):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=['find', 'list', 'backup', 'verify'])
+    ap.add_argument('cmd', choices=['find', 'list', 'backup', 'verify', 'read'])
     ap.add_argument('names', nargs='*')
     ap.add_argument('--out', default=str(ROOT / '.cache' / 'efs-backup'))
     ap.add_argument('--passes', type=int, default=2)
+    ap.add_argument('--to', help='read: the output file')
     a = ap.parse_args()
     out = Path(a.out)
+    if a.cmd == 'read':
+        if len(a.names) != 3 or not a.to:
+            raise SystemExit('read NAME OFF COUNT --to FILE')
+        name, off, count = a.names[0], int(a.names[1], 0), int(a.names[2], 0)
+        data = b''.join(read_chunk(name, at, min(CHUNK, off + count - at)) for at in range(off, off + count, CHUNK))
+        Path(a.to).write_bytes(data)
+        print('%s blocks %d+%d: %d bytes sha256 %s -> %s' % (name, off, count, len(data), hashlib.sha256(data).hexdigest(), a.to))
+        return 0
     if a.cmd == 'find':
         for n in a.names or NAMES:
             print(json.dumps(find(n)))

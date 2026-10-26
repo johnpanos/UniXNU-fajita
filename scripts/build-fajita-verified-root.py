@@ -123,7 +123,11 @@ def policy(manifest, native, keys, component, member, volume, expected_sha256, e
                 return
     dmg = IPSW / member
     if not dmg.is_file():
-        raise SystemExit(f'{dmg} missing: run "unixnu ipsw fetch OS Cryptex1,SystemOS" first')
+        # The board's own IPSW cache next to the verified-root cache (.cache/ipsw/<build>): the unixnu IPSW step fetches only the
+        # small components, and an image first hashed here (a new window) is there.
+        dmg = CACHE.parent / 'ipsw' / IPSW.name / member
+    if not dmg.is_file():
+        raise SystemExit(f'{dmg} missing: run "unixnu ipsw fetch OS Cryptex1,SystemOS" (and Cryptex1,AppOS) first')
     size = userdata.image_size(dmg)
     out = ROOT / f'build/verified-root-{component}'
     shutil.rmtree(out, ignore_errors=True)
@@ -200,8 +204,9 @@ def parse_arguments():
     global IPSW, IMAGES
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--ipsw-build', default='21H461', help='the IPSW build whose members are read (ipsw/<build>)')
+    # More than two images: every image other than os and systemos is an extra root window (ios16: appos, Cryptex1,AppOS).
     parser.add_argument('--image', action='append', default=[],
-                        help='component:member:volume UUID:expanded sha256:4096-byte blocks, in place of the 21H461 pair')
+                        help='component:member:volume UUID:expanded sha256:4096-byte blocks, in place of the 21H461 pair (repeat per image)')
     args = parser.parse_args()
     IPSW = ROOT.parents[1] / 'ipsw' / args.ipsw_build
     if args.image:
@@ -223,7 +228,9 @@ def main():
     # The probe's compile flags come from the bsd_init.o record, which names EXPORT_HDRS/libsa; a Linux kernel build has no such
     # directory, and upstream clang treats a missing include directory as an error under -Werror.
     (ROOT / 'build/xnu/ios-obj/EXPORT_HDRS/libsa').mkdir(parents=True, exist_ok=True)
-    subprocess.run(['python3', ROOT / 'scripts/build-verified-root-probe.py', '--component', 'os', '--include-systemos'],
+    # Images beyond OS and SystemOS (the iOS 16 board's Cryptex1,AppOS window) join the bundle as extra policies.
+    extra = [arg for image in IMAGES if image[0] not in ('os', 'systemos') for arg in ('--extra-policy', image[0])]
+    subprocess.run(['python3', ROOT / 'scripts/build-verified-root-probe.py', '--component', 'os', '--include-systemos', *extra],
                    cwd=ROOT, check=True)
 
 
