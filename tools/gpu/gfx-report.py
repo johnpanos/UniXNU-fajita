@@ -384,9 +384,11 @@ def report(run, refs, quiet=False):
     stab = json.load(open(os.path.join(run, 'stability.json'))) if os.path.exists(os.path.join(run, 'stability.json')) else {}
     L = []
     meta = json.load(open(os.path.join(run, 'meta.json'))) if os.path.exists(os.path.join(run, 'meta.json')) else {}
-    L.append('gfx suite %s %s' % (os.path.basename(os.path.abspath(run)), ' '.join('%s=%s' % kv for kv in sorted(meta.items()) if kv[0] not in ('env', 'start'))))
+    L.append('gfx suite %s %s' % (os.path.basename(os.path.abspath(run)), ' '.join('%s=%s' % kv for kv in sorted(meta.items()) if kv[0] not in ('env', 'start', 'diag'))))
     if meta.get('start'):
         L.append('start: %s%s' % (meta['start'], '' if meta.get('settled', 1) else '  !! NOT SETTLED'))
+    if meta.get('diag'):
+        L.append('!! DIAG RUN (a diagnostic was on; timings are not representative): %s' % meta['diag'])
     if meta.get('env'):
         L.append('gpu-env: ' + ' '.join(meta['env']))
     L.append('vsync %.3f ms (%.2f Hz); motion windows: touch to IDLE_MS %.0f after the lift (TAIL_MS %.0f); frames: panel latches' % (

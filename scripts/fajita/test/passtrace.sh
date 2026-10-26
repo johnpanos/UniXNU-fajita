@@ -2,7 +2,7 @@
 # passtrace.sh: per-pass GPU time of the render server, aggregated on the phone (NativeMetal PassTrace.h), in a running session.
 #   passtrace.sh on [EXTRA_ENV_FILE]   gpu-env NGPU_FRAME_TRACE=1 + NGPU_PASS_TRACE=backboardd (+ the lines of EXTRA_ENV_FILE), restart backboardd
 #   passtrace.sh reset                 clear the phone's aggregates (they cover what follows: run it right before a measurement)
-#   passtrace.sh pull [OUT]            the summary (default $FAJITA_WORK/passes.csv), then tools/gpu/frametrace.py --passes on it; with
+#   passtrace.sh pull [OUT]            (then turns the diagnostics off again: plain gpu-env, backboardd restarted; KEEP=1 keeps them) the summary (default $FAJITA_WORK/passes.csv), then tools/gpu/frametrace.py --passes on it; with
 #                                      CPU=1 also the CPU profile (NGPU_CPU_PROFILE, CpuProfile.h) into OUT's directory as cpuprof.txt
 #   CPU=1 passtrace.sh on              also NGPU_CPU_PROFILE=backboardd: the render server's command-buffer threads sampled every 1 ms
 #   CPU=1 PASSES=0 passtrace.sh on     the CPU profile and frame trace without the pass trace (u_trace allocates BOs at encode: it adds
@@ -30,7 +30,10 @@ case "$1" in
   on) { printf 'NGPU_FRAME_TRACE=1\n'; [ "$PASSES" != 0 ] && printf 'NGPU_PASS_TRACE=backboardd\n'; [ -n "$CPU" ] && printf 'NGPU_CPU_PROFILE=backboardd\n'; [ -n "$2" ] && cat "$2"; } > "$W/.pt-env"; pushenv "$W/.pt-env"; restart ;;
   off) printf '# plain\n' > "$W/.pt-env"; pushenv "$W/.pt-env"; restart ;;
   reset) reset ;;
-  pull) pull "$2" ;;
+  pull) pull "$2"
+        # The diagnostics go off with the pull (KEEP=1 keeps them): left in the persistent gpu-env they tainted every later measurement
+        # (NGPU_CPU_PROFILE=backboardd, 66-80% of a core, 2026-10-26).
+        [ "${KEEP:-0}" = 1 ] || { printf '# plain\n' > "$W/.pt-env"; pushenv "$W/.pt-env"; restart; echo "passtrace: diagnostics off (plain gpu-env, backboardd restarted)"; } ;;
   fps) reset; "$TD/fps.sh"; pull "$2" ;;
   *) sed -n '2,9p' "$0"; exit 2 ;;
 esac

@@ -107,6 +107,10 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Speed is `fps.sh`: home swipes and App Library scroll. Report both numbers.
 - Correctness is a screenshot diff against the references (`settings-scroll.sh`, `gpu-ab.sh`). A faster frame that draws wrong is
   a regression.
+- Diagnostics left in the phone's persistent `/private/var/ngpu/gpu-env` taint every later run: `NGPU_CPU_PROFILE=backboardd`, left by a
+  profiling session, took 66-80% of a core of backboardd through a day of gfx-suite runs. A tool that turns a diagnostic on turns it off
+  again when it is done (passtrace.sh pull, gpu-ab.sh on exit); gfx-suite.sh prints the phone's gpu-env and refuses to measure with a
+  diagnostic in it (DIAG=1 marks the run instead); the plugin's status rows say `DIAG ...` while one is on (rows.py DIAG).
 - Check your own diagnostics first: debug stops, `boot-progress` and probe arguments in the kit can be the cause of a "hang".
 
 **Never drop silently.**

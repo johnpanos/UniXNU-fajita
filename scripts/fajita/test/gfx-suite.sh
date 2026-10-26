@@ -7,7 +7,7 @@
 # Scenes (default all): home applib settings calendar maps web-hn web-wiki web-apple web-heavy (web-*: Wi-Fi up). Apps with real
 # content on this Data: Settings, Calendar (day view), Maps; Photos and Notes are empty and the App Store cannot connect (no Apple ID).
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
-# WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
+# DIAG=1 (measure with a diagnostic in gpu-env anyway, the report marked DIAG), WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -56,8 +56,24 @@ log "tools: $NGPU $FJB"
 ENVF=$O/gpu-env; : > $ENVF
 [ -n "${ENV:-}" ] && grep -v '^\s*#' "$ENV" | grep . >> $ENVF
 [ "${TRACE:-1}" = 1 ] && echo NGPU_FRAME_TRACE=1 >> $ENVF
+# The phone's gpu-env persists across backboardd restarts and boots of the same Data: a diagnostic left in it (a CPU profiler, a pass trace, a
+# capture) taints every later measurement (NGPU_CPU_PROFILE=backboardd took 66-80% of a core for a day of runs, 2026-10-26). It is printed,
+# and a diagnostic key there stops the run unless DIAG=1 (the run is then marked DIAG); at the end the phone gets the plain gpu-env, never a
+# diagnostic one back.
+DIAGKEYS='NGPU_CPU_PROFILE|NGPU_PASS_TRACE|NGPU_CAPTURE|MESA_GPU_TRACES|MESA_GPU_TRACEFILE|TU_GPU_TRACEPOINT|NGPU_SURFACE_PROBE|ngpu-trace|IR3_SHADER_DEBUG|NGPU_CPU_HELD=2'
+T=30 $SS pull /private/var/ngpu/gpu-env $O/gpu-env.before >/dev/null 2>&1
+log "phone gpu-env before the run: $(grep -v '^\s*$' $O/gpu-env.before 2>/dev/null | tr '\n' ' ')"
+left=$(grep -v '^\s*#' $O/gpu-env.before 2>/dev/null | grep -E "$DIAGKEYS" | tr '\n' ' ')
+asked=$( [ -n "${ENV:-}" ] && grep -v '^\s*#' "$ENV" | grep -E "$DIAGKEYS" | tr '\n' ' ')
+diag="$asked"
+if [ -n "$left" ]; then
+  if [ "${NORESTART:-0}" = 1 ]; then
+    [ "${DIAG:-0}" = 1 ] || { log "!! diagnostics left in the phone's gpu-env ($left) and NORESTART=1: refusing to measure (DIAG=1 measures anyway)"; exit 1; }
+    diag="$left $asked"
+  else log "!! diagnostics left in the phone's gpu-env ($left): replaced by this run's (backboardd restarts), the plain one restored at the end"; fi
+fi
+[ -n "$asked" ] && [ "${DIAG:-0}" != 1 ] && { log "!! ENV asks for diagnostics ($asked): DIAG=1 to measure with them"; exit 1; }
 if [ "${NORESTART:-0}" != 1 ]; then
-  T=30 $SS pull /private/var/ngpu/gpu-env $O/gpu-env.before >/dev/null 2>&1
   T=60 $SS push $ENVF /private/var/ngpu/gpu-env 644 >/dev/null 2>&1
   T=30 $SS pull /private/var/ngpu/gpu-env $O/gpu-env.check >/dev/null 2>&1; cmp -s $ENVF $O/gpu-env.check || { echo "gfx-suite: gpu-env push failed"; exit 1; }
   T=30 $SS run /usr/sbin/ngpu-metal killall backboardd >/dev/null 2>&1
@@ -91,10 +107,16 @@ while [ $(( $(date +%s) - t0 )) -lt ${SETTLE_MAX:-90} ]; do
   [ "${busy%% *}" -lt ${SETTLE_CPU:-25} ] && [ "${temp:-99}" -lt ${SETTLE_TEMP:-65} ] && { settled=1; break; }
 done
 echo "$cpu" | sed -n 1,10p >> $O/start.txt
+# The plugin's shader primer (NativeMetal PrimeShaders.h) compiles the OS's Metal libraries in the render server once per Data, only while
+# the screen is still (and one pipeline a minute while it moves): its row says whether it is done; a run before that is flagged.
+dg=$(KM=$KM timeout 30 python3 -I $TD/rows.py DIAG 2>/dev/null | tr '\n' ' ')
+[ -n "$dg" ] && { log "!! the plugin reports diagnostics on: $dg"; [ "${DIAG:-0}" = 1 ] || exit 1; }
+[ -n "$diag" ] && echo "DIAG $diag" >> $O/start.txt
 log "start: $([ $settled = 1 ] && echo settled || echo "NOT settled after ${SETTLE_MAX:-90} s") | $(tail -1 $O/start.txt | cut -c1-60) | $(grep settle: $O/start.txt | tail -1 | cut -d'|' -f1-2 | cut -c12-)"
 python3 -I -c "
 import json; m=json.load(open('$O/meta.json')); m['settled']=$settled
-m['start']=[l for l in open('$O/start.txt') if 'settle:' in l][-1].split('settle: ')[-1].strip()[:140]; json.dump(m,open('$O/meta.json','w'))" 2>/dev/null
+m['start']=[l for l in open('$O/start.txt') if 'settle:' in l][-1].split('settle: ')[-1].strip()[:140]
+m['diag']=' '.join(l.strip() for l in open('$O/start.txt') if l.startswith('DIAG'))[:200]; json.dump(m,open('$O/meta.json','w'))" 2>/dev/null
 
 # 3. Scenes. Navigation happens before each capture; the capture holds only the scene's own steps.
 scene() {   # scene NAME CPU-PROCS STEP...
@@ -168,7 +190,9 @@ json.dump({'crashes': sum(by.values()), 'backboardd_crashes': by.get('backboardd
            'panics': sum('panic' in l.lower() for l in lines), 'log_lines': len(lines),
            'crash_by_process': ['%s x%d' % kv for kv in sorted(by.items(), key=lambda kv: -kv[1])]}, open(out, 'w'))
 EOF
-[ -f $O/gpu-env.before ] && T=60 $SS push $O/gpu-env.before /private/var/ngpu/gpu-env 644 >/dev/null 2>&1   # the trace stays on in this backboardd only
+# The gpu-env from before, unless it held a diagnostic: then the plain one (the trace stays on in this backboardd only)
+if [ -f $O/gpu-env.before ] && ! grep -v '^\s*#' $O/gpu-env.before | grep -qE "$DIAGKEYS"; then T=60 $SS push $O/gpu-env.before /private/var/ngpu/gpu-env 644 >/dev/null 2>&1
+else printf '# no diagnostics\n' > $O/gpu-env.plain; T=60 $SS push $O/gpu-env.plain /private/var/ngpu/gpu-env 644 >/dev/null 2>&1; fi
 if [ "${REBASE:-0}" = 1 ]; then mkdir -p $W/gfx/refs; cp $O/*.png $W/gfx/refs/ 2>/dev/null; log "references saved to $W/gfx/refs"; fi
 python3 -I $BOARD/tools/gpu/gfx-report.py $O
 [ "${REPEAT:-1}" -gt 1 ] && python3 -I $BOARD/tools/gpu/gfx-report.py --noise $O
