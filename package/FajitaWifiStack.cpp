@@ -489,6 +489,16 @@ extern "C" void fajita_wifi_stack(unsigned stage)
                     IOLog("fajita-wifi: FW3t %u:%s\n", i, t);
                 }
             }
+            {   // every GLINK channel the modem has opened (and ours): what it is waiting for an answer on
+                char cl[200] = "";
+                for (unsigned i = 0; i < WGLINK_MAX_CH && strlen(cl) < 150; ++i) {
+                    const wglink_channel &c = gGlink.ch[i];
+                    if (!c.used) continue;
+                    snprintf(cl + strlen(cl), sizeof cl - strlen(cl), " %s(r%u,l%u,%s)", c.name, c.rcid, c.lcid, c.ready ? "ready" : c.ack_sent ? "acked" : "open");
+                }
+                static char lastcl[200];
+                if (strcmp(cl, lastcl)) {strlcpy(lastcl, cl, sizeof lastcl); IOLog("fajita-wifi: FW3c glink channels:%s\n", cl);}
+            }
             if (gQrtr.ndrop_log != gDropShown || gPdm.nnames != gNamesShown) {
                 gDropShown = gQrtr.ndrop_log; gNamesShown = gPdm.nnames;
                 for (unsigned i = 0; i < gPdm.nnames; ++i) IOLog("fajita-wifi: FW4 pdr-req %u %s\n", i, gPdm.names[i]);

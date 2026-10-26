@@ -349,6 +349,27 @@ void survey()
     rowAdd("FWM survey bad-access %u (reads of unmapped offsets)", gBadAccess);
 }
 
+// The WCN3990's rails and RF clock as RPMh resources (cmd-db names; the VRM registers are enable +0, voltage mV +4, mode +8; the
+// clock's enable is +0): read-only here, so a log shows what the firmware left on before anything is voted.
+void railsRow(const char *when)
+{
+    static const char *const kNames[] = {"ldoa5", "ldoa7", "ldoa17", "ldoa25", "ldoa23", "rfclka1", "rfclka2", "rfclka3"};
+    if (!fajita_rpmh_lookup || !fajita_rpmh_send) {rowAdd("FWM rails (%s): no RPMh helpers", when); return;}
+    char line[200] = "";
+    for (const char *name : kNames) {
+        uint32_t addr = 0;
+        uint8_t aux[16] = {};
+        unsigned n = sizeof aux;
+        if (fajita_rpmh_lookup(name, &addr, aux, &n) || !addr) {snprintf(line + strlen(line), sizeof line - strlen(line), " %s:-", name); continue;}
+        const uint32_t cmd[3][3] = {{kMsgReadResp, addr, 0}, {kMsgReadResp, addr + 4, 0}, {kMsgReadResp, addr + 8, 0}};
+        uint32_t resp[3] = {};
+        const int t = fajita_rpmh_send(3, cmd, resp);
+        snprintf(line + strlen(line), sizeof line - strlen(line), " %s@%x:%s en%u %umV mode%u", name, addr, t < 0 ? "ERR" : "ok", resp[0], resp[1], resp[2]);
+        if (strlen(line) > 120) {rowAdd("FWM rails (%s)%s", when, line); line[0] = 0;}
+    }
+    if (line[0]) rowAdd("FWM rails (%s)%s", when, line);
+}
+
 bool setup()
 {
     if (!gLock) gLock = IOLockAlloc();
@@ -399,12 +420,14 @@ extern "C" int fajita_wifi_modem(void)
     IOLockLock(gLock);
     int rc;
     if (dry) {
+        railsRow("dry");
         survey();
         rowAdd("FW2 modem: dry run (fajita-wifi-mss-dry=1): registers read, nothing written, modem not started");
         strlcpy(fajita_wifi_rows[2], "FW2 modem dry run: registers read only (see FWM survey rows)", sizeof fajita_wifi_rows[2]);
         IOLockUnlock(gLock);
         return -1;
     }
+    railsRow("before boot");
     survey();           // the state before: whether a reset is held, which clocks are already on, and that every window answers
     const uint64_t t0 = nowUs();
     rc = wmss_boot(gM);
