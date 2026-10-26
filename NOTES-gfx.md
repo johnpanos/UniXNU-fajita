@@ -280,3 +280,24 @@ CA's ring (`can_update_`, two entries) already has N+1 submitted. Accepting a se
   copy still waits on the GPU for CA's own N+1 work (offer -> copy start 7.7 ms today is mostly that). Worth it only if the CAWATCH
   pass shows CANT ticks whose previous retire lands within a couple of ms after the tick. About 150-200 lines across two drivers with
   the wedge invariants above: not small, so not coded until the watcher says CANT is a real share of the gaps.
+
+### Watcher check (session-144333, fresh Data before the final reset, home swipes, fajita-frame-info=1)
+
+- `--watch-ca` finds 4 server objects (all of the second vtable class); the live one (newest tick) ticks every 320352 ticks
+  (16.685 ms), its timer's deadline one interval ahead, next update 0 at a commit and inf at the render, the swap ring turning.
+- **Frame info is ignored, whatever its id:** CA keeps no FrameInfo records (D+0x9f2 bit 35 clear, flags 0x8407c20801), so
+  collect_frame_info finds nothing and add_timing never runs: the phase reference stays 0. The display sent 294 frame infos to a
+  registered client with ids equal to the generation (fi_id_differs 0). fajita-frame-info=2 cannot change that; what sets bit 35
+  is the next question (finish_update keeps a record only then).
+- Ticks sit in one phase bin against the panel's rd_ptr (330 of 414 in bin 3) over this 20 s scene: the 59.94 Hz timer and the
+  panel run at nearly the same period, so the drift is slow, not absent.
+- One home scene, 414 ticks: RENDER 305, IDLE 78, LATE 15 (the render on the timer thread ran past the next tick), CANT 10, STOPPED
+  6 (the timer had stopped while idle). Of the 22 gaps of 2+ ticks between renders, 15 are LATE and 10 have a CANT tick; most CANT
+  ticks have the previous swap retiring 1.0-1.4 ms after the tick (the two-swaps case).
+- **Why CA ignored frame info (found from the check):** EAGLServer's constructor sets IOMFBDisplay::set_frame_info_enabled from
+  `IOMobileFramebufferFrameInfo(fb, callback, server, 1) == 0`; that call registers the type-3 notification and sends
+  ChangeFrameInfo (selector 73), whose backend slots (292 at registration, 211 for ChangeFrameInfo) were guarded leaves returning
+  kIOReturnUnsupported (console: UNIMPLEMENTED SLOT 292, then 211, at 163 s). So the call failed and CA disabled frame info for the
+  boot, while the display kept delivering it to the registered client. With frame info on, both slots now return success
+  (native_legacy_frame_info_leaf counts them; gfx-scene records fi_leaf292/fi_leaf211). That is what fi1 and fi2 test now; d6763c9's
+  null result predates it.

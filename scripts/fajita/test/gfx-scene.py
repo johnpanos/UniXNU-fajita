@@ -126,7 +126,8 @@ COUNTERS = [('latch_n', 'fajita_dpu_latch_n', 0, 4), ('vsync_n', 'fajita_dpu_vsy
             ('peak_jobs', 'native_adreno_submit_backpressure', 2, 4),
             ('fi_sent', 'native_legacy_frame_info', 0, 4), ('fi_clients', 'native_legacy_frame_info', 1, 4),
             ('fi_failed', 'native_legacy_frame_info', 2, 4), ('fi_noclient', 'native_legacy_frame_info', 3, 4),
-            ('fi_id_differs', 'native_legacy_frame_info', 4, 4), ('fi_last_id', 'native_legacy_frame_info', 5, 4)]
+            ('fi_id_differs', 'native_legacy_frame_info', 4, 4), ('fi_last_id', 'native_legacy_frame_info', 5, 4),
+            ('fi_leaf292', 'native_legacy_frame_info_leaf', 0, 4), ('fi_leaf211', 'native_legacy_frame_info_leaf', 1, 4)]
 
 
 def counters():

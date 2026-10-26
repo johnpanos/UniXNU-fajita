@@ -68,6 +68,8 @@ extern "C" volatile uint32_t fajita_dpu_latch_n __attribute__((weak));
 // (selector 74) enumerates them, and what was sent: [0] notifications, [1] clients they went to, [2] send failures, [3] frames with no
 // client registered, [4] mode-2 frames whose swap id differed from the completed generation (mode 1's id), [5] the last id sent.
 extern "C" {volatile uint32_t native_legacy_frame_info[6];}
+// The frame-info backend calls answered with success: [0] slot 292 (registration), [1] slot 211 (ChangeFrameInfo).
+extern "C" {volatile uint32_t native_legacy_frame_info_leaf[2];}
 static const char *const kFrameInfoKeys[]={"Presentation_time","Vbl_FrameTime"};
 // IOUserClient's async send is protected; the original family's own senders call it from its user client. Never instantiated.
 struct NativeFrameInfoSend : public IOUserClient {
@@ -798,7 +800,15 @@ public:
         OSSafeReleaseNULL(mapping);return valid;
     }
 // A leaf the render server reaches logs loudly and fails the call (x0 = kIOReturnUnsupported) instead of panicking the kernel.
-#define LEAF(n) __attribute__((noinline)) void opaque##n() override { native_legacy_backend_miss(n,this,__builtin_return_address(0)); __asm__ volatile("mov w0, #0x2c7\n\tmovk w0, #0xe000, lsl #16":::"x0","memory"); }
+// With frame info on (fajita-frame-info=1/2) the two frame-info backend calls succeed instead (x0 = kIOReturnSuccess): on 20H392 slot
+// 292, made when the render server registers its frame-info notification, and 211, ChangeFrameInfo (selector 73). Failing them made
+// IOMobileFramebufferFrameInfo fail, so QuartzCore's EAGLServer called IOMFBDisplay::set_frame_info_enabled(false): CA kept no
+// per-swap records and ignored every frame info sent (watcher check, session-144333: D+0x9f2 bit 35 clear; console: UNIMPLEMENTED
+// SLOT 292, then 211 three times at 163 s). The sender needs nothing from them: it walks the family's client queue 3 itself.
+static bool frameInfoLeaf(unsigned slot) {return frameInfoEnabled() && NATIVE_LEGACY_REQUEST_SWAP_ID>=0 && (slot==211 || slot==292);}
+#define LEAF(n) __attribute__((noinline)) void opaque##n() override { \
+    if(frameInfoLeaf(n)){native_legacy_frame_info_leaf[n==211]=native_legacy_frame_info_leaf[n==211]+1;__asm__ volatile("mov w0, #0":::"x0","memory");return;} \
+    native_legacy_backend_miss(n,this,__builtin_return_address(0)); __asm__ volatile("mov w0, #0x2c7\n\tmovk w0, #0xe000, lsl #16":::"x0","memory"); }
     // 211, 245, 246, 306, 307, 338 and 345 on 21H461 (OriginalLegacyLayout.h).
     NATIVE_LEGACY_GUARDED_LEAVES(LEAF)
 #undef LEAF
