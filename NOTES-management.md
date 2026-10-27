@@ -20,6 +20,10 @@ own NOTES file; this log links to them.
   the sensor DSP), audio, Bluetooth, GNSS/video decode/cameras. Brightness and slider runs are under way.
 - Landed: brightness (b0be604; brightness-check.sh proves the Control Center slider drives the panel). Next: alert slider,
   thermal (FajitaThermal.cpp with a host-tested throttling policy) in progress.
+- Landed: thermal (a274b02): the CPU thermal governor is on by default; iOS temperature services behind fajita-thermal=3
+  (experimental). The alert slider hit 7 phone runs without landing; the agent was told to land a fix or record it as open.
+- The graphics smear hunt overran its 20-minute bound to 98 minutes and two stop messages; the lead killed the job to free the
+  phone. Lesson: give a long hunt a hard --max in bg.sh at launch, not just a bound in a message.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
