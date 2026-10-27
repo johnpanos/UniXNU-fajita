@@ -208,6 +208,8 @@ static void step(wdev *d)
             if (r) {fail(d, r); return;}
             const wmlme_ops mo = {d, mlme_eapol_tx, mlme_random, mlme_now, dma_alloc3, mlme_state};
             wmlme_init(&d->mlme, &mo, &d->wmi, d->mac, 0);
+            d->mlme.band_pref = d->band_pref;
+            if (d->mgmt_seq_random) wmlme_seed_seq(&d->mlme);
             d->mlme_up = 1;
             r = wmlme_start(&d->mlme);
             if (r) {fail(d, r); return;}

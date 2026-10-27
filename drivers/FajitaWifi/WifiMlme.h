@@ -26,6 +26,13 @@ extern "C" {
 #define WMLME_MGMT_BYTES 512u
 #define WMLME_TIMEOUT_MS 1000u        // authentication / association / key steps
 #define WMLME_RETRIES 3u
+#define WMLME_5G_GOOD_DBM (-70)       // WMLME_BAND_AUTO: a 5 GHz BSS at least this strong beats any 2.4 GHz one
+
+// Which BSS of the SSID wmlme_find and wmlme_connect choose (wmlme.band_pref; fajita-wifi-band=). Usable RSN first, always.
+enum {WMLME_BAND_STRONGEST = 0,   // the strongest signal, either band
+      WMLME_BAND_AUTO,            // 5 GHz when its signal is good (>= WMLME_5G_GOOD_DBM), else the strongest (a supplicant's band bias)
+      WMLME_BAND_2G,              // 2.4 GHz if there is one, else the strongest
+      WMLME_BAND_5G};             // 5 GHz if there is one, else the strongest
 
 enum {WMLME_OK = 0, WMLME_ERR_INVAL = -22, WMLME_ERR_NOENT = -2, WMLME_ERR_BUSY = -16, WMLME_ERR_PROTO = -71, WMLME_ERR_NOTSUP = -95};
 
@@ -41,6 +48,9 @@ typedef struct {
     uint8_t pmf;                            // the AP's RSN capabilities: 0 no PMF, 1 capable (MFPC), 2 required (MFPR)
     int ht;                                 // advertises HT (the connect still uses legacy rates)
     uint32_t seen_ms; int probe_resp;
+    uint16_t n_beacons, n_probe_resps;
+    uint8_t rsnxe_len, rsnxe0;              // the RSNXE (244): length, first octet (bit 5 = SAE hash-to-element); 0 = none
+    uint8_t h2e_only;                       // the rates carry BSS membership selector 123 (SAE H2E only)      // frames seen from this BSS (probe responses answer the firmware's own probe requests)
 } wmlme_bss;
 
 enum {
@@ -92,6 +102,12 @@ typedef struct wmlme {
     // counters
     uint32_t scan_full, scan_evicted;   // new BSSes that found the table full / that replaced a weaker one
     uint32_t scan_frames, scan_new, mgmt_bad, auth_tx, assoc_tx, eapol_rx, eapol_tx, ev_scan_done;
+    // WMI management TX completions by status (0 acked, 1 discarded, 2 inspect, 3 no ack, else other), the last status
+    uint32_t mtx_sent, mtx_status[5], mtx_last;
+    // frames from the target AP to us by management subtype (fc >> 4), the last action category and deauth/disassoc reason
+    uint32_t ap_rx[16]; uint8_t ap_last_cat; uint16_t ap_last_reason;
+    int band_pref;                          // WMLME_BAND_*
+    int seq_random;                         // wmlme_seed_seq: the first management sequence number is random, not 0
     int scan_running;
 } wmlme;
 
@@ -110,10 +126,16 @@ int wmlme_disconnect(wmlme *m);
 void wmlme_wmi_event(wmlme *m, const wwmi_event *ev);
 void wmlme_eapol_rx(wmlme *m, const uint8_t src[6], const uint8_t *eapol, uint32_t len);
 void wmlme_poll(wmlme *m);
+// The BSS of `ssid` that a connect would choose (band_pref), or 0. wmlme_find_other: the same, never the BSSID `skip`.
 const wmlme_bss *wmlme_find(const wmlme *m, const char *ssid);
+const wmlme_bss *wmlme_find_other(const wmlme *m, const char *ssid, const uint8_t skip[6]);
+// How many BSSes of `ssid` the scan table has on 2.4 GHz and on 5 GHz.
+void wmlme_count(const wmlme *m, const char *ssid, unsigned *n2g, unsigned *n5g);
 // The network we are after (before a scan): a full scan table never evicts it.
 void wmlme_set_target(wmlme *m, const char *ssid);
 const char *wmlme_state_name(unsigned state);
+// Start the management sequence numbers at a random value (ops.random) instead of 0. Call after wmlme_init, before the first frame.
+void wmlme_seed_seq(wmlme *m);
 
 // Frame helpers (exposed for the tests and the data path)
 // Parse a beacon / probe response (the frame from the 802.11 header on) into b; 0 or WMLME_ERR_PROTO.

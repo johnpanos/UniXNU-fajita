@@ -452,6 +452,12 @@ static void t_mlme_scan(void)
         CHECK(crowd == WMLME_MAX_BSS - 2 && min_crowd >= 77 - 95 && !wmlme_find(&s->m, "OtherNet"));   // the strongest 62 + both KittyCorner APs
         CHECK(s->m.scan_full == 100 + 3 - WMLME_MAX_BSS);   // 100 crowd + 2 KittyCorner + OtherNet new; the hidden beacon updates
     }
+    // a random first sequence number (fajita-wifi-mgmt-seq=random): seeded from ops.random, 12 bits
+    {
+        static wmlme q; memset(&q, 0, sizeof q);
+        q.ops = s->m.ops; wmlme_seed_seq(&q);
+        CHECK(q.seq_random && q.seq <= 0xfff);
+    }
     s->crowd = 0;
     // a damaged frame is counted and ignored
     t_tfree_all();
@@ -618,6 +624,38 @@ static void t_mlme_failures(void)
     t_tfree_all();
 }
 
+// BSS choice per band preference, on the field case: KittyCorner on 2412 MHz at -44 dBm and on 5785 MHz at -67 dBm
+static void t_mlme_band(void)
+{
+    static wmlme m;
+    memset(&m, 0, sizeof m);
+    static const uint8_t b24[6] = {0xfa, 0xd0, 0x0e, 0xa8, 0x9f, 0x89}, b5[6] = {0xfa, 0xd0, 0x0e, 0xaf, 0x9f, 0x8a}, bx[6] = {2, 0, 0, 0, 0, 1};
+    const struct {const uint8_t *id; const char *ssid; uint32_t freq; int32_t rssi; int rsn;} t[] = {
+        {b24, "KittyCorner", 2412, -44, 1}, {b5, "KittyCorner", 5785, -67, 1}, {bx, "Other", 5180, -30, 1}};
+    for (unsigned i = 0; i < 3; ++i) {
+        wmlme_bss *b = &m.bss[m.nbss++];
+        memcpy(b->bssid, t[i].id, 6); b->ssid_len = (uint8_t)strlen(t[i].ssid); memcpy(b->ssid, t[i].ssid, b->ssid_len);
+        b->freq = t[i].freq; b->rssi = t[i].rssi; b->rsn_ok = (uint8_t)t[i].rsn; b->akm = WWPA_AKM_SAE;
+    }
+    unsigned n2 = 9, n5 = 9;
+    wmlme_count(&m, "KittyCorner", &n2, &n5);
+    CHECK(n2 == 1 && n5 == 1);
+    m.band_pref = WMLME_BAND_STRONGEST; CHECK(wmlme_find(&m, "KittyCorner")->freq == 2412);
+    m.band_pref = WMLME_BAND_AUTO;      CHECK(wmlme_find(&m, "KittyCorner")->freq == 5785);   // -67 >= -70: 5 GHz
+    m.band_pref = WMLME_BAND_2G;        CHECK(wmlme_find(&m, "KittyCorner")->freq == 2412);
+    m.band_pref = WMLME_BAND_5G;        CHECK(wmlme_find(&m, "KittyCorner")->freq == 5785);
+    // auto: a weak 5 GHz signal loses to the stronger 2.4 GHz one
+    m.bss[1].rssi = -78; m.band_pref = WMLME_BAND_AUTO; CHECK(wmlme_find(&m, "KittyCorner")->freq == 2412);
+    m.band_pref = WMLME_BAND_5G; CHECK(wmlme_find(&m, "KittyCorner")->freq == 5785);   // forced, still
+    // the other BSS (the retry after a failed authentication), and none when only the avoided one exists
+    CHECK(!memcmp(wmlme_find_other(&m, "KittyCorner", b5)->bssid, b24, 6) && !memcmp(wmlme_find_other(&m, "KittyCorner", b24)->bssid, b5, 6));
+    CHECK(!wmlme_find_other(&m, "Other", bx) && !wmlme_find(&m, "Nope"));
+    // only one band seen: every preference takes it
+    m.nbss = 1; m.band_pref = WMLME_BAND_5G; CHECK(wmlme_find(&m, "KittyCorner")->freq == 2412);
+    // a usable RSN beats a stronger unusable one in every mode
+    m.nbss = 2; m.bss[1].rssi = -50; m.bss[0].rsn_ok = 0; m.band_pref = WMLME_BAND_2G; CHECK(wmlme_find(&m, "KittyCorner")->freq == 5785);
+}
+
 static void t_mlme_hexpsk(void)
 {
     // a 64-digit PSK is the PMK itself
@@ -679,6 +717,7 @@ void t_mlme(void)
     RUN(t_mlme_scan);
     RUN(t_mlme_connect);
     RUN(t_mlme_failures);
+    RUN(t_mlme_band);
     RUN(t_mlme_hexpsk);
     RUN(t_mlme_sae);
 }

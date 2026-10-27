@@ -60,6 +60,14 @@ void wmlme_init(wmlme *m, const wmlme_ops *ops, wwmi *wmi, const uint8_t mac[6],
     copy(m->own_rsne, rsne, sizeof rsne);
 }
 
+void wmlme_seed_seq(wmlme *m)
+{
+    uint8_t r[2] = {0, 0};
+    if (m->ops.random) m->ops.random(m->ops.ctx, r, 2);
+    m->seq = (uint16_t)((r[0] | r[1] << 8) & 0xfff);
+    m->seq_random = 1;
+}
+
 // ---- channels ----
 unsigned wmlme_channels(wwmi_chan *out, unsigned cap)
 {
@@ -145,6 +153,9 @@ int wmlme_parse_beacon(const uint8_t *f, uint32_t len, wmlme_bss *b)
     const uint8_t *rsn = ie_find(ies, ilen, IE_RSN);
     if (rsn && 2u + rsn[1] <= WMLME_RSN_MAX) {b->rsn_len = (uint8_t)(2 + rsn[1]); copy(b->rsn, rsn, b->rsn_len); unsigned pmf = 0; b->akm = (uint8_t)wmlme_rsn_akm(b->rsn, b->rsn_len, &pmf); b->pmf = (uint8_t)pmf; b->rsn_ok = b->akm != 0;}
     b->ht = ie_find(ies, ilen, IE_HT_CAP) != 0;
+    const uint8_t *rx = ie_find(ies, ilen, 244);   // RSN extension: SAE H2E (bit 5), SAE-PK (bit 6)
+    if (rx) {b->rsnxe_len = rx[1]; b->rsnxe0 = rx[1] ? rx[2] : 0;}
+    for (unsigned i = 0; i < b->n_rates; ++i) if (b->rates[i] == (0x80 | 123)) b->h2e_only = 1;
     return 0;
 }
 
@@ -199,11 +210,15 @@ static void scan_frame(wmlme *m, const wwmi_event *ev)
     b.freq = ev->a;
     b.rssi = (int32_t)ev->b - 95;
     b.seen_ms = m->ops.now_ms(m->ops.ctx);
+    b.n_beacons = (uint16_t)!b.probe_resp; b.n_probe_resps = (uint16_t)!!b.probe_resp;
     for (unsigned i = 0; i < m->nbss; ++i) {
         if (!eq(m->bss[i].bssid, b.bssid, 6)) continue;
+        const uint16_t nb = m->bss[i].n_beacons, np = m->bss[i].n_probe_resps;
         // a probe response beats a beacon (the hidden-SSID beacon has an empty SSID); keep the stronger signal
         if (b.ssid_len || !m->bss[i].ssid_len) m->bss[i] = b;
         else m->bss[i].rssi = b.rssi;
+        if (nb < 0xffff) m->bss[i].n_beacons = (uint16_t)(nb + !b.probe_resp);
+        if (np < 0xffff) m->bss[i].n_probe_resps = (uint16_t)(np + !!b.probe_resp);
         return;
     }
     if (m->nbss < WMLME_MAX_BSS) {m->bss[m->nbss++] = b; ++m->scan_new; return;}
@@ -226,16 +241,38 @@ void wmlme_set_target(wmlme *m, const char *ssid)
     m->ssid_len = (uint8_t)n; copy(m->ssid, ssid, n);
 }
 
-const wmlme_bss *wmlme_find(const wmlme *m, const char *ssid)
+// Rank of a BSS under the band preference: higher is better (signal in dBm, plus a tier for the preferred band).
+static int bss_rank(const wmlme *m, const wmlme_bss *b)
+{
+    const int five = b->freq > 3000, r = b->rssi;
+    switch (m->band_pref) {
+    case WMLME_BAND_AUTO: return five && r >= WMLME_5G_GOOD_DBM ? 1000 + r : r;
+    case WMLME_BAND_2G: return five ? r : 1000 + r;
+    case WMLME_BAND_5G: return five ? 1000 + r : r;
+    default: return r;
+    }
+}
+
+const wmlme_bss *wmlme_find_other(const wmlme *m, const char *ssid, const uint8_t skip[6])
 {
     const size_t l = slen(ssid);
     const wmlme_bss *best = 0;
     for (unsigned i = 0; i < m->nbss; ++i) {
         const wmlme_bss *b = &m->bss[i];
-        if (b->ssid_len != l || !eq(b->ssid, ssid, l)) continue;
-        if (!best || (b->rsn_ok && !best->rsn_ok) || (b->rsn_ok == best->rsn_ok && b->rssi > best->rssi)) best = b;
+        if (b->ssid_len != l || !eq(b->ssid, ssid, l) || (skip && eq(b->bssid, skip, 6))) continue;
+        if (!best || (b->rsn_ok && !best->rsn_ok) || (b->rsn_ok == best->rsn_ok && bss_rank(m, b) > bss_rank(m, best))) best = b;
     }
     return best;
+}
+
+const wmlme_bss *wmlme_find(const wmlme *m, const char *ssid) {return wmlme_find_other(m, ssid, 0);}
+
+void wmlme_count(const wmlme *m, const char *ssid, unsigned *n2g, unsigned *n5g)
+{
+    const size_t l = slen(ssid);
+    *n2g = *n5g = 0;
+    for (unsigned i = 0; i < m->nbss; ++i)
+        if (m->bss[i].ssid_len == l && eq(m->bss[i].ssid, ssid, l)) ++*(m->bss[i].freq > 3000 ? n5g : n2g);
 }
 
 // ---- management frames ----
@@ -261,6 +298,7 @@ static int mgmt_send(wmlme *m, uint8_t fc0, const uint8_t *body, uint32_t blen)
     copy(f + 16, m->target.bssid, 6);     // addr3: BSSID
     p16(f + 22, (uint32_t)(m->seq++ & 0xfff) << 4);
     copy(f + 24, body, blen);
+    ++m->mtx_sent;
     return wwmi_mgmt_tx(m->wmi, m->vdev_id, ++m->mdesc & 0xffff, f, 24 + blen, iova);
 }
 
@@ -306,12 +344,9 @@ int wmlme_connect(wmlme *m, const char *ssid, const char *pass)
 {
     if (m->state == WMLME_SCANNING || (m->state >= WMLME_VDEV_START && m->state <= WMLME_CONNECTED)) return WMLME_ERR_BUSY;
     const wmlme_bss *b = wmlme_find(m, ssid);
-    if (b && m->have_avoid && eq(b->bssid, m->avoid, 6)) {   // the strongest did not answer last time: another BSS of the SSID, if usable
-        const size_t l = slen(ssid);
-        for (unsigned i = 0; i < m->nbss; ++i) {
-            const wmlme_bss *o = &m->bss[i];
-            if (o->ssid_len == l && eq(o->ssid, ssid, l) && o->rsn_ok && !eq(o->bssid, m->avoid, 6)) {b = o; break;}
-        }
+    if (b && m->have_avoid && eq(b->bssid, m->avoid, 6)) {   // the choice did not answer last time: the next best BSS of the SSID, if usable
+        const wmlme_bss *o = wmlme_find_other(m, ssid, m->avoid);
+        if (o && o->rsn_ok) b = o;
     }
     if (!b) {set_state(m, WMLME_FAILED, WMLME_REASON_NO_BSS); return WMLME_ERR_NOENT;}
     if (!b->rsn_ok) {set_state(m, WMLME_FAILED, WMLME_REASON_UNSUPPORTED); return WMLME_ERR_NOTSUP;}
@@ -409,6 +444,9 @@ static void mgmt_frame(wmlme *m, const wwmi_event *ev)
     const unsigned sub = f[0] & 0xfc;
     if (sub == FC_BEACON || sub == FC_PROBE_RESP) {scan_frame(m, ev); return;}
     if (!eq(f + 16, m->target.bssid, 6) || !eq(f + 4, m->mac, 6)) return;       // not our AP, not for us
+    ++m->ap_rx[sub >> 4];
+    if (sub == 0xd0 && len > 24) m->ap_last_cat = f[24];                        // action (SA Query = 8)
+    if ((sub == FC_DEAUTH || sub == FC_DISASSOC) && len >= 26) m->ap_last_reason = (uint16_t)g16(f + 24);
     if (sub == FC_AUTH && m->state == WMLME_AUTH && m->akm == WWPA_AKM_SAE) {
         if (len < 24 + 6 || g16(f + 24) != 3) return;
         const unsigned seq = g16(f + 26), status = g16(f + 28);
@@ -492,6 +530,10 @@ void wmlme_wmi_event(wmlme *m, const wwmi_event *ev)
         set_state(m, WMLME_AUTH, 0);
         m->retries = 0;
         arm(m);
+        break;
+    case WWMI_EV_MGMT_TX_COMPL:
+        ++m->mtx_status[ev->b < 4 ? ev->b : 4];
+        m->mtx_last = ev->b;
         break;
     case WWMI_EV_INSTALL_KEY_COMPLETE:
         ++m->key_events;

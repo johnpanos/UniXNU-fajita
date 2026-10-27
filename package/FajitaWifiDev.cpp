@@ -330,11 +330,12 @@ void devFree(void *p, size_t n, void *) {if (p) IOFree(p, n ? n : 1);}
 void scanRow()
 {
     const wmlme &m = gDev.mlme;
-    char best[64] = "-";
+    char best[96] = "-";
     if (gReqSsid[0]) {
-        const wmlme_bss *b = wmlme_find(&m, gReqSsid);
-        if (b) snprintf(best, sizeof best, "%s %02x:%02x:%02x:%02x:%02x:%02x %u MHz %d dBm%s", gReqSsid, b->bssid[0], b->bssid[1], b->bssid[2],
-                        b->bssid[3], b->bssid[4], b->bssid[5], b->freq, b->rssi, !b->rsn_ok ? " (rsn?)" : b->akm == WWPA_AKM_SAE ? " wpa3-sae" : " wpa2-psk");
+        const wmlme_bss *b = m.state >= WMLME_VDEV_START && m.state <= WMLME_CONNECTED ? &m.target : wmlme_find(&m, gReqSsid);   // joining: that BSS
+        if (b) snprintf(best, sizeof best, "%s %02x:%02x:%02x:%02x:%02x:%02x %u MHz %d dBm%s bcn %u prsp %u", gReqSsid, b->bssid[0], b->bssid[1],
+                        b->bssid[2], b->bssid[3], b->bssid[4], b->bssid[5], b->freq, b->rssi,
+                        !b->rsn_ok ? " (rsn?)" : b->akm == WWPA_AKM_SAE ? " wpa3-sae" : " wpa2-psk", b->n_beacons, b->n_probe_resps);
         else snprintf(best, sizeof best, "%s NOT SEEN", gReqSsid);
         static unsigned rsnShown;
         if (b && !b->rsn_ok && rsnShown != gScans && m.state == WMLME_SCAN_DONE) {   // once per scan: why the RSN element is not usable
@@ -344,7 +345,10 @@ void scanRow()
             note("FW7 %s rsn (%u bytes):%s", gReqSsid, b->rsn_len, b->rsn_len ? hex : " none");
         }
     }
-    row(9, "FW7 scan #%u %s bss %u frames %u full %u: %s", gScans, wmlme_state_name(m.state), m.nbss, m.scan_frames, m.scan_full, best);
+    unsigned n2 = 0, n5 = 0;
+    if (gReqSsid[0]) wmlme_count(&m, gReqSsid, &n2, &n5);
+    row(9, "FW7 scan #%u %s bss %u frames %u full %u: %s (bss 2g %u 5g %u)", gScans, wmlme_state_name(m.state), m.nbss, m.scan_frames, m.scan_full,
+        best, n2, n5);
 }
 }  // namespace
 
@@ -394,6 +398,21 @@ extern "C" int fajita_wifi_dev_start(void)
     fajita_net_set_mac(ops.mac);   // fajita-net=wifi: en0 attaches now with this MAC (link down until associated)
     PE_parse_boot_argn("fajita-wifi", &gStage, sizeof gStage);
     {unsigned prot = 1; PE_parse_boot_argn("fajita-wifi-txprot", &prot, sizeof prot); gDev.tx_unprotected = !prot;}
+    {   // fajita-wifi-band=strongest|auto|2g|5g: which BSS of the SSID to join (WifiMlme.h WMLME_BAND_*)
+        // Default auto: KittyCorner's 2.4 GHz BSS band-steers this phone (it ignores the first SAE commits once the phone has been on
+        // 5 GHz; NOTES-wifi.md "Band steering"), so join 5 GHz when its signal is good, as a supplicant does.
+        char band[16] = {0};
+        gDev.band_pref = WMLME_BAND_AUTO;
+        if (PE_parse_boot_arg_str("fajita-wifi-band", band, sizeof band)) {
+            gDev.band_pref = !strcmp(band, "strongest") ? WMLME_BAND_STRONGEST : !strcmp(band, "2g") ? WMLME_BAND_2G
+                           : !strcmp(band, "5g") ? WMLME_BAND_5G : WMLME_BAND_AUTO;
+        }
+        char sq[16] = {0};
+        gDev.mgmt_seq_random = PE_parse_boot_arg_str("fajita-wifi-mgmt-seq", sq, sizeof sq) && !strcmp(sq, "random");
+        note("FW7 management sequence numbers from %s", gDev.mgmt_seq_random ? "a random start" : "0");
+        note("FW7 band preference %s", gDev.band_pref == WMLME_BAND_AUTO ? "auto (5 GHz when good)" : gDev.band_pref == WMLME_BAND_2G ? "2g"
+                                      : gDev.band_pref == WMLME_BAND_5G ? "5g" : "strongest");
+    }
     {   // fajita-wifi-ssid: scan for it as soon as the device runs
         char ssid[33] = {0};
         if (PE_parse_boot_arg_str("fajita-wifi-ssid", ssid, sizeof ssid) && ssid[0]) {strlcpy(gReqSsid, ssid, sizeof gReqSsid); gReqScan = 1;}
@@ -410,19 +429,33 @@ extern "C" void fajita_wifi_dev_poll(void)
     if (gStage >= 7 && gDev.state == WDEV_RUNNING && gReqSsid[0] && gConnects < 3 && nowMs64() - gConnectAt > 10000 &&
         (gDev.mlme.state == WMLME_SCAN_DONE || gDev.mlme.state == WMLME_FAILED)) {
         if (gDev.mlme.state == WMLME_FAILED && gConnects) {gReqScan = 1; gConnectAt = nowMs64() - 5000;}   // rescan, then retry
-        else if (wmlme_find(&gDev.mlme, gReqSsid)) {
+        else if (wmlme_find(&gDev.mlme, gReqSsid) && gDev.mlme.state == WMLME_SCAN_DONE && !gConnects && gScans == 1 &&
+                 gDev.band_pref == WMLME_BAND_AUTO && [] {unsigned a, b; wmlme_count(&gDev.mlme, gReqSsid, &a, &b); return b == 0;}()) {
+            note("FW7 %s only on 2.4 GHz in scan #1: scanning again for its 5 GHz BSS", gReqSsid);   // the 5 GHz beacon/probe was missed
+            gReqScan = 1;
+            gConnectAt = nowMs64() - 10000;
+        } else if (wmlme_find(&gDev.mlme, gReqSsid)) {
             char psk[128];
             const int pl = readPsk(psk, sizeof psk);
             if (pl > 0) {
                 ++gConnects;
                 gConnectAt = nowMs64();
                 gConnectRc = wdev_connect(&gDev, gReqSsid, psk);
-                note("FW7 connect #%u %s (psk %d chars, akm %u) rc %d", gConnects, gReqSsid, pl, wmlme_find(&gDev.mlme, gReqSsid)->akm, gConnectRc);
+                const wmlme_bss &tb = gDev.mlme.target;
+                unsigned n2 = 0, n5 = 0;
+                wmlme_count(&gDev.mlme, gReqSsid, &n2, &n5);
+                note("FW7 connect #%u %s (psk %d chars, akm %u) rc %d: %02x:%02x:%02x:%02x:%02x:%02x %u MHz %d dBm (bss 2g %u 5g %u) rsn tail %02x%02x rsnxe %u/%02x sel123 %u rates %u seq %u",
+                     gConnects, gReqSsid, pl, tb.akm, gConnectRc, tb.bssid[0], tb.bssid[1], tb.bssid[2], tb.bssid[3], tb.bssid[4], tb.bssid[5], tb.freq,
+                     tb.rssi, n2, n5, tb.rsn_len >= 2 ? tb.rsn[tb.rsn_len - 1] : 0, tb.rsn_len >= 2 ? tb.rsn[tb.rsn_len - 2] : 0, tb.rsnxe_len, tb.rsnxe0,
+                     tb.h2e_only, tb.n_rates, unsigned(gDev.mlme.seq));
             } else if (nowMs64() - gConnectAt > 10000) {
                 gConnectAt = nowMs64();
                 note("FW7 no passphrase yet (/private/var/ngpu/wifi.psk: %d)", pl);
             }
             bzero(psk, sizeof psk);
+        } else if (gDev.mlme.state == WMLME_SCAN_DONE && gScans < 8 && nowMs64() - gScanAt > 3000) {   // not seen: scan again (bounded)
+            note("FW7 %s not in scan #%u: rescanning", gReqSsid, gScans);
+            gReqScan = 1;
         }
     }
     if (gDev.state == WDEV_RUNNING && gReqScan && gDev.mlme.state != WMLME_SCANNING &&
@@ -447,9 +480,9 @@ extern "C" void fajita_wifi_dev_poll(void)
         if (gScans) scanRow();
         if (gConnects) {
             const wmlme &m = gDev.mlme;
-            row(11, "FW7 link %s reason %u akm %u pmf %u sae c%u/f%u/t%u st%u auth%u assoc%u eapol rx%u tx%u keys %u auth %d aid %u data rx%u tx%u/%u compl ok%u disc%u noack%u post%u x%u rxdrop a%u d%u f%u n%u bad%u%s off%u rx ucast%u dhcp%u arp%u%s",
+            row(11, "FW7 link %s reason %u akm %u pmf %u sae c%u/f%u/t%u st%u auth%u assoc%u mtx %u ok%u disc%u insp%u noack%u x%u last%u ap auth%u deauth%u disas%u act%u(cat%u) asr%u why%u eapol rx%u tx%u keys %u auth %d aid %u data rx%u tx%u/%u compl ok%u disc%u noack%u post%u x%u rxdrop a%u d%u f%u n%u bad%u%s off%u rx ucast%u dhcp%u arp%u%s",
                 wmlme_state_name(m.state), m.reason, m.akm, m.pmf, m.sae_commits, m.sae_confirms, m.sae_tokens, m.sae_status, m.auth_tx,
-                m.assoc_tx, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr,
+                m.assoc_tx, m.mtx_sent, m.mtx_status[0], m.mtx_status[1], m.mtx_status[2], m.mtx_status[3], m.mtx_status[4], m.mtx_last, m.ap_rx[0xb], m.ap_rx[0xc], m.ap_rx[0xa], m.ap_rx[0xd], m.ap_last_cat, m.ap_rx[1], m.ap_last_reason, m.eapol_rx, m.eapol_tx, m.key_events, m.authorized, m.aid, gDev.rx_eth, gTxOk, gTxErr,
                 gDev.tx_status[0], gDev.tx_status[1], gDev.tx_status[2], gDev.tx_status[3], gDev.tx_status[4],
                 gDev.htt.rx_drop_attn, gDev.htt.rx_drop_decap, gDev.htt.rx_drop_fmt, gDev.htt.rx_drop_nondata, gDev.htt.rx_bad, gDev.htt.rx_confused ? "(CONFUSED)" : "", gDev.htt.rx_offload, gRxUnicast, gRxDhcp, gRxArp, gDev.tx_unprotected ? " UNPROT" : "");
         }
