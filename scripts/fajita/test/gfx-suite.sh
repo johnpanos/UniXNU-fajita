@@ -9,7 +9,7 @@
 # Env: ENV=FILE (gpu-env lines for the run; the suite adds NGPU_FRAME_TRACE=1 unless TRACE=0 and restarts backboardd once),
 # DIAG=1 (measure with a diagnostic in gpu-env anyway, the report marked DIAG), WARMUP=0 (no warm-up pass), SETTLE_MAX/SETTLE_CPU/SETTLE_TEMP (the settle check before the scenes, see 2b),
 # PLAN_S/FORCE=1 (the run's planned length against the session's remaining autoreset time, see below),
-# CAWATCH=1 (the render server's display timer per scene, fjsurface --watch-ca, instead of the CPU windows: tools/gpu/ca-timer.py),
+# CATCH=0 (no occurrence catcher: see gfx-scene.py --catch), CAWATCH=1 (the render server's display timer per scene, fjsurface --watch-ca, instead of the CPU windows: tools/gpu/ca-timer.py),
 # REPEAT=N (every scene N times: SCENE, SCENE-r2, ... for the run-to-run noise, gfx-report.py --noise), REBASE=1 (save this run's
 # rest screenshots as the references, $FAJITA_WORK/gfx/refs: iOS UI, never in git), NORESTART=1 (keep backboardd: no env change).
 # Tools pushed to new names each run (a changed binary pushed over the same path ran the old one): ngpu-metal (cpu sampler) and
@@ -46,6 +46,7 @@ log() { echo "[$(date +%T)] $*" | tee -a $O/suite.log; }
 # remaining time is printed and a run planned longer than that is refused (PLAN_S, default 45 s a scene x REPEAT + 240 s of warm-up and
 # settling; FORCE=1 runs anyway); before every scene the cycle is checked and the suite stops when it ended.
 SESS=$(cat $W/session.current 2>/dev/null); CYC=$W/logs/$SESS/cycle.txt
+export GFX_SESSION=$SESS GFX_BOOT="$(grep -a -m1 'XNU booting' $CYC 2>/dev/null)" GFX_PLUGIN="$(grep -a -m1 'stack\|metal.ngpu' ${KM%/unixnu/*}/build.txt 2>/dev/null | head -c 200)"
 session_end() { grep -aE '^\[[0-9:]+\] RESULT:|back in fastboot' "$CYC" 2>/dev/null | head -1; }
 OUTK=${KM%/unixnu/*}; AR=$(grep -o 'sheng-autoreset=[0-9]*' "$OUTK/build.txt" 2>/dev/null | tail -1 | cut -d= -f2)
 BOOTT=$(grep -a -m1 'XNU booting' "$CYC" 2>/dev/null | grep -o '[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}')
@@ -67,7 +68,11 @@ push_tool() {   # push_tool NAME -> prints the phone path
 }
 NGPU=$(push_tool ngpu-metal) || exit 1
 FJB=$(push_tool fjbundle) || exit 1
-CAW=(); if [ "${CAWATCH:-0}" = 1 ]; then FJS=$(push_tool fjsurface) || exit 1; CAW=(--cawatch "$FJS"); fi
+FJS=$(push_tool fjsurface) || exit 1
+CAW=(); [ "${CAWATCH:-0}" = 1 ] && CAW=(--cawatch "$FJS")
+# The occurrence catcher (on unless CATCH=0): a rest shot strongly different from its reference is caught while it is on screen
+# (gfx-scene.py --catch: the render server's fresh render of the display, the boot age, plugin build, cache state, GPU status).
+[ "${CATCH:-1}" = 1 ] && CAW+=(--catch "$FJS")
 T=20 $SS run $NGPU cpu 0.2 backboardd 2>&1 | grep -q "cpu over" || { echo "gfx-suite: !! $NGPU cpu does not run"; exit 1; }
 log "tools: $NGPU $FJB"
 

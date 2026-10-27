@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gfx-scene.py OUT.json [--cpu NAME,...] [--settle S] [--tool PATH] [--cawatch FJSURFACE] STEP...: run one scene of the gfx suite on the held session and
+"""gfx-scene.py OUT.json [--cpu NAME,...] [--settle S] [--tool PATH] [--cawatch FJSURFACE] [--catch FJSURFACE] [--refs DIR] STEP...: run one scene of the gfx suite on the held session and
 record everything the analyzer (tools/gpu/gfx-report.py) needs, in one JSON file.
 
 Steps (run in order; touch coordinates are panel pixels, 2x the half-resolution screenshot's):
@@ -25,6 +25,11 @@ Recorded (all times in us of the mach clock, the kernel log's):
   ca       (--cawatch, instead of cpu: the userland agent runs one command at a time) the render server's display-timer state,
            `fjsurface --watch-ca` windows back to back: each change of its last tick, vbl threshold, next update, idle countdown,
            can_update failures, swap ring and timer deadline (raw lines; tools/gpu/ca-timer.py classifies every tick)
+  catch    (--catch: the occurrence catcher, gfx-suite.sh's default) a rest shot strongly different from its reference (REFS, the
+           report's rule: over 96 on more than 0.2% of the area below the status bar) is caught while the screen still shows it:
+           the render server draws the display again (fjsurface --render-display), compared over the same region (the glitch in a
+           layer's own contents, or only in the composed/presented frame), with the boot age, plugin build, cache state, GPU status and
+           the foreground process; into OUT-SHOT-catch/ (catch.json, render.png, shot.png, diff box)
 A ring that wrapped during the scene (more entries than it holds) is reported in the JSON's "overflow" and on stderr, never dropped
 silently. Env: KM (the running kernel's kernel.macho for the symbols; default the build output), FAJITA_USBDBG_HUB (hub socket)."""
 import json
@@ -271,6 +276,72 @@ class CaWatcher(threading.Thread):
                 return
 
 
+def shot_diff(a, b, box=(0, 60, 540, 1170)):
+    """gfx-report.py's rest-shot rule: (strong pixels, total, their bounding box) of b against a below the status bar."""
+    from PIL import Image, ImageChops
+    x = Image.open(a).convert('RGB').crop(box)
+    y = Image.open(b).convert('RGB').crop(box)
+    if x.size != y.size:
+        return None
+    d = ImageChops.difference(x, y)
+    w = x.size[0]
+    px = d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata()
+    strong = [i for i, p in enumerate(px) if max(p) > 96]
+    if not strong:
+        return 0, x.size[0] * x.size[1], None
+    xs, ys = [i % w for i in strong], [i // w for i in strong]
+    return len(strong), x.size[0] * x.size[1], (min(xs) + box[0], min(ys) + box[1], max(xs) + box[0] + 1, max(ys) + box[1] + 1)
+
+
+def catch(fjsurface, path, ref, scene, shot):
+    """The occurrence catcher (see the docstring): called right after a rest shot that differs strongly from its reference."""
+    from PIL import Image
+    d = shot_diff(ref, path)
+    if not d or not d[2] or d[0] <= 0.002 * d[1]:
+        return None
+    out = os.path.splitext(path)[0] + '-catch'
+    os.makedirs(out, exist_ok=True)
+    info = dict(scene=scene, shot=shot, strong=d[0], total=d[1], box=d[2], ref=ref)
+    # the render server draws the display again, now (logical size of the panel's display)
+    raw = '/private/var/tmp/fjcatch.raw'
+    W, H = int(os.environ.get('CATCH_W', 1125)), int(os.environ.get('CATCH_H', 2436))
+    ok, r = hub('run', fjsurface, '--render-display', W, H, raw, timeout=40)
+    info['render_out'] = r.strip()[-200:]
+    ok2, r2 = hub('pull', raw, os.path.join(out, 'render.raw'), timeout=120) if ok else (False, '')
+    try:
+        data = open(os.path.join(out, 'render.raw'), 'rb').read()
+        img = Image.frombytes('RGBA', (W, H), data, 'raw', 'BGRA').convert('RGB').resize((540, 1170))
+        img.save(os.path.join(out, 'render.png'))
+        os.remove(os.path.join(out, 'render.raw'))
+        # the same region of the fresh render against the reference: strong there too = the glitch is in a layer's contents
+        if ' 0 sampled pixels nonzero' in info['render_out'] or not ok:
+            raise ValueError('the render server drew nothing (%s)' % info['render_out'][-80:])
+        rd = shot_diff(ref, os.path.join(out, 'render.png'), box=d[2])
+        info['render_strong_in_box'] = rd[0] if rd else None
+        info['verdict'] = ('in a layer\'s contents (the fresh render shows it too)' if rd and rd[0] > 0.3 * d[0] else
+                           'in the composed or presented frame only (the fresh render is clean there)')
+    except (OSError, ValueError) as e:
+        info['render_error'] = str(e)
+    try:
+        import shutil
+        shutil.copy(path, os.path.join(out, 'shot.png'))
+        crop = Image.open(path).convert('RGB').crop(tuple(max(0, v - 8) if i < 2 else v + 8 for i, v in enumerate(d[2])))
+        crop.save(os.path.join(out, 'box.png'))
+    except OSError:
+        pass
+    ok, g = hub('kcmd', 'gpu', timeout=10)
+    info['gpu_status'] = g.strip()[-600:]
+    ok, ps = hub('run', '/usr/sbin/ngpu-metal', 'ps', timeout=15)
+    info['ps_head'] = ps.strip().splitlines()[:3]
+    for k in ('GFX_PLUGIN', 'GFX_BOOT', 'GFX_SESSION'):
+        info[k.lower()] = os.environ.get(k)
+    ok, pl = hub('pull', '/var/mobile/Library/Caches/com.apple.backboardd/m2v/prime.log', os.path.join(out, 'prime.log'), timeout=60)
+    json.dump(info, open(os.path.join(out, 'catch.json'), 'w'), indent=1)
+    print('gfx-scene: CATCH %s %s: %d strong px at %s: %s' % (scene, shot, d[0], d[2], info.get('verdict', info.get('render_error'))),
+          file=sys.stderr)
+    return info
+
+
 def main():
     a = sys.argv[1:]
     if not a or a[0] in ('-h', '--help'):
@@ -279,6 +350,7 @@ def main():
     out = a.pop(0)
     global fjbundle
     settle, cpu_names, tool, cawatch = 1.0, ['backboardd'], '/private/var/ngpu/sbin/ngpu-metal', None
+    catcher, refs = None, os.path.join(os.environ.get('FAJITA_WORK') or os.path.join(BOARD, '.cache', 'fajita-work'), 'gfx', 'refs')
     while a and a[0].startswith('--'):
         o = a.pop(0)
         if o == '--settle':
@@ -287,6 +359,10 @@ def main():
             cpu_names = [x for x in a.pop(0).split(',') if x]
         elif o == '--tool':
             tool = a.pop(0)
+        elif o == '--catch':
+            catcher = a.pop(0)
+        elif o == '--refs':
+            refs = a.pop(0)
         elif o == '--cawatch':
             cawatch = a.pop(0)
         elif o == '--fjbundle':
@@ -329,6 +405,15 @@ def main():
             t0 = now_us()
             ok, r = hub('screenshot', path, timeout=40)
             rec['steps'].append(dict(spec=spec, kind='shot', start_us=t0, end_us=now_us(), path=path, ok=ok))
+            base = re.sub(r'-r\d+$', '', scene)
+            ref = os.path.join(refs, '%s-%s.png' % (base, spec.split(',', 1)[1])) if refs else None
+            if catcher and ok and ref and os.path.exists(ref):
+                try:
+                    c = catch(catcher, path, ref, scene, spec.split(',', 1)[1])
+                    if c:
+                        rec.setdefault('catches', []).append(c)
+                except Exception as e:   # the catcher never fails the scene
+                    print('gfx-scene: catcher: %s' % e, file=sys.stderr)
             continue
         g = gesture(spec)
         rec['steps'].append(g)

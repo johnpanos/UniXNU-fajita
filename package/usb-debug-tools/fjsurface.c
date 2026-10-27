@@ -12,6 +12,7 @@
 //   fjsurface --images PID [FILTER]      the images dyld loaded in another process (task_for_pid; whether Metal and the GPU plugin are in it)
 //   fjsurface --sample PID SECONDS [HZ [all]]   sample another process's threads (stacks by count, unslid for tools/crash/dsc-sym.py
 //                                        --slide); all: waiting threads too (who is blocked in an XPC call to a daemon)
+//   fjsurface --render-display W H FILE   the render server draws the display again into a new surface (see render_display)
 //   fjsurface --watch-ca PID SECONDS [US]  the render server's display timer, vbl threshold, next update and swap ring, polled (see watch_ca)
 // (IOSurfaceLookup by ID fails here for every surface: the kernel logs "IOSurface disallowing global lookups", as on any iPhone.)
 // Build: scripts/fajita/build-usbdbg-agent.sh; push with session.sh push (to a new name when the binary changed).
@@ -24,6 +25,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
@@ -498,6 +500,43 @@ static int watch_ca(int pid, double seconds, int us, uint64_t S, uint64_t T) {
   return 0;
 }
 
+// --render-display W H FILE: the render server draws the display's current layer tree again, into a new W x H BGRA surface
+// (QuartzCore's CARenderServerRenderDisplay, display "LCD"), written to FILE as raw rows of W*4 bytes. The gfx suite's occurrence
+// catcher compares it with the scanout screenshot: a glitch that is also in this fresh render lives in a layer's own contents (a
+// texture or a client's surface); one that is not lives in the composition or the presentation of that frame.
+static int render_display(int w, int h, const char *path) {
+  void *qc = dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+  void (*render)(mach_port_t, CFStringRef, IOSurfaceRef, int, int) =
+      qc ? (void (*)(mach_port_t, CFStringRef, IOSurfaceRef, int, int))dlsym(qc, "CARenderServerRenderDisplay") : NULL;
+  if (!render) { printf("no CARenderServerRenderDisplay\n"); return 1; }
+  int bpe = 4; uint32_t fmt = 'BGRA';
+  const void *keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfacePixelFormat};
+  CFNumberRef vals[] = {CFNumberCreate(NULL, kCFNumberIntType, &w), CFNumberCreate(NULL, kCFNumberIntType, &h),
+                        CFNumberCreate(NULL, kCFNumberIntType, &bpe), CFNumberCreate(NULL, kCFNumberSInt32Type, &fmt)};
+  CFDictionaryRef props = CFDictionaryCreate(NULL, keys, (const void **)vals, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+  IOSurfaceRef s = IOSurfaceCreate(props);
+  if (!s) { printf("FAIL IOSurfaceCreate\n"); return 1; }
+  mach_port_t (*server)(const char *) = (mach_port_t (*)(const char *))dlsym(qc, "CARenderServerGetServerPort");
+  const mach_port_t port = server ? server(NULL) : MACH_PORT_NULL;
+  const char *name = getenv("FJ_DISPLAY") ? getenv("FJ_DISPLAY") : "LCD";
+  CFStringRef display = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+  printf("server port %#x, display %s\n", port, name);
+  render(port, display, s, 0, 0);
+  IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
+  const uint8_t *base = IOSurfaceGetBaseAddress(s); const size_t rb = IOSurfaceGetBytesPerRow(s);
+  FILE *f = fopen(path, "wb");
+  if (!f) { IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL); printf("cannot write %s\n", path); return 1; }
+  size_t nonzero = 0;
+  for (int y = 0; y < h; ++y) {
+    fwrite(base + (size_t)y * rb, 1, (size_t)w * 4, f);
+    for (int x = 0; x < w; x += 16) nonzero += base[(size_t)y * rb + (size_t)x * 4 + 1] != 0;
+  }
+  fclose(f);
+  IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+  printf("rendered display LCD %dx%d into %s (%zu sampled pixels nonzero)\n", w, h, path, nonzero);
+  return nonzero ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   if (argc >= 2 && !strcmp(argv[1], "--scan"))
@@ -509,6 +548,7 @@ int main(int argc, char **argv) {
     return cgdraw(f, argc > 3 ? atoi(argv[3]) : 256, argc > 4 ? atoi(argv[4]) : 256);
   }
   if (argc >= 3 && !strcmp(argv[1], "--images")) return images(atoi(argv[2]), argc > 3 ? argv[3] : NULL);
+  if (argc == 5 && !strcmp(argv[1], "--render-display")) return render_display(atoi(argv[2]), atoi(argv[3]), argv[4]);
   if (argc >= 4 && !strcmp(argv[1], "--watch-ca")) return watch_ca(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 200,
                                                                        argc > 5 ? strtoull(argv[5], NULL, 0) : 0, argc > 6 ? strtoull(argv[6], NULL, 0) : 0);
   if (argc >= 4 && !strcmp(argv[1], "--sample")) return sample(atoi(argv[2]), atof(argv[3]), argc > 4 ? atoi(argv[4]) : 100, argc > 5 && !strcmp(argv[5], "all"));
