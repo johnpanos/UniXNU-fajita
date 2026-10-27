@@ -19,6 +19,10 @@
 // fjbundle --kill SIG NAME|PID: send SIG (a number) to a process, by pid or by the last path component of its executable (the
 //   first match), e.g. --kill 9 backboardd for the compositor-restart test; prints the pid.
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
+// fjbundle --notify NAME...: the state word of each notify(3) name (notify_register_check + notify_get_state), e.g.
+//   com.apple.springboard.ringerstate (SpringBoard's ringer: 1 = ringer on, 0 = silent), com.apple.system.thermalpressurelevel.
+// fjbundle --mg KEY...: MobileGestalt's answer for each key (MGCopyAnswer), e.g. ringer-switch, ProductType, camera-flash.
+// fjbundle --ringer: backboardd's ringer switch state as its clients ask it (BackBoardServices BKSHIDServicesGetRingerState).
 // fjbundle --open URL: open URL the way SpringBoard does (LaunchServices' LSApplicationWorkspace openSensitiveURL:withOptions:, then
 //   openURL: if that is refused), e.g. --open https://news.ycombinator.com/ brings Safari to the front on that page; prints the result.
 // fjbundle: probe CFBundle's view of a framework, as WebKit's XPC service entry does it (CFBundleGetBundleWithIdentifier then
@@ -293,6 +297,40 @@ int main(int argc, char **argv) {
       CFPreferencesAppSynchronize(app);   // per key: with one synchronize at the end only the first of several removals reached the plist
     }
     printf("synchronize: %d\n", CFPreferencesAppSynchronize(app));
+    return 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--notify")) {
+    int (*reg)(const char *, int *) = (int (*)(const char *, int *))dlsym(RTLD_DEFAULT, "notify_register_check");
+    int (*get)(int, uint64_t *) = (int (*)(int, uint64_t *))dlsym(RTLD_DEFAULT, "notify_get_state");
+    if (!reg || !get) { printf("no notify_register_check/notify_get_state\n"); return 1; }
+    for (int i = 2; i < argc; i++) {
+      int tok = -1; uint64_t st = 0;
+      int r = reg(argv[i], &tok), g = r ? -1 : get(tok, &st);
+      printf("%s: register %d get %d state %llu\n", argv[i], r, g, (unsigned long long)st);
+    }
+    return 0;
+  }
+  if (argc >= 3 && !strcmp(argv[1], "--mg")) {
+    if (!dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW)) { printf("dlopen libMobileGestalt: %s\n", dlerror()); return 1; }
+    CFTypeRef (*ans)(CFStringRef, CFDictionaryRef) = (CFTypeRef (*)(CFStringRef, CFDictionaryRef))dlsym(RTLD_DEFAULT, "MGCopyAnswer");
+    if (!ans) { printf("no MGCopyAnswer\n"); return 1; }
+    for (int i = 2; i < argc; i++) {
+      CFStringRef k = CFStringCreateWithCString(NULL, argv[i], kCFStringEncodingUTF8);
+      CFTypeRef v = k ? ans(k, NULL) : NULL;
+      char buf[512] = "(null)";
+      if (v) { CFStringRef d = CFCopyDescription(v); if (d) { CFStringGetCString(d, buf, sizeof buf, kCFStringEncodingUTF8); CFRelease(d); } CFRelease(v); }
+      printf("%s: %s\n", argv[i], buf);
+      if (k) CFRelease(k);
+    }
+    return 0;
+  }
+  if (argc == 2 && !strcmp(argv[1], "--ringer")) {
+    if (!dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW)) {
+      printf("dlopen BackBoardServices: %s\n", dlerror()); return 1;
+    }
+    int (*f)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "BKSHIDServicesGetRingerState");
+    if (!f) { printf("no BKSHIDServicesGetRingerState\n"); return 1; }
+    printf("BKSHIDServicesGetRingerState: %d\n", f());
     return 0;
   }
   if (argc == 3 && !strcmp(argv[1], "--open")) {
