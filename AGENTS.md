@@ -11,6 +11,10 @@ scripts/fajita/build.sh          # kernel + GPU plugin + payload + boot image ->
 scripts/fajita/boot.sh           # phone in fastboot: flash system_a, arm slot b, fastboot boot
 ```
 
+A board patch that replaces a series patch (ios16/patches/xnu-8796/zzy-native-gpu-addon-mount.patch) can change under a build tree
+that still carries the old version: `build.sh` reverses the late patches with the version that is applied (the copy it keeps after
+each kernel build, else the board's git history) before the baseline re-applies them, and says so ("reversed the previously
+applied ..."). If a build still fails with "patch does not apply" in kern_exec.c, that tree carries an uncommitted version.
 `build.sh --candidate` rebuilds the storage candidate input. `build.sh --test` makes a build that resets itself (for unattended runs); without it the phone stays up. Extra arguments are boot
 arguments (`scripts/fajita/build.sh fajita-brightness=1`). The UniXNU stack is a worktree of `~/src/UniXNU` at the commit in
 `ios16/gpu-plugin.ref` (default `~/src/UniXNU-fajita-stack`); `build.sh` creates it and moves it there. To change the stack, commit to
