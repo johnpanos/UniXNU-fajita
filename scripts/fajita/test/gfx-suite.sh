@@ -161,6 +161,26 @@ print(' '.join(seen))" 2>/dev/null); do
   done
 }
 home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1; }
+# The App Library's search keyboard up (it sometimes stays up after the list opens): the lower screen against the rest reference's,
+# where the keyboard would be; a short drag on the list above it puts it away. Returns 0 when no keyboard is left.
+applib_keyboard_away() {
+  local ref=$W/gfx/refs/applib-top.png t=$O/.applib-kb.png i
+  [ -f "$ref" ] || return 0
+  for i in 1 2 3; do
+    T=40 $SS call screenshot "$t" >/dev/null 2>&1 || return 0
+    python3 -I - "$ref" "$t" <<'PY' || return 0
+import sys
+from PIL import Image, ImageChops
+a = Image.open(sys.argv[1]).convert('RGB').crop((0, 800, 540, 1100)); b = Image.open(sys.argv[2]).convert('RGB').crop((0, 800, 540, 1100))
+d = ImageChops.difference(a, b); px = d.get_flattened_data() if hasattr(d, 'get_flattened_data') else d.getdata()
+sys.exit(1 if sum(1 for p in px if max(p) > 96) > 0.25 * a.size[0] * a.size[1] else 0)   # 1: the keyboard is up
+PY
+    log "applib: the search keyboard is up: a drag on the list ($i)"
+    T=10 $SS call kcmd touch swipe xy 540 1200 540 700 20 >/dev/null 2>&1; sleep 1
+    T=10 $SS call kcmd touch swipe xy 540 700 540 1200 20 >/dev/null 2>&1; sleep 1
+  done
+  return 1
+}
 open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
 TOP="tap,540,30 wait,1.5"   # a tap on the status bar scrolls a list or page to its top: a rest point that does not depend on where the drags ended
 SCROLL="xy,540,1900,540,900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,900,540,1900:60"
@@ -174,6 +194,7 @@ run_scene() {   # run_scene SCENE SUFFIX
     home)     home || { log "!! $n: not on home page 1"; return; }
               scene $n backboardd,SpringBoard left right left right left:60 right:60 left:60 right:60 shot,page1 ;;
     applib)   $TD/home-page1.sh --applib >/dev/null 2>&1 || { log "!! $n: App Library not reached"; return; }
+              applib_keyboard_away || log "!! $n: the App Library's search keyboard stays up"
               scene $n backboardd,SpringBoard $ASCROLL $ASCROLL wait,1.5 shot,top; home ;;   # SCROLL ends where it began (the top); no status-bar tap and no extra pull-down: both open the App Library's search (keyboard), which then kept Settings from opening (2026-10-26 20:00 on)
     settings) home; STAY=1 $TD/settings-scroll.sh gfx-settings 0 >/dev/null 2>&1 || { log "!! $n: Settings did not open"; home; return; }
               scene $n backboardd,Preferences $SCROLL $TOP shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
