@@ -44,6 +44,9 @@ own NOTES file; this log links to them.
 - Landed: the RTC fix (459437d: a hard reset no longer starts the clock days in the past); the alert slider is iOS's ringer
   switch by default, proven (ef5b5d3; MobileGestalt rebuilt through iOS's own request). Sensors plan landed (705a8e2:
   SLPI PAS boot, FastRPC registry, SSC protocol); its PAS boot code is in progress. Vibration is next for the drivers agent.
+- The bootloader wedged a second time (a session killed during its fastboot step), and the user was asked for another hard
+  reset. Workflow fix by the lead: boot.sh and cycle.sh run every fastboot command in its own session (fb(): setsid -w,
+  bounded by a timeout), so a kill of the job's process group (bg.sh kill, --max) can't cut a fastboot exchange in half.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)

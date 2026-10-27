@@ -3,6 +3,9 @@
 # payload to system_a, boot XNU, wait for its auto-reset or panic reset to land in fastboot again, then boot the pmOS debug shell, pull and
 # decode the UniXNU log window (pull-log.sh) and reboot to fastboot. Output: logs/NAME/. Prints one RESULT line.
 # Default: the kernel log streams over USB (fjdbg hub) and the ~5 min pmOS pull only runs when that capture failed.
+# fastboot runs in its own session: a kill of this script's process group (bg.sh kill, --max) then never cuts a fastboot
+# exchange in half, which wedged the bootloader twice (no command answered until a hardware reset). Bounded by a timeout.
+fb() { setsid -w timeout ${FB_TIMEOUT:-120} fastboot "$@"; }
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; mkdir -p "$W"; S=$W
 # One run on the phone at a time (several agents use it): the whole cycle holds $W/phone.lock.
 # The phone lock is global (one phone, any worktree or work dir): ${XDG_RUNTIME_DIR:-/tmp}/fajita-phone.lock. The old per-work-dir lock
@@ -13,18 +16,18 @@ O=${FAJITA_OUT:-$TD/../../../.cache/fajita-out}
 NAME=$1; PAYLOAD=${2:-$O/payload.img}; BOOT=${3:-$O/boot.img}   # default: the scripts/fajita/build.sh output
 OUT=$S/logs/$NAME; mkdir -p $OUT
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a $OUT/cycle.txt; }
-wait_fastboot() { for i in $(seq 1 $1); do [ -n "$(fastboot devices)" ] && return 0; sleep 2; done; return 1; }
-arm() { for i in 1 2 3 4 5; do fastboot set_active b >/dev/null 2>&1; [ "$(fastboot getvar slot-unbootable:b 2>&1 | head -1)" = "slot-unbootable:b: no" ] && return 0; sleep 2; done; return 1; }
-volt() { fastboot getvar battery-voltage 2>&1 | head -1 | grep -o '[0-9]*$'; }
+wait_fastboot() { for i in $(seq 1 $1); do [ -n "$(fb devices)" ] && return 0; sleep 2; done; return 1; }
+arm() { for i in 1 2 3 4 5; do fb set_active b >/dev/null 2>&1; [ "$(fb getvar slot-unbootable:b 2>&1 | head -1)" = "slot-unbootable:b: no" ] && return 0; sleep 2; done; return 1; }
+volt() { fb getvar battery-voltage 2>&1 | head -1 | grep -o '[0-9]*$'; }
 wait_fastboot 30 || { log "RESULT: no fastboot at start"; exit 1; }
 v=$(volt); log "battery ${v} mV"
 # Rule (the user's mandate): no pmOS unless iOS cannot do the job. XNU charges the battery itself (fajita-pmic=2 in board_args),
 # so a low battery is only logged; the run charges at ~1 A from ~30 s after boot.
 [ -n "$v" ] && [ "$v" -lt 3650 ] && log "battery low (${v} mV): the iOS run charges it"
-fastboot flash system_a $PAYLOAD 2>&1 | tail -1 | tee -a $OUT/cycle.txt
-arm; fastboot boot $BOOT 2>&1 | tail -1 | tee -a $OUT/cycle.txt
+fb flash system_a $PAYLOAD 2>&1 | tail -1 | tee -a $OUT/cycle.txt
+arm; fb boot $BOOT 2>&1 | tail -1 | tee -a $OUT/cycle.txt
 t0=$(date +%s)
-for i in $(seq 1 60); do [ -z "$(fastboot devices)" ] && break; sleep 1; done
+for i in $(seq 1 60); do [ -z "$(fb devices)" ] && break; sleep 1; done
 log "XNU booting"
 # USB log streaming (default): the fjdbg hub (scripts/fajita-usbdbg-hub.py) owns the gadget's tty for this run only, appends the
 # kernel log to usb-console.txt and serves `fajita-usbdbg-hub.py call run CMD` / read32 / kcmd ... to other scripts on its socket
@@ -67,7 +70,7 @@ trap stop_hub EXIT
 # Back in fastboot, or stuck in Qualcomm CrashDump Mode (05c6:900e): answer Sahara with RESET (sahara-reset.py) and keep waiting.
 back=0
 for i in $(seq 1 $(( ${CYCLE_WAIT:-900} / 2 ))); do   # CYCLE_WAIT: seconds to wait for the run (2 s per turn)
-  [ -n "$(fastboot devices)" ] && { back=1; break; }
+  [ -n "$(fb devices)" ] && { back=1; break; }
   if lsusb | grep -q "05c6:900e\|05c6:9008"; then
     log "crashdump mode seen: sending Sahara RESET"
     python3 -I $TD/sahara-reset.py 2>&1 | tee -a $OUT/cycle.txt
@@ -95,7 +98,7 @@ fi
 [ -n "$CYCLE_PMOS" ] && log "pmOS pull requested: $CYCLE_PMOS"
 # CYCLE_NOPULL=1: a probe run that stops before the kernel writes its log; skip the pmOS log pull.
 [ "${CYCLE_NOPULL:-0}" = 1 ] && { log "RESULT: done (no log pull)"; exit 0; }
-arm; fastboot boot $S/pmos-debug-shell.img 2>&1 | tail -1 >> $OUT/cycle.txt
+arm; fb boot $S/pmos-debug-shell.img 2>&1 | tail -1 >> $OUT/cycle.txt
 for i in $(seq 1 60); do timeout 2 bash -c 'echo > /dev/tcp/172.16.42.1/23' 2>/dev/null && break; sleep 2; done
 sleep 3
 $TD/pull-log.sh $OUT 2>&1 | tee -a $OUT/cycle.txt
