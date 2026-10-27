@@ -7,7 +7,7 @@
 // fajita-alert=<n> (default 0: nothing is touched): 1 polls once a second (called from sheng_cpufreq_poll), applies the
 // bias-disable configuration of that pinctrl state, logs each change, exports fajita_alert_position
 // (0 silent, 1 vibrate, 2 ring, 3 none or several asserted) and registers `kcmd alert`. fajita-alert=2 also reports the switch to iOS
-// (needs native-hid-buttons=1, native-hid-ringer=1 and the /buttons ringerab entry of make-fajita-adt.py --ringer).
+// (needs native-hid-buttons=1, native-hid-ringer=1 and the /buttons ringer entries of make-fajita-adt.py --ringer; NOTES-drivers.md).
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -99,12 +99,14 @@ extern "C" void fajita_alert_poll(void) {
         IOLog("fajita-alert: %s (mask %x)\n", p == 0 ? "silent" : p == 1 ? "vibrate" : p == 2 ? "ring" : "none/several", m);
         if (gSink) gSink(gSinkCtx, p);
         // iOS has one ringer switch: Ring = ringer on; Vibrate and Silent = silent (iOS vibrates in silent by its own setting).
-        // Bit 3 of native_button_state (Telephony 0x2E, native-hid-ringer=1) is set while silent; fajita-alert-invert=1 flips it.
+        // Bit 3 of native_button_state (Telephony 0x2E, native-hid-ringer=1) is set while the ringer is ON: backboardd's
+        // BKSHIDServicesGetRingerState reads 1 and SpringBoard says "Silent Mode Off" with it set (session-233133; the first
+        // version set it while silent and SpringBoard showed the opposite). fajita-alert-invert=1 flips it.
         if (gMode >= 2 && &fajita_button_extra) {
             unsigned inv = 0;
             PE_parse_boot_argn("fajita-alert-invert", &inv, sizeof inv);
-            bool silent = p == 0 || p == 1;
-            fajita_button_extra((silent != (inv == 1)) ? 8 : 0);
+            bool ring = p == 2;
+            fajita_button_extra((ring != (inv == 1)) ? 8 : 0);
         }
     }
 }

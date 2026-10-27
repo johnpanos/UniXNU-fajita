@@ -157,6 +157,9 @@ def main():
                         help='/backlight (IONameMatch backlight: the AppleARMBacklight of AppleARMPlatform), as the iPhone X tree has it: scalar properties '
                              'and function-backlight_update/enable = phandle 0x80 + \'Uklb\'/\'Elkb\'. Phandle 0x80 is the panel service of '
                              'package/FajitaPanel.cpp (fajita-brightness=1). --backlight-from PATH copies the rest of the node from an iPhone X ADT payload')
+    parser.add_argument('--ringer', action='store_true',
+                        help='/buttons gains the ringer switch (ringerab, function-button_ringerab) for package/FajitaAlertSlider.cpp (fajita-alert=2); '
+                             'FAJITA_RINGER=1 does the same')
     parser.add_argument('--backlight-from', type=Path, default=None,
                         help='ADT payload of the 20H392 DeviceTree.d221ap (ipsw img4 im4p extract): the /backlight properties not listed here (the '
                              'marketing table, restriction tables) are copied from it at build time; nothing of it is stored in the repository')
@@ -170,6 +173,7 @@ def main():
     args = parser.parse_args()
     # FAJITA_BACKLIGHT=1 is --backlight for builds that pass no argument (the board's args list stays unchanged until the slider is proven)
     args.backlight = args.backlight or os.environ.get('FAJITA_BACKLIGHT') == '1'
+    args.ringer = args.ringer or os.environ.get('FAJITA_RINGER') == '1'
     if args.backlight and args.backlight_from is None:
         args.backlight_from = Path(os.environ.get('FAJITA_BACKLIGHT_FROM', Path(__file__).resolve().parents[1] / '.cache/ipsw/20H392/DeviceTree.d221ap.payload'))
     if args.ipad_identity:
@@ -262,7 +266,12 @@ def main():
         # board DT's own strings.
         *( [node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                              # No 'menu' entry: fajita has no Home button. 2 = the non-mechanical answer BSPlatform passes through.
-                             ('button-names', b'hold\0voldown\0volup\0' + (b'ringerab\0' if os.environ.get('FAJITA_RINGER') == '1' else b'')),
+                             ('button-names', b'hold\0voldown\0volup\0' + (b'ringerab\0' if args.ringer else b'')),
+                             # MobileGestalt's ringer-switch answer (SpringBoard's SBRingerControl acts on the switch only when it
+                             # is true) is whether /buttons has function-button_ringerab (libMobileGestalt reads it by its hashed
+                             # name Ah5yfSlY2yycIQb92HbmrA). The iPhone X's points at its GPIO provider; no AppleM68Buttons runs
+                             # here (the switch reaches IOHIDFamily through NativeHidInput), so a null phandle stands in.
+                             *([('function-button_ringerab', struct.pack('<I', 0) + b'RntbNIRb')] if args.ringer else []),
                              ('home-button-type', struct.pack('<I', 2))])] if identity else [] ),
         node('product', [('product-name', identity['product-name'] if identity else b'OnePlus 6T\0'),
                          ('model', b'oneplus,fajita\0'),
