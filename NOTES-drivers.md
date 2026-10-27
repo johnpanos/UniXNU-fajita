@@ -159,3 +159,15 @@ State (e2f2e82, sessions 072207/073304):
   driver there is nothing for FigFlashlight to talk to. HackiOS made it work by injecting a library into mediaserverd, which this port
   does not do. A non-injecting route needs a kernel service that answers FigFlashlight's ISP torch calls: reverse engineering of a
   private interface. Hard.
+
+## 6. Wall clock after a hard reset (FajitaRtc fix, default on)
+
+- A hard reset (long power press, 2026-10-27) restarted the PM8998 RTC counter (397354 -> 175). The record (drivers/FajitaRtc,
+  userdata reserve) then gave only its floor: the wall time it was last set at (2026-10-22) plus the counter. Every boot started
+  about 4 days behind (src2) until a network time fix, which is the same failure that put 1970 frames into Biome (NOTES-daemons.md).
+- Fix (459437d): `fajita-rtc-floor=<build time>` from build.sh. The time is never served earlier than the payload's build (src3); the
+  uptime is not added, because the generic timer runs on across warm resets. Mode 2 also writes the calendar's time as the record a
+  minute after start and every hour, so a boot without network continues from the last known time and never runs backwards.
+- Proof: no Wi-Fi (session-074810): src3, the calendar started 90 s behind the host, and the record was refreshed at +60 s (seq 3).
+  Wi-Fi (session-075522): timed's fix ("time set ... record written", seq 4), then the phone's time() equal to the host's to the
+  second, and the record refreshed from src1.
