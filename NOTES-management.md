@@ -18,6 +18,8 @@ own NOTES file; this log links to them.
 - Ranking landed (db1b095, NOTES-drivers.md), in work order: brightness to iOS (finish), alert slider to iOS (finish),
   thermal (CPU throttling, temperatures to iOS), hall sensor, vibration to iOS, flashlight, motion/light sensors (behind
   the sensor DSP), audio, Bluetooth, GNSS/video decode/cameras. Brightness and slider runs are under way.
+- Landed: brightness (b0be604; brightness-check.sh proves the Control Center slider drives the panel). Next: alert slider,
+  thermal (FajitaThermal.cpp with a host-tested throttling policy) in progress.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
