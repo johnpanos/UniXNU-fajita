@@ -21,7 +21,8 @@
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle --notify NAME...: the state word of each notify(3) name (notify_register_check + notify_get_state), e.g.
 //   com.apple.springboard.ringerstate (SpringBoard's ringer: 1 = ringer on, 0 = silent), com.apple.system.thermalpressurelevel.
-// fjbundle --mg-rebuild: request MobileGestalt's own cache rebuild at the next boot (its sentinel).
+// fjbundle --audio: the audio server's devices (uid, name, running) as a HAL client sees them.
+// fjbundle --mg-rebuild [--mobile]: request MobileGestalt's own cache rebuild at the next boot (its sentinel).
 // fjbundle --mg [--mobile] KEY...: MobileGestalt's answer for each key (MGCopyAnswer), e.g. ringer-switch, ProductType, camera-flash.
 // fjbundle --ringer: backboardd's ringer switch state as its clients ask it (BackBoardServices BKSHIDServicesGetRingerState).
 // fjbundle --open URL: open URL the way SpringBoard does (LaunchServices' LSApplicationWorkspace openSensitiveURL:withOptions:, then
@@ -310,6 +311,58 @@ int main(int argc, char **argv) {
       printf("%s: register %d get %d state %llu\n", argv[i], r, g, (unsigned long long)st);
     }
     return 0;
+  }
+  if (argc == 2 && !strcmp(argv[1], "--audio")) {
+    // The audio server's devices as a HAL client sees them (CoreAudio's AudioObjectGetPropertyData on the system object): object id,
+    // UID, name, whether it is running. For the HAL plug-in of package/fajita-audio and the virtual audio device above it.
+    if (!dlopen("/System/Library/Frameworks/CoreAudio.framework/CoreAudio", RTLD_NOW)) { printf("dlopen CoreAudio: %s\n", dlerror()); return 1; }
+    typedef struct { uint32_t sel, scope, elem; } Addr;
+    int (*getSize)(uint32_t, const Addr *, uint32_t, const void *, uint32_t *) =
+        (int (*)(uint32_t, const Addr *, uint32_t, const void *, uint32_t *))dlsym(RTLD_DEFAULT, "AudioObjectGetPropertyDataSize");
+    int (*get)(uint32_t, const Addr *, uint32_t, const void *, uint32_t *, void *) =
+        (int (*)(uint32_t, const Addr *, uint32_t, const void *, uint32_t *, void *))dlsym(RTLD_DEFAULT, "AudioObjectGetPropertyData");
+    if (!getSize || !get) { printf("no AudioObjectGetPropertyData\n"); return 1; }
+#define FC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
+    Addr devs = {FC('d', 'e', 'v', '#'), FC('g', 'l', 'o', 'b'), 0};
+    uint32_t size = 0;
+    int r = getSize(1, &devs, 0, NULL, &size);
+    printf("system object devices: status %d, %u bytes\n", r, size);
+    uint32_t ids[64] = {0};
+    if (size > sizeof ids) size = sizeof ids;
+    if (!r) r = get(1, &devs, 0, NULL, &size, ids);
+    for (unsigned i = 0; !r && i < size / 4; i++) {
+      char uid[128] = "?", name[128] = "?";
+      CFStringRef s1 = NULL, s2 = NULL;
+      uint32_t n = sizeof s1, running = 0, rn = 4;
+      Addr a1 = {FC('u', 'i', 'd', ' '), FC('g', 'l', 'o', 'b'), 0}, a2 = {FC('l', 'n', 'a', 'm'), FC('g', 'l', 'o', 'b'), 0},
+           a3 = {FC('g', 'o', 'i', 'n'), FC('g', 'l', 'o', 'b'), 0};
+      if (!get(ids[i], &a1, 0, NULL, &n, &s1) && s1) { CFStringGetCString(s1, uid, sizeof uid, kCFStringEncodingUTF8); CFRelease(s1); }
+      n = sizeof s2;
+      if (!get(ids[i], &a2, 0, NULL, &n, &s2) && s2) { CFStringGetCString(s2, name, sizeof name, kCFStringEncodingUTF8); CFRelease(s2); }
+      get(ids[i], &a3, 0, NULL, &rn, &running);
+      printf("  device %u: uid '%s' name '%s' running %u\n", ids[i], uid, name, running);
+      // an aggregate's sub-devices: the full list (UIDs) and the active ones (object ids)
+      Addr ag = {FC('g', 'r', 'u', 'p'), FC('g', 'l', 'o', 'b'), 0}, aa = {FC('a', 'g', 'r', 'p'), FC('g', 'l', 'o', 'b'), 0};
+      CFArrayRef subs = NULL;
+      n = sizeof subs;
+      if (!get(ids[i], &ag, 0, NULL, &n, &subs) && subs) {
+        for (CFIndex k = 0; k < CFArrayGetCount(subs); k++) {
+          char su[128] = "?";
+          CFStringRef e = (CFStringRef)CFArrayGetValueAtIndex(subs, k);
+          if (e && CFGetTypeID(e) == CFStringGetTypeID()) CFStringGetCString(e, su, sizeof su, kCFStringEncodingUTF8);
+          printf("    sub-device '%s'\n", su);
+        }
+        CFRelease(subs);
+      }
+      uint32_t act[16] = {0}, an = sizeof act;
+      if (!get(ids[i], &aa, 0, NULL, &an, act)) for (unsigned k = 0; k < an / 4; k++) printf("    active sub-device object %u\n", act[k]);
+    }
+#undef FC
+    return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--mg-rebuild") && !strcmp(argv[2], "--mobile")) {
+    if (setgid(501) || setuid(501)) { perror("setuid(501)"); return 1; }   // MobileGestaltHelper's user
+    argc = 2;
   }
   if (argc == 2 && !strcmp(argv[1], "--mg-rebuild")) {
     // Ask MobileGestalt for its own cache rebuild at the next boot (the helper's sentinel: "Rebuild MGCache on boot was requested"),
