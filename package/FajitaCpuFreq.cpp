@@ -179,10 +179,17 @@ void readLut(Domain &d) {
     }
 }
 
-int pick(const Domain &d) {
+// The thermal governor's limit per CPU domain (package/FajitaThermal.cpp, fajita-thermal=2): the highest LUT index allowed, -1 none.
+volatile int gThermalMax[2] = {-1, -1};
+IOLock *gVoteLock;
+
+int pick(const Domain &d, bool thermal = true) {
     int best = -1; uint32_t bestKHz = 0;
+    const long dom = &d - gDom;
+    const int lim = thermal && dom >= 0 && dom < 2 ? gThermalMax[dom] : -1;
     for (unsigned i = 0; i < d.rows; ++i) {
         if (d.turbo[i] && !gTurbo) continue;
+        if (lim >= 0 && (int)i > lim) continue;
         if (d.cpu && gCapKHz && d.khz[i] > gCapKHz) continue;
         if (d.khz[i] >= bestKHz) {best = (int)i; bestKHz = d.khz[i];}
     }
@@ -190,13 +197,15 @@ int pick(const Domain &d) {
 }
 
 void vote(Domain &d) {
+    if (gVoteLock) IOLockLock(gVoteLock);
     int level = pick(d);
-    if (level < 0) return;
+    if (level < 0) {if (gVoteLock) IOLockUnlock(gVoteLock); return;}
     wr32(d, kRegPerfState, (uint32_t)level);
     if (d.cpu && (rd32(d, kRegDcvsCtrl) & 1))
         for (unsigned c = 1; c < d.cpus; ++c) wr32(d, kRegPerfState + c * 4, (uint32_t)level);
     d.voted = level;
     d.votedKHz = d.khz[level];
+    if (gVoteLock) IOLockUnlock(gVoteLock);
 }
 
 void lutRow(char *row, const Domain &d) {
@@ -260,12 +269,34 @@ void worker(void *, wait_result_t) {
 }
 }
 
+// For the thermal governor (FajitaThermal.cpp). fajita_cpufreq_lut: the CPU domain's LUT (rows, kHz per index) and the index the
+// governor may go up to (the highest one this mode would vote without a thermal limit); -1 while the domain has not been voted
+// (fajita-cpufreq < 2, not mapped yet). fajita_cpufreq_thermal_limit: allow at most LUT index `max` (-1: no limit) and vote again at
+// once; returns the kHz now voted, 0 when nothing was voted.
+extern "C" int fajita_cpufreq_lut(unsigned dom, unsigned *rows, const uint32_t **khz) {
+    if (dom > 1 || gMode < 2) return -1;
+    Domain &d = gDom[dom];
+    if (!d.va || d.voted < 0 || !d.rows) return -1;
+    if (rows) *rows = d.rows;
+    if (khz) *khz = d.khz;
+    return pick(d, false);
+}
+extern "C" uint32_t fajita_cpufreq_thermal_limit(unsigned dom, int max) {
+    if (dom > 1 || gMode < 2) return 0;
+    Domain &d = gDom[dom];
+    if (!d.va || d.voted < 0) return 0;
+    gThermalMax[dom] = max;
+    vote(d);
+    return d.votedKHz;
+}
+
 // Called by the boot progress monitor once a second (BootProgress.c); the first call after IOKit is up starts the worker.
 extern "C" void fajita_bus_poll(void);   // FajitaBusVote.cpp: the DDR/LLCC votes (fajita-ddr, default on), same archive
 extern "C" void fajita_dpu_poll(void);   // FajitaDpu.cpp: the read-only DPU inspection kcmd, same archive
 extern "C" void fajita_alert_poll(void);    // FajitaAlertSlider.cpp: the alert slider (fajita-alert, default off), same archive
 extern "C" void fajita_haptics_poll(void);  // FajitaHaptics.cpp: PMI8998 haptics (fajita-haptics, default off), same archive
-extern "C" void fajita_panel_poll(void);  // FajitaPanel.cpp: panel brightness (fajita-brightness, default off), same archive
+extern "C" void fajita_panel_poll(void);  // FajitaPanel.cpp: panel brightness (fajita-brightness, board default 1), same archive
+extern "C" void fajita_thermal_poll(void);  // FajitaThermal.cpp: TSENS and the CPU thermal governor (fajita-thermal, default off), same archive
 extern "C" void sheng_cpufreq_poll(void) {
     static bool absent;
     fajita_bus_poll();
@@ -273,6 +304,7 @@ extern "C" void sheng_cpufreq_poll(void) {
     fajita_panel_poll();
     fajita_haptics_poll();
     fajita_alert_poll();
+    fajita_thermal_poll();
     if (absent || gStarted) {if (gStarted && gDom[0].va) summary(); return;}
     if (!IOService::getPlatform()) return;
     unsigned mode = 0, cap = 0;
@@ -283,6 +315,7 @@ extern "C" void sheng_cpufreq_poll(void) {
     PE_parse_boot_argn("fajita-cpufreq-period", &gPeriod, sizeof gPeriod);
     gCapKHz = cap && cap < 100000 ? cap * 1000 : cap;
     gMode = mode;
+    gVoteLock = IOLockAlloc();
     gStarted = true;
     native_cpufreq_stage = 1;
     thread_t thread = nullptr;

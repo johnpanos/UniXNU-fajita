@@ -75,7 +75,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     rec = record('iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
     sources = [KIT / 'FajitaCpuFreq.cpp', KIT / 'FajitaBusVote.cpp', KIT / 'FajitaDpu.cpp', KIT / 'FajitaPanel.cpp', KIT / 'FajitaHaptics.cpp',
-               KIT / 'FajitaAlertSlider.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
+               KIT / 'FajitaAlertSlider.cpp', KIT / 'FajitaThermal.cpp']   # the bus votes (fajita-ddr) share the archive and its hook
     objects, commands = [], {}
     for source in sources:
         obj = OUT / (source.stem + '.o')
