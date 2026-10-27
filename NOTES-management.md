@@ -11,6 +11,15 @@ own NOTES file; this log links to them.
   branches of pins) and fixes tooling gaps itself.
 - A safety-classifier stop ends that piece (AGENTS.md); it is recorded and taken to the user, never reworded.
 
+## 2026-10-27: paused; the phone boots iOS by itself (user request)
+- The user asked to pause everything and have the phone default-boot iOS with the latest build. Both agents paused (drivers:
+  868ffd3 on its branch; sensors: PAS/FastRPC/SSC/ext4 work on its branch, nothing unproven pushed).
+- Installed a stay-up build of ios16-port 23fe098 (stack 7fa0794, GPU plugin rebuilt; Wi-Fi, iOS networking, wifid, SSH on)
+  with scripts/fajita/install-default.sh: payload to system_a, boot image to boot_b, slot b active. It powers on into iOS and
+  joins KittyCorner about 47 s after boot.
+- Consequences: a reset boots iOS again, not fastboot, so unattended test tools need `install-default.sh --remove` first.
+  Each power-on spends a slot retry (7); rerun the install or `fastboot set_active b` before they run out.
+
 ## 2026-10-26 (evening): goal "write as many high quality drivers for the fajita for iOS, easiest first"
 - Drivers agent started (worktree ../UniXNU-fajita-drivers): inventory of ordinary peripherals vs what is driven, ranked by
   effort and value, in NOTES-drivers.md, then one driver at a time behind a flag, proven, then default and landed. Security and
