@@ -336,3 +336,16 @@ measurable change, >33 slightly worse in fi1. timer and m2v could not join Wi-Fi
 a Wi-Fi agent owns it), so they ran the five offline scenes on boots without Wi-Fi: not full results, and a boot without Wi-Fi has
 less background work than b0's. Against b0's same scenes m2v has a third fewer frames over a vsync (433 vs 647) and +2.7 fps, and
 beats the timer arm booted the same way (550): the strongest candidate; the web scenes are to be rerun for both once Wi-Fi works.
+
+## Correctness: the m2v dock-icon smear (2026-10-26 evening)
+
+- Bisect of 1ff8f4b3: only the zeroed-colors change reproduces it (home, 2 of 2 runs per boot on two boots); the depth-range and
+  use-list changes are clean. The change is pure (zeroed_colors is a function of the pipeline and routing, called twice before), so it
+  shifts timing and exposes an older bug (the same smear once in base1, without m2v).
+- The TU_DEBUG=flushall / sysmem result is retracted: those clean runs came after the smeared one in the same boot, and from 17:35 on
+  nothing reproduced it any more (about 14 trials: Turnip flags, backboardd restarts, cold pipeline caches for backboardd and for every
+  process, fresh boots). Note also that gpu-env's TU_DEBUG replaces the plugin's default sysmem,nocb, so those runs were in GMEM.
+- m2v (draw-cost) over two no-Wi-Fi rounds against b0: >16.7 433/500 vs 487/466, no net gain; not landed.
+- The occurrence catcher (gfx-scene.py --catch, on by default, landed 477cc19) keeps the evidence the next time a rest shot differs.
+- Killing a job while session.sh start is booting leaves an orphan boot (no cycle, no hub, the phone up until its autoreset): reset
+  it through a temporary hub (`fajita-usbdbg-hub.py serve`, then `call reset`), as done at 19:28.
