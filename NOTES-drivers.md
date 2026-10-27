@@ -74,7 +74,7 @@ Out of scope: security and authentication hardware (fingerprint sensor, secure e
 - Test: `scripts/fajita/test/brightness-check.sh` on a held session (CC slider up, down, DBV read back over DCS 0x52). Proven on the
   default build (session-232643): DBV 184 -> 974 (up) -> 421 (down), PASS.
 
-## 2. Alert slider -> iOS ringer switch: OPEN (stays default off)
+## 2. Alert slider -> iOS ringer switch: OPEN (stays default off; two attempts done, see section 4 for the shared blocker)
 
 Use `fajita-alert=2 native-hid-ringer=1` plus ADT `--ringer` (or `FAJITA_RINGER=1`); `kcmd alert sim silent|vibrate|ring|off` stands in
 for the switch in unattended tests.
@@ -108,7 +108,25 @@ for the switch in unattended tests.
   IOHIDEventDriver's copyEvent has no temperature case, and thermalmonitord calls IOHIDServiceClientCopyEvent; that is the next thing
   to check.
 
-## 4. Vibration to iOS: what it takes (assessment, nothing built yet)
+## 4. Vibration to iOS (fajita-haptics=3, default off; built, blocked on MobileGestalt's cache)
+
+State (e2f2e82, sessions 072207/073304):
+- Built: the HAL plug-in package/fajita-audio (Actuator, Speaker, Hawking), the overlay over /Library/Audio/Plug-Ins/HAL, the kernel
+  sink /dev/fajita-haptic (FajitaHaptics.cpp mode 3), /product/haptics closed-loop (ADT --haptics), and the policy host test
+  (scripts/check-fajita-policy-host.py). The full build is rc 0.
+- On the phone: mediaserverd loads the plug-in at every boot ("fajita-audio: plug-in loaded in pid 28"), and the HAL and VirtualAudio
+  query all three devices (unanswered optional selectors: cust, clok, cstb, taps, accs, auto, cfsz, clk#, srnd). No device's I/O ever
+  starts, and a long press with a context menu (a UIKit haptic on an iPhone) sends nothing to the Actuator.
+- Blocker (the slider's too): iOS processes answer DeviceSupportsClosedLoopHaptics, like ringer-switch, from MobileGestalt's cache, and
+  the cache still says false. `fjbundle --mg` as root (which reads the cache) answers false for both; `fjbundle --mg --mobile`
+  (which computes them on the spot from the device tree) answers true for both.
+  The cache stays valid for the whole OS build: libMobileGestalt's validity check (+0x2bec) compares only CacheVersion, the build in
+  CacheExtra, ReleaseType, and the compiled-in CacheUUID 42F6FA57-...; nothing from the device tree. So a device-tree change never
+  reaches it. iOS's own way to rebuild it is a sentinel (_MGWriteRebuildCacheSentinel; MobileGestaltHelper: "Rebuild MGCache on
+  boot was requested"). `fjbundle --mg-rebuild` calls it, but as root it did not lead to a rebuild at the next boot: the cache's
+  mtime did not change. The open question is why the helper's rebuild computes false while an in-process answer computes true.
+
+### What it takes (assessment, written before the build)
 
 - iOS 16 on the iPhone X plays every haptic (keyboard taps, UIKit and CoreHaptics feedback, notification and ringer vibration) as a
   one-channel waveform through the audio server. The chain is mediaserverd's CoreAudio HAL, then VirtualAudio.plugin

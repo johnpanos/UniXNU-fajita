@@ -21,6 +21,7 @@
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle --notify NAME...: the state word of each notify(3) name (notify_register_check + notify_get_state), e.g.
 //   com.apple.springboard.ringerstate (SpringBoard's ringer: 1 = ringer on, 0 = silent), com.apple.system.thermalpressurelevel.
+// fjbundle --mg-rebuild: request MobileGestalt's own cache rebuild at the next boot (its sentinel).
 // fjbundle --mg [--mobile] KEY...: MobileGestalt's answer for each key (MGCopyAnswer), e.g. ringer-switch, ProductType, camera-flash.
 // fjbundle --ringer: backboardd's ringer switch state as its clients ask it (BackBoardServices BKSHIDServicesGetRingerState).
 // fjbundle --open URL: open URL the way SpringBoard does (LaunchServices' LSApplicationWorkspace openSensitiveURL:withOptions:, then
@@ -309,6 +310,18 @@ int main(int argc, char **argv) {
       printf("%s: register %d get %d state %llu\n", argv[i], r, g, (unsigned long long)st);
     }
     return 0;
+  }
+  if (argc == 2 && !strcmp(argv[1], "--mg-rebuild")) {
+    // Ask MobileGestalt for its own cache rebuild at the next boot (the helper's sentinel: "Rebuild MGCache on boot was requested"),
+    // the way iOS asks for it; the cache is valid for the whole OS build otherwise, so a device tree change never reaches it.
+    if (!dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW)) { printf("dlopen libMobileGestalt: %s\n", dlerror()); return 1; }
+    const char *names[] = {"_MGWriteRebuildCacheSentinel", "MGWriteRebuildCacheSentinel"};
+    for (unsigned i = 0; i < 2; i++) {
+      void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, names[i]);
+      if (f) { f(); printf("%s: called\n", names[i]); return 0; }
+    }
+    printf("no MGWriteRebuildCacheSentinel export\n");
+    return 1;
   }
   if (argc >= 4 && !strcmp(argv[1], "--mg") && !strcmp(argv[2], "--mobile")) {
     if (setgid(501) || setuid(501)) { perror("setuid(501)"); return 1; }
