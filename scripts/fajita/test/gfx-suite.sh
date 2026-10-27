@@ -164,6 +164,9 @@ home() { $TD/home-page1.sh >/dev/null 2>&1 || $TD/home-page1.sh >/dev/null 2>&1;
 open_url() { T=40 $SS run $FJB --open "$1" >/dev/null 2>&1; sleep ${2:-6}; }
 TOP="tap,540,30 wait,1.5"   # a tap on the status bar scrolls a list or page to its top: a rest point that does not depend on where the drags ended
 SCROLL="xy,540,1900,540,900:60 xy,540,1900,540,900:60 xy,540,900,540,1900:60 xy,540,900,540,1900:60"
+# The App Library opens its list with the search keyboard up (lower ~40% of the screen): its drags stay above the keyboard, and the
+# first one scrolls the list, which puts the keyboard away (drags from y=1900 typed on it instead, 2026-10-26 20:00 on).
+ASCROLL="xy,540,1400,540,400:60 xy,540,1400,540,400:60 xy,540,400,540,1400:60 xy,540,400,540,1400:60"
 WEB="xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,1900,540,700:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40 xy,540,700,540,1900:40"
 run_scene() {   # run_scene SCENE SUFFIX
   local s=$1 n=$1$2
@@ -171,7 +174,7 @@ run_scene() {   # run_scene SCENE SUFFIX
     home)     home || { log "!! $n: not on home page 1"; return; }
               scene $n backboardd,SpringBoard left right left right left:60 right:60 left:60 right:60 shot,page1 ;;
     applib)   $TD/home-page1.sh --applib >/dev/null 2>&1 || { log "!! $n: App Library not reached"; return; }
-              scene $n backboardd,SpringBoard $SCROLL $SCROLL wait,1.5 shot,top; home ;;   # SCROLL ends where it began (the top); no status-bar tap and no extra pull-down: both open the App Library's search (keyboard), which then kept Settings from opening (2026-10-26 20:00 on)
+              scene $n backboardd,SpringBoard $ASCROLL $ASCROLL wait,1.5 shot,top; home ;;   # SCROLL ends where it began (the top); no status-bar tap and no extra pull-down: both open the App Library's search (keyboard), which then kept Settings from opening (2026-10-26 20:00 on)
     settings) home; STAY=1 $TD/settings-scroll.sh gfx-settings 0 >/dev/null 2>&1 || { log "!! $n: Settings did not open"; home; return; }
               scene $n backboardd,Preferences $SCROLL $TOP shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
     calendar) home; scene $n backboardd,MobileCal open,calshow:// wait,3 $SCROLL $TOP shot,rest left:30 right:30 up; home ;;
