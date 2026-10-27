@@ -171,7 +171,7 @@ run_scene() {   # run_scene SCENE SUFFIX
     home)     home || { log "!! $n: not on home page 1"; return; }
               scene $n backboardd,SpringBoard left right left right left:60 right:60 left:60 right:60 shot,page1 ;;
     applib)   $TD/home-page1.sh --applib >/dev/null 2>&1 || { log "!! $n: App Library not reached"; return; }
-              scene $n backboardd,SpringBoard $SCROLL $SCROLL xy,540,900,540,1900:60 wait,1.5 shot,top; home ;;   # no status-bar tap: it opens the App Library's search (keyboard)
+              scene $n backboardd,SpringBoard $SCROLL $SCROLL wait,1.5 shot,top; home ;;   # SCROLL ends where it began (the top); no status-bar tap and no extra pull-down: both open the App Library's search (keyboard), which then kept Settings from opening (2026-10-26 20:00 on)
     settings) home; STAY=1 $TD/settings-scroll.sh gfx-settings 0 >/dev/null 2>&1 || { log "!! $n: Settings did not open"; home; return; }
               scene $n backboardd,Preferences $SCROLL $TOP shot,top xy,540,1900,540,1100:8 wait,1.5 xy,540,1100,540,1900:8 wait,1.5 up; home ;;
     calendar) home; scene $n backboardd,MobileCal open,calshow:// wait,3 $SCROLL $TOP shot,rest left:30 right:30 up; home ;;
