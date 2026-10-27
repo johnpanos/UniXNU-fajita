@@ -58,3 +58,18 @@ Out of scope: security and authentication hardware (fingerprint sensor, secure e
 ## Worktree setup
 
 `scripts/fajita/worktree-cache.sh` links a new worktree's `.cache/*` (all but `fajita-out*`) and `ios16/.cache` to the main tree's.
+
+## 1. Brightness (default on since 0f78c13)
+
+- What iOS does with it: Control Center's and Settings' brightness sliders, auto-dim, and CoreBrightness's ramps set the panel.
+- Pieces: package/FajitaPanel.cpp (DCS 0x51 through the DSI0 command DMA, NOTES-brightness.md), the iPhone X /backlight node in the
+  ADT (`--backlight` in ios16/board.toml, its calibration copied from the 20H392 D221 DeviceTree named by build.sh's
+  FAJITA_BACKLIGHT_FROM), `fajita-brightness=1` in board_args.
+- Why it never worked before: make-fajita-adt.py runs from the build's copy of the tree, which has no .cache, so the node went out
+  without `backlight-marketing-table` and AppleARMBacklight's start failed ("Need maketing table for the new Architecture"). A
+  missing source is now an error.
+- The panel follows `IODisplayParameters.rawBrightness` (0..2047 -> DBV 0..1023) from a 30 ms thread (`fajita-brightness-poll=<ms>`);
+  at 1 s the slider moved the panel in late jumps (19 updates over the two drags now).
+- AppleARMBacklight never calls the lcd service's `bklU` platform function on this tree (0 calls); the property watch is the path.
+- Test: `scripts/fajita/test/brightness-check.sh` on a held session (CC slider up, down, DBV read back over DCS 0x52). Proven on the
+  default build (session-232643): DBV 184 -> 974 (up) -> 421 (down), PASS.
