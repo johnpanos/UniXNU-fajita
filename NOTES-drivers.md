@@ -74,21 +74,27 @@ Out of scope: security and authentication hardware (fingerprint sensor, secure e
 - Test: `scripts/fajita/test/brightness-check.sh` on a held session (CC slider up, down, DBV read back over DCS 0x52). Proven on the
   default build (session-232643): DBV 184 -> 974 (up) -> 421 (down), PASS.
 
-## 2. Alert slider -> iOS ringer switch: OPEN (stays default off; two attempts done, see section 4 for the shared blocker)
+## 2. Alert slider -> iOS ringer switch (default on)
 
-Use `fajita-alert=2 native-hid-ringer=1` plus ADT `--ringer` (or `FAJITA_RINGER=1`); `kcmd alert sim silent|vibrate|ring|off` stands in
-for the switch in unattended tests.
-- The HID path works: backboardd's ringer state (`fjbundle --ringer`, BKSHIDServicesGetRingerState) follows every move (1 = ringer on).
-  The polarity was backwards and is fixed: the Telephony 0x2E bit is set while the ringer is ON (Ring position).
+- Pieces: package/FajitaAlertSlider.cpp (`fajita-alert=2`, TLMM 126/52/24, polled once a second) -> NativeHidInput's Telephony 0x2E bit
+  (`native-hid-ringer=1`; set while the ringer is ON, i.e. Ring; Vibrate and Silent are silent) -> backboardd's ringer state
+  (BKSHIDServicesGetRingerState) -> SpringBoard (SBRingerControl: the "Silent Mode On/Off" banner, com.apple.springboard.ringerstate).
 - SpringBoard acts on the switch only when MobileGestalt's `ringer-switch` is true. libMobileGestalt answers it from /buttons
-  `function-button_ringerab` (hashed name Ah5yfSlY2yycIQb92HbmrA), which `--ringer` now adds. With the MobileGestalt cache file removed
-  (`fjbundle --rm .../systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`), `fjbundle --mg
-  ringer-switch` answers true. After a SpringBoard restart, the "Silent Mode On/Off" banner and com.apple.springboard.ringerstate
-  then follow the switch (session-233133 and session-234614).
-- Blocker: at every boot the cache is written again (owner mobile, born at boot, CacheData byte-identical to the old one), and it says
-  `ringer-switch` false, so SpringBoard ignores the switch again. Whatever regenerates it does not see the property, or takes its answer
-  from somewhere else. The next step is to find the writer (likely MobileGestaltHelper, possibly sandboxed against the /buttons
-  read) and what it reads.
+  `function-button_ringerab` (hashed name Ah5yfSlY2yycIQb92HbmrA). ADT `--ringer` adds it with `ringerab`; no AppleM68Buttons runs
+  here, so its phandle is null.
+- The MobileGestalt cache: answers are cached in
+  /private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.
+  The cache stays valid for the whole OS build (libMobileGestalt +0x2bec checks only CacheVersion, the build, ReleaseType and a
+  compiled-in CacheUUID), so a device-tree change never reaches a Data volume whose cache predates it.
+  iOS's own rebuild path is the sentinel `com.apple.MobileGestalt.plist.rebuild` (`_MGWriteRebuildCacheSentinel`). Written by the
+  helper's user (mobile; as root it silently does nothing), it makes MobileGestaltHelper drop the cache at the next boot, and the
+  answers come from the device tree again.
+  **One-time step after a device-tree change on an existing Data volume:** `session.sh run /usr/sbin/fjbundle-<n> --mg-rebuild
+  --mobile`, then boot once more. A fresh Data volume builds the cache from the current tree and needs nothing. There is no
+  legitimate automatic trigger (iOS rebuilds on restore and update only), so this is not part of the boot flow.
+- Proof (session-074035, after the rebuild): `kcmd alert sim silent` -> "Silent Mode On" banner with the red bell, ringerstate 0;
+  `sim ring` -> ringerstate 1; MobileGestalt `ringer-switch` true. The real switch position is read the same way (it sat at Ring).
+- `kcmd alert` shows the position; `kcmd alert sim silent|vibrate|ring|off` stands in for the switch.
 
 ## 3. Thermal (default on: fajita-thermal=2)
 
