@@ -157,6 +157,8 @@ def main():
                         help='/backlight (IONameMatch backlight: the AppleARMBacklight of AppleARMPlatform), as the iPhone X tree has it: scalar properties '
                              'and function-backlight_update/enable = phandle 0x80 + \'Uklb\'/\'Elkb\'. Phandle 0x80 is the panel service of '
                              'package/FajitaPanel.cpp (fajita-brightness=1). --backlight-from PATH copies the rest of the node from an iPhone X ADT payload')
+    parser.add_argument('--haptics', action='store_true',
+                        help='/product/haptics closed-loop (the Taptic path of package/fajita-audio, fajita-haptics=3); FAJITA_HAPTICS=1 does the same')
     parser.add_argument('--ringer', action='store_true',
                         help='/buttons gains the ringer switch (ringerab, function-button_ringerab) for package/FajitaAlertSlider.cpp (fajita-alert=2); '
                              'FAJITA_RINGER=1 does the same')
@@ -174,6 +176,7 @@ def main():
     # FAJITA_BACKLIGHT=1 is --backlight for builds that pass no argument (the board's args list stays unchanged until the slider is proven)
     args.backlight = args.backlight or os.environ.get('FAJITA_BACKLIGHT') == '1'
     args.ringer = args.ringer or os.environ.get('FAJITA_RINGER') == '1'
+    args.haptics = args.haptics or os.environ.get('FAJITA_HAPTICS') == '1'
     if args.backlight and args.backlight_from is None:
         args.backlight_from = Path(os.environ.get('FAJITA_BACKLIGHT_FROM', Path(__file__).resolve().parents[1] / '.cache/ipsw/20H392/DeviceTree.d221ap.payload'))
     if args.ipad_identity:
@@ -281,7 +284,11 @@ def main():
                              ('artwork-scale-factor', struct.pack('<I', identity['scale'])),
                              ('artwork-display-gamut', b'P3\0'),
                              ('compatible-device-fallback', identity['fallback']),
-                             ('thin-bezel', struct.pack('<I', 1))] if identity else [] )]),
+                             ('thin-bezel', struct.pack('<I', 1))] if identity else [] )],
+             # /product/haptics as the iPhone X has it: closed-loop is MobileGestalt's DeviceSupportsClosedLoopHaptics, with which iOS
+             # plays its feedback and vibrations as waveforms on the "Actuator" audio device (package/fajita-audio, fajita-haptics=3).
+             [node('haptics', [('closed-loop', struct.pack('<I', 1)), ('supports-3rd-party-haptics', struct.pack('<I', 1))])]
+             if args.haptics else []),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),

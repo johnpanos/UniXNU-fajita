@@ -7,7 +7,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index a5ff474..4704203 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7193,6 +7193,360 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+@@ -7193,6 +7193,372 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
  uint8_t native_owner_data_seed_sha256[32];
  char native_owner_data_device_path[64];
  
@@ -24,6 +24,8 @@ index a5ff474..4704203 100644
 +volatile int native_gpu_addon2_status = -1;
 +volatile int native_gpu_addon3_stage = 0;
 +volatile int native_gpu_addon3_status = -1;
++volatile int native_gpu_addon4_stage = 0;
++volatile int native_gpu_addon4_status = -1;
 +static void
 +native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
 +    const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
@@ -352,6 +354,16 @@ index a5ff474..4704203 100644
 +	native_gpu_addon_mount(p, scratch, 0x600, daemons_source, sizeof(daemons_source), daemons_point, sizeof(daemons_point),
 +	    "/System/Library/LaunchDaemons/com.apple.backboardd.plist",
 +	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
++	/* fajita audio (package/fajita-audio, NOTES-drivers.md): the owner's CoreAudio HAL plug-in (FajitaAudio.driver: the Taptic "Actuator"
++	 * and its silent companions) over /Library/Audio/Plug-Ins/HAL, where mediaserverd's HAL loads plug-ins; VirtualAudio.plugin stays
++	 * visible below it. Only with fajita-haptics>=3; a missing source directory only records its status. */
++	uint32_t native_fajita_haptics = 0;
++	if (PE_parse_boot_argn("fajita-haptics", &native_fajita_haptics, sizeof(native_fajita_haptics)) && native_fajita_haptics >= 3) {
++		static const char hal_source[] = "/private/var/ngpu/hal", hal_point[] = "/Library/Audio/Plug-Ins/HAL";
++		native_gpu_addon_mount(p, scratch, 0xa00, hal_source, sizeof(hal_source), hal_point, sizeof(hal_point),
++		    "/Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin/Info.plist", "/Library/Audio/Plug-Ins/HAL/FajitaAudio.driver/Info.plist",
++		    &native_gpu_addon4_stage, &native_gpu_addon4_status);
++	}
 +	/* The default iOS 16 iPhone wallpaper (7400, DefaultWallpapers~iphone.plist of 20H392) with PNG images in place of its HEIC ones (no
 +	 * hardware HEVC decoder here). Its three layers (Background, Floating, Foreground .ca) each name their HEIC assets, so the overlay
 +	 * covers the whole .wallpaper directory and carries each layer's documents and PNG images (scripts/make-fajita-wallpaper-addon.py
@@ -368,7 +380,7 @@ index a5ff474..4704203 100644
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7251,6 +7566,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7251,6 +7578,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
  	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
  	if (!error) native_owner_data_stage = 4;

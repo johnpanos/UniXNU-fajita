@@ -105,11 +105,35 @@ if [ $CAND = 1 ]; then
 fi
 
 # 2. Kernel.
+# The XNU tree of a previous build still carries the late patches as they were then (build-xnu-4k-baseline.sh reverses them with the
+# current files, which fails once the board changed one): reverse them first with the version that is applied, the newest first. The
+# applied version is the copy kept after the last kernel build, or else the board's own history of the file.
+XW=$UNIXNU_OUT/fajita-ios16/tree/.cache/xnu-work
+LATE=(zzz-boot-progress.patch zzy-staged-system-apps.patch zzy-native-gpu-addon-mount.patch)
+late_src() { [ -f "$D16/patches/xnu-8796/$1" ] && echo "$D16/patches/xnu-8796/$1" || echo "$STACK/patches/xnu-8796/$1"; }
+if [ $SKIP_K = 0 ] && [ -e "$XW/.git" ]; then
+  for n in "${LATE[@]}"; do
+    cur=$(late_src "$n"); kept=$XW/.fajita-applied/$n
+    # Every late patch comes off (the baseline puts them all back in name order), so an older one is never under a newer one.
+    if git -C "$XW" apply --reverse --check "$cur" 2>/dev/null; then git -C "$XW" apply --reverse "$cur"; continue; fi
+    done_one=0
+    if [ -f "$kept" ] && git -C "$XW" apply --reverse --check "$kept" 2>/dev/null; then git -C "$XW" apply --reverse "$kept"; done_one=1; fi
+    if [ $done_one = 0 ] && [ "${cur#$D16/}" != "$cur" ]; then
+      for c in $(git -C "$BOARD" log --format=%H -n 30 -- "ios16/patches/xnu-8796/$n"); do
+        git -C "$BOARD" show "$c:ios16/patches/xnu-8796/$n" > "$OUT/late.patch" 2>/dev/null || continue
+        if git -C "$XW" apply --reverse --check "$OUT/late.patch" 2>/dev/null; then git -C "$XW" apply --reverse "$OUT/late.patch"; done_one=1; break; fi
+      done
+      rm -f "$OUT/late.patch"
+    fi
+    [ $done_one = 1 ] && say "reversed the previously applied $n (it changed since the last kernel build)"
+  done
+fi
 if [ $SKIP_K = 0 ]; then
   say "kernel (fajita_ios16_gpu_defconfig) ..."
   ./unixnu defconfig fajita_ios16_gpu_defconfig -D "$D16" > /dev/null
   ./unixnu build kernel -D "$D16" > "$OUT/kernel.log" 2>&1 || { say "KERNEL BUILD FAILED"; tail -8 "$OUT/kernel.log"; exit 1; }
   say "$(tail -1 "$OUT/kernel.log")"
+  mkdir -p "$XW/.fajita-applied"; for n in "${LATE[@]}"; do cp "$(late_src "$n")" "$XW/.fajita-applied/$n"; done
 fi
 
 # 3. GPU plugin (Turnip, metal2vulkan, NativeMetal), packed into the boot add-on with the plugin's settings.
@@ -150,6 +174,18 @@ if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-ssh=1'; then
   say "ssh: ${#SSH_FILES[@]} files, $(grep -c . "$SSH_IN/etc/authorized_keys" 2>/dev/null || echo 0) authorized keys"
 else
   python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop ssh/ >/dev/null
+fi
+# fajita-haptics=3: iOS's haptics (NOTES-drivers.md). The HAL plug-in FajitaAudio.driver (scripts/fajita/build-fajita-audio.sh) goes in as
+# /private/var/ngpu/hal, which the kernel mounts over /Library/Audio/Plug-Ins/HAL, and the ADT gets /product/haptics closed-loop.
+if printf '%s\n' "${ARGS[@]}" | grep -qx 'fajita-haptics=3'; then
+  "$BOARD/scripts/fajita/build-fajita-audio.sh" "$OUT/hal" | sed 's/^/  /'
+  mapfile -t HAL_FILES < <(cd "$OUT/hal" && find . -type f | sed 's#^\./##' | sort)
+  HAL_PUT=(); for f in "${HAL_FILES[@]}"; do m=644; [ -x "$OUT/hal/$f" ] && m=755; HAL_PUT+=("hal/$f=$OUT/hal/$f:$m"); done
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop hal/ "${HAL_PUT[@]}" | sed 's/^/  /'
+  export FAJITA_HAPTICS=1
+  say "haptics: ${#HAL_FILES[@]} plug-in files, /product/haptics closed-loop"
+else
+  python3 "$BOARD/scripts/fajita/addon-put.py" "$OUT/metal.ngpu" --drop hal/ >/dev/null
 fi
 # The processes besides the render server that get their own GPU device (addons/NativeAdrenoMetal.clients, read by NativeAdrenoMetalPlugin.mm
 # listedClient; a listed process takes one of the three 170 MiB client windows, NativeAdrenoPublish.cpp kClientWindows, while its device
