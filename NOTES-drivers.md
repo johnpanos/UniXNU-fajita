@@ -98,7 +98,7 @@ for the switch in unattended tests.
   two at 95 C, and to the floor at 105 C (silver 748 MHz, gold 825 MHz; set with `fajita-thermal-floor-silver/-gold`). It steps back
   up one level per 5 s at or below 85 C. Votes go through `fajita_cpufreq_thermal_limit` in FajitaCpuFreq.cpp. Before this the CPUs
   sat at the top level (1766/2649 MHz) whatever the temperature. The real gold cluster reaches about 71 C during boot.
-- The policy is FajitaThermalPolicy.h, host-tested by `scripts/check-fajita-thermal-host.py`.
+- The policy is FajitaThermalPolicy.h, host-tested by `scripts/check-fajita-policy-host.py`.
 - Proof (session-234614): `kcmd thermal sim gold|silver 1080 60` brought both clusters to their floors, and the per-core clock
   measurement read c0-3 748 MHz and c4-7 825 MHz. After the sim ended they climbed back one level per 5 s.
 - iOS side (mode 3, experimental, default off): 28 temperature HID services under the names thermalmonitord's D22 plist matches

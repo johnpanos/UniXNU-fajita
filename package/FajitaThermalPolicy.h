@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // fajita thermal policy (package/FajitaThermal.cpp): TSENS decoding and the CPU cluster step governor, with no kernel dependency so the
-// host test (package/tests/fajita-thermal-test.cpp, scripts/check-fajita-thermal-host.py) runs it.
+// host test (package/tests/fajita-thermal-test.cpp, scripts/check-fajita-policy-host.py) runs it.
 //
 // TSENS v2 (Linux drivers/thermal/qcom/tsens-v2.c, sdm845.dtsi tsens0 0x0c263000 13 sensors, tsens1 0x0c265000 8 sensors):
 // TM_Sn_STATUS at 0xa0 + 4n, bit 21 VALID, bits 11:0 LAST_TEMP in signed deci-degC.
