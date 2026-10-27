@@ -1,0 +1,42 @@
+# Management log: goals, agents, decisions
+
+The lead's running record of what the user asked for, which agents work on what, and the decisions made along the way, so a
+later session (or another person) can pick up without the conversation. Newest first. Each agent's technical detail lives in its
+own NOTES file; this log links to them.
+
+## How the work is run
+- 1-2 agents at a time, each in its own worktree (AGENTS.md: "One tree"), sharing the phone through the lock.
+- Agents land each proven piece on ios16-port as soon as it is proven (full build first), not in batches.
+- The lead checks every ~10 minutes: phone queue, bg.sh jobs, stuck waits, unmerged work. It verifies landings (origin, fork
+  branches of pins) and fixes tooling gaps itself.
+- A safety-classifier stop ends that piece (AGENTS.md); it is recorded and taken to the user, never reworded.
+
+## 2026-10-26 (evening): goal "write as many high quality drivers for the fajita for iOS, easiest first"
+- Drivers agent started (worktree ../UniXNU-fajita-drivers): inventory of ordinary peripherals vs what is driven, ranked by
+  effort and value, in NOTES-drivers.md, then one driver at a time behind a flag, proven, then default and landed. Security and
+  authentication hardware and cellular telephony are out of scope.
+- The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
+
+## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
+- Built the gfx suite (websites and apps, per-frame timing, 0.1% lows, bottleneck class, screenshots, stability).
+- Landed: the suite and its tools; the backboardd crash fix (lost device on a full job ring); the frozen-screen fixes; the
+  plugin cache path on fresh Data; the device-property cache (upstream 31867dc; verdict pending on alternating boots); the
+  16384-object cap (upstream 25abaa4); the refused render encoder (upstream ce5e19e).
+- Found: dropped frames come mostly from render-server CPU per frame (178 of 302 gaps) and late client commits (90). An
+  intermittent texture smear was caught in a layer's own contents; the padded-row tile-store bounds check (abnd) is the fix
+  candidate.
+- Rejected after measuring: frame info, forcing CA's timer, two swaps in flight.
+- Upstream survey of all repos (Mesa, metal2vulkan, NativeMetal, NativeAdreno, the stack, Apple sources): ranked picks are in
+  the agent reports; Mesa correctness fixes are built, not landed.
+
+## 2026-10-26: background daemons (NOTES-daemons.md)
+- coreduetd's 94% spin was the boot clock starting at 1970 (fixed: RTC calendar), then one Data reset (user-approved).
+- Sandbox stand-in returned garbage for container-less processes (fixed); en0 now exists from boot so configd creates its own
+  network service on fresh Data.
+
+## 2026-10-26: Wi-Fi (NOTES-wifi.md)
+- Done: radio, WPA3-SAE, iOS's own networking, Apple's wifid running, translating SMMU bank, 5 GHz preference (KittyCorner's
+  2.4 GHz BSS band-steers the phone).
+- Open: Settings > Wi-Fi (wifid seeing the interface) is blocked by a safety classifier, on both the reverse-engineering and
+  the open-source AirportItlwm routes. It needs the user, or a /feedback report.
+- SSH dev mode over Wi-Fi works (NOTES-devmode.md); autoboot is blocked by a safety classifier.
