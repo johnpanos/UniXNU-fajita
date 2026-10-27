@@ -204,10 +204,9 @@ board_args = [
   # Panel brightness from iOS (package/FajitaPanel.cpp, NOTES-drivers.md): AppleARMBacklight on the iPhone X /backlight node (ADT --backlight),
   # its rawBrightness followed into the panel's DCS 0x51 every 30 ms; Control Center's and Settings' sliders, auto-dim.
   "fajita-brightness=1",
-  # The alert slider as iOS's ringer switch (package/FajitaAlertSlider.cpp, NOTES-drivers.md): Ring = ringer on, Vibrate/Silent = silent,
-  # through NativeHidInput's Telephony 0x2E bit; /buttons gets ringerab and function-button_ringerab (ADT --ringer), which MobileGestalt's
-  # ringer-switch answer needs before SpringBoard acts on the switch.
-  "fajita-alert=2","native-hid-ringer=1",
+  # CPU thermal governor (package/FajitaThermal.cpp, NOTES-drivers.md): each cluster's OSM vote steps down from 90 C on its hottest
+  # TSENS sensor (95 C: two levels, 105 C: the floor) and back up after 5 s at or below 85 C. Without it the CPUs sit at the top level.
+  "fajita-thermal=2",
 ]
 
 # Fixups of signed text (patches/xnu/native-text-fixup.patch, in the 8796 series too), as the iPad board's: <file name>,<file offset>,
@@ -240,8 +239,7 @@ persistent_data = true
 # --vmm-present: AMFI skips the PMGR (scripts/make-fajita-adt.py), so CONFIG_XNU_SHENG_PMGR is off for this board.
 # --rtc: /arm-io/rtc, the PM8998 RTC that FajitaRtc serves as IORTC; ArmDTPlatform waits for it before the calendar starts.
 # --backlight: /backlight of the 20H392 D221 tree (FAJITA_BACKLIGHT_FROM, set by build.sh), the AppleARMBacklight FajitaPanel drives.
-# --ringer: the ringer switch entries of /buttons (the alert slider, fajita-alert=2).
-args = ["--identity", "iphone10,6", "--vmm-present", "--manifest-bnch", "--chosen-display-scale", "--rtc", "--backlight", "--ringer"]
+args = ["--identity", "iphone10,6", "--vmm-present", "--manifest-bnch", "--chosen-display-scale", "--rtc", "--backlight"]
 chip_id = "207"
 unique_chip_id = "required"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"

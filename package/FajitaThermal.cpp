@@ -5,6 +5,9 @@
 // fajita-thermal=<n> (default 0: nothing is mapped or read):
 //   1  read only: every sensor once a second, a status row (fajita_thermal_row), `kcmd thermal`, a log line when a cluster's hottest
 //      sensor crosses 10 C steps above 70 C
+//   3  as 2, and the sensors for iOS: temperature HID services (NativeHidInput sensor devices) under the names thermalmonitord's
+//      D22 plist matches (PMGR SOC Die Temp Sensor0-3 with their Avg:/Max: forms, ACC Temp Sensor0-2, PMU tdev1-5, PMU tcal,
+//      PMU tjunc), each fed from the TSENS sensors nearest in kind (kSensors below); `sim` moves the cluster's iOS sensors too
 //   2  as 1, and the governor: each CPU cluster's highest allowed OSM LUT index follows its hottest sensor (cpu cores + its L3):
 //      down one level at 90 C, two at 95 C, to the floor at 105 C, back up one level after 5 s at or below 85 C (Linux's sdm845 cpuN
 //      passive trips are 90/95 C, critical 110 C). Needs fajita-cpufreq=2 (the board default), which votes the top level; without the
@@ -33,6 +36,8 @@ typedef size_t (*fajita_usbdbg_kcmd_fn)(const char *args, size_t len, char *out,
 int fajita_usbdbg_register_kcmd(const char *name, fajita_usbdbg_kcmd_fn fn, const char *help) __attribute__((weak));
 int fajita_cpufreq_lut(unsigned dom, unsigned *rows, const uint32_t **khz) __attribute__((weak));
 uint32_t fajita_cpufreq_thermal_limit(unsigned dom, int max) __attribute__((weak));
+int native_hid_sensor_create(const char *name, unsigned kind) __attribute__((weak));   // package/HidInputProbe.cpp
+extern volatile int32_t native_hid_sensor_value[32] __attribute__((weak));          // drivers/NativeHidInput
 extern char native_cpufreq_row[120] __attribute__((weak));        // FajitaCpuFreq.cpp: the OSM state (cur = the applied vote)
 extern char fajita_cpufreq_rows[6][256] __attribute__((weak));    // [2]: the last per-core clock measurement (every 30 s)
 }
@@ -67,6 +72,50 @@ Cluster gCl[2] = {
     {"gold", ftp_gold, 5, 825600, false, {}, nullptr, 0, 0, 0, 0, 0},
 };
 uint32_t gTicks;
+
+// The iOS sensors (fajita-thermal=3): name, how the value is made (0 max, 1 average of the ids), the TSENS ids, and the cluster whose
+// `sim` replaces it (-1 none). SDM845 has no PMU die/board NTCs of Apple's kind; the nearest TSENS zones stand in.
+struct IosSensor {const char *name; uint8_t avg; int8_t sim; uint8_t n; uint8_t ids[4];};
+const IosSensor kSensors[] = {
+    {"PMGR SOC Die Temp Sensor0", 0, 1, 2, {7, 8}}, {"Avg: PMGR SOC Die Temp Sensor0", 1, 1, 2, {7, 8}}, {"Max: PMGR SOC Die Temp Sensor0", 0, 1, 2, {7, 8}},
+    {"PMGR SOC Die Temp Sensor1", 0, 1, 2, {9, 10}}, {"Avg: PMGR SOC Die Temp Sensor1", 1, 1, 2, {9, 10}}, {"Max: PMGR SOC Die Temp Sensor1", 0, 1, 2, {9, 10}},
+    {"PMGR SOC Die Temp Sensor2", 0, -1, 1, {11}}, {"Avg: PMGR SOC Die Temp Sensor2", 1, -1, 1, {11}}, {"Max: PMGR SOC Die Temp Sensor2", 0, -1, 1, {11}},
+    {"PMGR SOC Die Temp Sensor3", 0, -1, 1, {12}}, {"Avg: PMGR SOC Die Temp Sensor3", 1, -1, 1, {12}}, {"Max: PMGR SOC Die Temp Sensor3", 0, -1, 1, {12}},
+    {"ACC Temp Sensor0", 0, 0, 4, {1, 2, 3, 4}}, {"Avg: ACC Temp Sensor0", 1, 0, 4, {1, 2, 3, 4}}, {"Max: ACC Temp Sensor0", 0, 0, 4, {1, 2, 3, 4}},
+    {"ACC Temp Sensor1", 0, -1, 2, {5, 6}}, {"Avg: ACC Temp Sensor1", 1, -1, 2, {5, 6}}, {"Max: ACC Temp Sensor1", 0, -1, 2, {5, 6}},
+    {"ACC Temp Sensor2", 0, 1, 4, {7, 8, 9, 10}}, {"Avg: ACC Temp Sensor2", 1, 1, 4, {7, 8, 9, 10}}, {"Max: ACC Temp Sensor2", 0, 1, 4, {7, 8, 9, 10}},
+    {"PMU tdev1", 0, -1, 1, {0}}, {"PMU tdev2", 0, -1, 1, {18}}, {"PMU tdev3", 0, -1, 1, {19}}, {"PMU tdev4", 0, -1, 1, {23}},
+    {"PMU tdev5", 0, -1, 1, {21}}, {"PMU tcal", 0, -1, 1, {16}}, {"PMU tjunc", 0, -1, 4, {7, 8, 9, 10}},
+};
+constexpr unsigned kIosSensors = sizeof kSensors / sizeof kSensors[0];
+int gSlot[kIosSensors];
+unsigned gIosMade, gIosFailed;
+
+void iosSensors(const int32_t deci[32], const uint8_t ok[32]) {
+    if (gMode < 3 || !native_hid_sensor_create || !&native_hid_sensor_value) return;
+    for (unsigned i = gIosMade; i < kIosSensors; ++i) {   // created in order; -1 (HID not up yet) retries next second
+        int r = native_hid_sensor_create(kSensors[i].name, 1);
+        if (r == -1) break;
+        gSlot[i] = r;
+        if (r < 0) ++gIosFailed;
+        gIosMade = i + 1;
+        if (gIosMade == kIosSensors) IOLog("fajita-thermal: %u iOS temperature sensors published (%u failed)\n", kIosSensors - gIosFailed, gIosFailed);
+    }
+    for (unsigned i = 0; i < gIosMade; ++i) {
+        if (gSlot[i] < 0) continue;
+        const IosSensor &d = kSensors[i];
+        int32_t v = -1000, sum = 0; unsigned n = 0;
+        for (unsigned j = 0; j < d.n; ++j) {
+            if (!ok[d.ids[j]]) continue;
+            sum += deci[d.ids[j]]; ++n;
+            if (deci[d.ids[j]] > v) v = deci[d.ids[j]];
+        }
+        if (!n) continue;
+        if (d.avg) v = sum / int32_t(n);
+        if (d.sim >= 0 && gCl[d.sim].simLeft) v = gCl[d.sim].simDeci;
+        native_hid_sensor_value[gSlot[i]] = v;
+    }
+}
 
 bool mapAll() {
     for (unsigned b = 0; b < 2; ++b) {
@@ -143,6 +192,7 @@ void tick() {
             cl.logged = band;
         }
     }
+    iosSensors(deci, ok);
     row(deci, ok);
 }
 

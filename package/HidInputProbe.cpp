@@ -13,6 +13,36 @@ extern kmod_info_t g_kernel_kmod_info;
 extern "C" void native_hid_static_init(void) __asm__("__GLOBAL__sub_I_NativeHidInput.cpp");
 extern "C" IOService *native_hid_input_allocate(void);
 extern "C" IOService *native_hid_touch_allocate(void);
+extern "C" IOService *native_hid_sensor_allocate(int slot);
+extern "C" char native_hid_sensor_name[32][48];
+// The provider the offline HID devices attach to, kept once the keyboard device started: native_hid_sensor_create attaches sensor
+// devices to it later, from their drivers' own threads.
+static IOService *gSensorProvider;
+static IOLock *gSensorLock;
+extern "C" {
+volatile uint32_t native_hid_sensor_count, native_hid_sensor_failed, native_hid_sensor_overflow;
+// A sensor device for iOS (NativeHidInput.cpp, sensor mode): kind 1 = temperature (deci-degC in native_hid_sensor_value[slot]),
+// Product `name`. Returns the slot, -1 while the HID devices are not up yet (call again later), -2 for a full table or a failed start.
+int native_hid_sensor_create(const char *name, unsigned kind) {
+    if(!gSensorProvider || !gSensorLock || kind!=1)return -1;
+    IOLockLock(gSensorLock);
+    int slot=-2;
+    if(native_hid_sensor_count>=32) {
+        if(!native_hid_sensor_overflow++)IOLog("native-hid: sensor table full (32), '%s' dropped\n",name);
+    } else {
+        const int s=(int)native_hid_sensor_count;
+        strlcpy(native_hid_sensor_name[s],name,sizeof native_hid_sensor_name[s]);
+        IOService *device=native_hid_sensor_allocate(s);
+        bool ok=device && device->init() && device->attach(gSensorProvider);
+        if(ok && !device->start(gSensorProvider)){device->detach(gSensorProvider);ok=false;}
+        if(ok){native_hid_sensor_count=s+1;slot=s;}
+        else{native_hid_sensor_failed=native_hid_sensor_failed+1;IOLog("native-hid: sensor '%s' did not start\n",name);}
+        OSSafeReleaseNULL(device);   // the registry keeps a started device
+    }
+    IOLockUnlock(gSensorLock);
+    return slot;
+}
+}
 extern "C" {
 extern kern_return_t OSKextLoadKextWithIdentifier(const char *);
 volatile uint32_t native_hid_stage,native_hid_resource_found;
@@ -227,6 +257,7 @@ void native_hid_input_probe(void) {
                         bool touchStarted=touch && touch->metaCast("IOHIDDevice") && touch->init() && touch->attach(resource) && touch->start(resource);
                         if(!touchStarted && touch){touch->detach(resource);OSSafeReleaseNULL(touch);}
                     }
+                    if(started){gSensorLock=IOLockAlloc();resource->retain();gSensorProvider=resource;}
                     // The offline devices live for this bounded boot. Its
                     // service attachment and timer remain genuine live objects.
                 }

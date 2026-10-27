@@ -10,6 +10,7 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSIterator.h>
+#define NATIVE_HID_SENSORS 32
 extern "C" void native_hid_input_observed(unsigned,int);
 extern "C" uint64_t mach_absolute_time(void);
 extern "C" void native_hid_live_checkpoint(IOService *);
@@ -71,6 +72,22 @@ static const unsigned char ringerDescriptor[]={
     0x75,0x01,0x95,0x04,0x81,0x02,
     0x05,0x0b,0x09,0x2e,0x75,0x01,0x95,0x01,0x81,0x02,
     0x75,0x03,0x95,0x01,0x81,0x03,0xc0
+};
+// Sensor devices (fajita, native_hid_sensor_create in package/HidInputProbe.cpp): one IOHIDDevice per sensor, named by its Product
+// string, which is what iOS's daemons match (thermalmonitord: PrimaryUsagePage 0xff00 / PrimaryUsage 5 and the Product of each
+// sensor its plist lists). Kind 1, temperature: an Apple vendor TemperatureSensor collection around one Sensor-page
+// Environmental Temperature input (0x20/0x434) with unit exponent -1, so IOHIDEventDriver's temperature parser dispatches
+// IOHIDEvent::temperatureEvent in degrees C from a deci-degC value. The producer writes native_hid_sensor_value[slot]; the device
+// reports it once a second (native_hid_sensor_reports counts them).
+extern "C" {
+volatile int32_t native_hid_sensor_value[NATIVE_HID_SENSORS];
+volatile uint32_t native_hid_sensor_reports[NATIVE_HID_SENSORS];
+char native_hid_sensor_name[NATIVE_HID_SENSORS][48];
+}
+static const unsigned char temperatureDescriptor[]={
+    0x06,0x00,0xff,0x09,0x05,0xa1,0x01,
+    0x05,0x20,0x0a,0x34,0x04,0x16,0x00,0x80,0x26,0xff,0x7f,0x75,0x10,0x95,0x01,0x55,0x0f,0x81,0x02,
+    0xc0
 };
 // Report 3: ten-finger Touch Screen collection (Tip Switch, Untouch (set when the tip is up), Contact Identifier, X, Y per finger, then Contact Count).
 // Coordinates are normalised to 0..32767 on both axes by the producer.
@@ -185,6 +202,7 @@ class NativeHidInput : public IOHIDDevice {
     // (Digitizer/Touch Screen) and the Built-In flag, which a combined keyboard-first descriptor would not provide.
     bool touchOnly=false;
     bool eventDriverFound=false;
+    int sensorSlot=-1;             // >= 0: a sensor device (native_hid_sensor_allocate), nothing else
     bool buttons=false;            // native-hid-buttons=1: report 2 also carries the PMIC keys
     bool ringer=false;             // native-hid-ringer=1: bit 3 of native_button_state is the ringer switch (report 2 bit 4)
     uint8_t buttonBits=0;          // keys last sent (bit 0 power, 1 volume up, 2 volume down)
@@ -314,6 +332,7 @@ class NativeHidInput : public IOHIDDevice {
     static void tick(OSObject *owner,IOTimerEventSource *source) {
         NativeHidInput *self=OSDynamicCast(NativeHidInput,owner);if(!self)return;
         native_hid_live_checkpoint(self);
+        if(self->sensorSlot>=0){self->sensorSend();source->setTimeoutMS(1000);return;}
         if(self->touchOnly){source->setTimeoutMS(1000);return;}
         if(!self->down && !hasEventDriver(self,4)) {
             native_hid_input_observed(3,0);
@@ -332,13 +351,27 @@ class NativeHidInput : public IOHIDDevice {
         if(!self->down) {self->down=true;source->setTimeoutMS(100);}
         else {self->down=false;source->setTimeoutMS(1000);}
     }
+    void sensorSend() {
+        if(!hasEventDriverCached())return;
+        const int32_t v=native_hid_sensor_value[sensorSlot];
+        const int16_t c=(int16_t)(v<-32768?-32768:v>32767?32767:v);
+        unsigned char report[]={(unsigned char)(c&0xff),(unsigned char)((uint16_t)c>>8)};
+        IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,sizeof(report),kIODirectionNone);
+        if(buffer && handleReport(buffer,0,0)==kIOReturnSuccess)native_hid_sensor_reports[sensorSlot]=native_hid_sensor_reports[sensorSlot]+1;
+        OSSafeReleaseNULL(buffer);
+    }
 public:
     void setTouchOnly() {touchOnly=true;}
+    void setSensor(int slot) {sensorSlot=slot;}
     IOWorkLoop *getWorkLoop() const override {return inputLoop;}
-    OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":"Virtual");}
-    OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":"Offline HID input probe");}
+    OSString *newTransportString() const override {return OSString::withCString(sensorSlot>=0?"SPMI":touchOnly?"SPI":"Virtual");}
+    OSString *newProductString() const override {
+        if(sensorSlot>=0)return OSString::withCString(native_hid_sensor_name[sensorSlot]);
+        return OSString::withCString(touchOnly?"Offline touch digitizer":"Offline HID input probe");
+    }
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
         if(!out)return kIOReturnBadArgument;
+        if(sensorSlot>=0){*out=IOBufferMemoryDescriptor::withBytes(temperatureDescriptor,sizeof(temperatureDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
         unsigned char combined[sizeof(ringerDescriptor)+sizeof(touchDescriptor)];
         size_t size;
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
@@ -358,6 +391,13 @@ public:
         // Request the normal generic HID event personality for this owned
         // keyboard. This is a matching property, not a client entitlement.
         if(!setProperty("HIDDefaultBehavior",true))return false;
+        if(sensorSlot>=0) {
+            setProperty("Built-In",true);
+            if(!IOHIDDevice::start(provider))return false;
+            timer=IOTimerEventSource::timerEventSource(this,tick);
+            if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess){OSSafeReleaseNULL(timer);IOHIDDevice::stop(provider);return false;}
+            timer->setTimeoutMS(1000);return true;
+        }
         unsigned touch=0;
         touchEnabled=PE_parse_boot_argn("sheng-touch-hid",&touch,sizeof(touch)) && touch==1;
         if(touchOnly||touchEnabled){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);}
@@ -389,3 +429,7 @@ public:
 OSDefineMetaClassAndStructors(NativeHidInput,IOHIDDevice)
 extern "C" IOService *native_hid_input_allocate(void) {return new NativeHidInput;}
 extern "C" IOService *native_hid_touch_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setTouchOnly();return device;}
+extern "C" IOService *native_hid_sensor_allocate(int slot) {
+    if(slot<0 || slot>=NATIVE_HID_SENSORS)return nullptr;
+    NativeHidInput *device=new NativeHidInput;if(device)device->setSensor(slot);return device;
+}

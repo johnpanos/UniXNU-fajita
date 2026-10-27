@@ -73,3 +73,37 @@ Out of scope: security and authentication hardware (fingerprint sensor, secure e
 - AppleARMBacklight never calls the lcd service's `bklU` platform function on this tree (0 calls); the property watch is the path.
 - Test: `scripts/fajita/test/brightness-check.sh` on a held session (CC slider up, down, DBV read back over DCS 0x52). Proven on the
   default build (session-232643): DBV 184 -> 974 (up) -> 421 (down), PASS.
+
+## 2. Alert slider -> iOS ringer switch: OPEN (stays default off)
+
+Use `fajita-alert=2 native-hid-ringer=1` plus ADT `--ringer` (or `FAJITA_RINGER=1`); `kcmd alert sim silent|vibrate|ring|off` stands in
+for the switch in unattended tests.
+- The HID path works: backboardd's ringer state (`fjbundle --ringer`, BKSHIDServicesGetRingerState) follows every move (1 = ringer on).
+  The polarity was backwards and is fixed: the Telephony 0x2E bit is set while the ringer is ON (Ring position).
+- SpringBoard acts on the switch only when MobileGestalt's `ringer-switch` is true. libMobileGestalt answers it from /buttons
+  `function-button_ringerab` (hashed name Ah5yfSlY2yycIQb92HbmrA), which `--ringer` now adds. With the MobileGestalt cache file removed
+  (`fjbundle --rm .../systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`), `fjbundle --mg
+  ringer-switch` answers true. After a SpringBoard restart, the "Silent Mode On/Off" banner and com.apple.springboard.ringerstate
+  then follow the switch (session-233133 and session-234614).
+- Blocker: at every boot the cache is written again (owner mobile, born at boot, CacheData byte-identical to the old one), and it says
+  `ringer-switch` false, so SpringBoard ignores the switch again. Whatever regenerates it does not see the property, or takes its answer
+  from somewhere else. The next step is to find the writer (likely MobileGestaltHelper, possibly sandboxed against the /buttons
+  read) and what it reads.
+
+## 3. Thermal (default on: fajita-thermal=2)
+
+- package/FajitaThermal.cpp: the 21 TSENS sensors (tsens0 13, tsens1 8, v2 TM_Sn_STATUS) once a second, `kcmd thermal`, a status
+  row, a log line per 10 C band above 70 C.
+- Governor (mode 2): each CPU cluster's OSM LUT index follows the hottest of its core and L3 sensors. It steps down one level at 90 C,
+  two at 95 C, and to the floor at 105 C (silver 748 MHz, gold 825 MHz; set with `fajita-thermal-floor-silver/-gold`). It steps back
+  up one level per 5 s at or below 85 C. Votes go through `fajita_cpufreq_thermal_limit` in FajitaCpuFreq.cpp. Before this the CPUs
+  sat at the top level (1766/2649 MHz) whatever the temperature. The real gold cluster reaches about 71 C during boot.
+- The policy is FajitaThermalPolicy.h, host-tested by `scripts/check-fajita-thermal-host.py`.
+- Proof (session-234614): `kcmd thermal sim gold|silver 1080 60` brought both clusters to their floors, and the per-core clock
+  measurement read c0-3 748 MHz and c4-7 825 MHz. After the sim ended they climbed back one level per 5 s.
+- iOS side (mode 3, experimental, default off): 28 temperature HID services under the names thermalmonitord's D22 plist matches
+  (PMGR SOC Die Temp Sensor0-3 with Avg:/Max:, ACC Temp Sensor0-2, PMU tdev1-5, tcal, tjunc). They are NativeHidInput sensor-mode
+  devices (Apple vendor 0xff00/5 around Sensor-page Environmental Temperature, created by `native_hid_sensor_create`). All 28
+  publish. A simulated 110 C for 60 s left com.apple.system.thermalpressurelevel at 0, so thermalmonitord does not take them yet.
+  IOHIDEventDriver's copyEvent has no temperature case, and thermalmonitord calls IOHIDServiceClientCopyEvent; that is the next thing
+  to check.
