@@ -21,7 +21,7 @@
 // fjbundle --prefs APPID KEY=0|1|d...: become mobile (uid 501) and set (d: remove) boolean preferences of APPID through cfprefsd.
 // fjbundle --notify NAME...: the state word of each notify(3) name (notify_register_check + notify_get_state), e.g.
 //   com.apple.springboard.ringerstate (SpringBoard's ringer: 1 = ringer on, 0 = silent), com.apple.system.thermalpressurelevel.
-// fjbundle --mg KEY...: MobileGestalt's answer for each key (MGCopyAnswer), e.g. ringer-switch, ProductType, camera-flash.
+// fjbundle --mg [--mobile] KEY...: MobileGestalt's answer for each key (MGCopyAnswer), e.g. ringer-switch, ProductType, camera-flash.
 // fjbundle --ringer: backboardd's ringer switch state as its clients ask it (BackBoardServices BKSHIDServicesGetRingerState).
 // fjbundle --open URL: open URL the way SpringBoard does (LaunchServices' LSApplicationWorkspace openSensitiveURL:withOptions:, then
 //   openURL: if that is refused), e.g. --open https://news.ycombinator.com/ brings Safari to the front on that page; prints the result.
@@ -309,6 +309,10 @@ int main(int argc, char **argv) {
       printf("%s: register %d get %d state %llu\n", argv[i], r, g, (unsigned long long)st);
     }
     return 0;
+  }
+  if (argc >= 4 && !strcmp(argv[1], "--mg") && !strcmp(argv[2], "--mobile")) {
+    if (setgid(501) || setuid(501)) { perror("setuid(501)"); return 1; }
+    argv[2] = argv[1]; argv++; argc--;   // --mg --mobile KEY...: the same queries as uid 501 (MobileGestaltHelper's user)
   }
   if (argc >= 3 && !strcmp(argv[1], "--mg")) {
     if (!dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW)) { printf("dlopen libMobileGestalt: %s\n", dlerror()); return 1; }
