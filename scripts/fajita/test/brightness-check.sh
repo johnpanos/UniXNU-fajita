@@ -6,6 +6,10 @@
 TD=$(cd "$(dirname "$0")" && pwd); W=${FAJITA_WORK:-$(cd "$TD/../../.." && pwd)/.cache/fajita-work}; H=$TD/hc; S=$W/brightness; mkdir -p "$S"
 dbv() { $H kcmd brightness read | sed -n 's/.*dbv \([0-9]*\).*/\1/p'; }
 $H kcmd brightness | grep -q "fajita-brightness=0" && { echo "FAIL: fajita-brightness=0 in this build"; exit 1; }
+# Right after a session starts, SpringBoard may still be booting (the Apple logo): wait (up to 120 s) for CoreBrightness's first level.
+for i in $(seq 1 24); do $H kcmd brightness | grep -q "iOS calls [0-9]* last [1-9]" && break; sleep 5; done
+$H kcmd brightness | grep -q "iOS calls [0-9]* last [1-9]" || { echo "FAIL: iOS never set a brightness (CoreBrightness not up?)"; exit 1; }
+sleep 3
 b0=$(dbv)
 $H kcmd touch swipe xy 1000 5 1000 1300 30 >/dev/null; sleep 2; T=30 $H screenshot "$S/cc.png" >/dev/null
 $H kcmd touch swipe xy 660 1200 660 870 40 >/dev/null; sleep 1.5; up=$(dbv); T=30 $H screenshot "$S/up.png" >/dev/null
