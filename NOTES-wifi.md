@@ -223,6 +223,60 @@ What is in the kernelcache (iOS 16.7 internal-SDK build, `DTSDKName iphoneos16.7
 
 ## Current state (keep this updated; a restart starts here)
 
+### Band steering: why connect #1 to the 2.4 GHz BSS failed (branch `wifisae`, 2026-10-26)
+Symptom: on many boots `FAIL assoc`, every time against KittyCorner's 2.4 GHz BSS `fa:d0:0e:a8:9f:89` (2412 MHz, -44 dBm):
+four SAE commits, no answer (`sae c4/f0`). Boots that passed had joined the 5 GHz BSS `fa:d0:0e:af:9f:8a` (5220, later 5785 MHz).
+**Cause: the AP band-steers this phone off 2.4 GHz.** Evidence:
+- **History** (every session console under `.cache/fajita-work/logs`, first connect of each boot): 7/7 first connects
+  on 2412 MHz joined within ~60 ms up to session 001344 (2026-10-26 00:13), **the phone's first 5 GHz association ever**.
+  From 00:32 on, ~50 of 51 first connects on 2412 MHz failed, while every first connect on 5 GHz joined, and a later try
+  on 2412 in the same boot (about 15 s on) usually joined (one boot, 003802, was let in on the second commit). The AP
+  learned the phone is dual band and now holds it off 2.4 GHz until it insists.
+- **The commits arrive and are ignored** (new FW7 link fields): WMI mgmt TX completion status 0 (acked) for all four
+  commits (`mtx 4 ok4 noack0`), and the AP sends us nothing (`ap auth0 deauth0 disas0 act0`): no reject status, no SA
+  Query, no deauth. hostapd itself would answer even an invalid commit with a status, so this is a drop below its SAE.
+- **Not H2E**: both BSSes have the same RSN element (caps 00cc, MFPC+MFPR), **no RSNXE** (`rsnxe 0/00`) and no BSS
+  membership selector 123 (`sel123 0`); the same hunting-and-pecking commits are accepted on 2.4 GHz on a later try and
+  before 00:13. No H2E was implemented: nothing asks for it.
+- **Ruled out on the phone** (wifi-test, forced 2.4 GHz with `fajita-wifi-band=2g`): the translating SMMU bank (run B,
+  xlate: fails; run C, `fajita-wifi-smmu=bypass`: fails the same way; the xlate/bypass boundary in the history was a
+  coincidence with 00:13), the management sequence number restarting at 0 each boot (run D, `fajita-wifi-mgmt-seq=random`:
+  fails the same way), TX not leaving the chip (acked), wrong channel or rate (acked by the AP).
+**Fix (2b870dd):** choose the BSS the way a supplicant does. `fajita-wifi-band=auto` (default): a 5 GHz BSS at >= -70 dBm
+(`WMLME_5G_GOOD_DBM`) beats any 2.4 GHz one; `strongest` (the old rule), `2g`, `5g`. After a failed authentication the
+retry takes the next best BSS (`wmlme_find_other`). The kernel rescans once when scan #1 saw the SSID only on 2.4 GHz (the
+5 GHz beacon/probe response was missed: -67 dBm, 50 ms active dwell), and rescans (bounded, 8 scans) when a scan did not
+see the SSID at all (the connect loop used to stall there: session 162319). Host test `t_mlme_band` (the field case).
+Rows: `FW7 connect #N ...: BSSID MHz dBm (bss 2g N 5g N) rsn tail .. rsnxe len/octet sel123 N rates N seq N`; FW7 scan:
+`bcn N prsp N` per BSS and `(bss 2g N 5g N)`; FW7 link: `mtx` (completions by status) and `ap ...` (frames the AP sent
+us by subtype, action category, deauth reason).
+**2.4 GHz is avoided, not fixed**: there was nothing to fix in our SAE (no H2E needed, commits accepted on a later try);
+the AP withholds 2.4 GHz from this phone, and `auto` goes to 5 GHz first. When 2.4 GHz is the only band, the join
+still depends on the retry (connect #2 after a rescan), which band steering usually lets through.
+Proof: `scripts/fajita/test/wifi-soak.sh 8` on e0b3f89, default args (stopped after boot 7 at the lead's request, the
+phone went to graphics). Full `build.sh --test` from e0b3f89: rc 0.
+
+| boot | result | joined (first try every time) | session |
+| --- | --- | --- | --- |
+| 1 | PASS | fa:d0:0e:af:9f:8a 5785 MHz -67 dBm | 174121 |
+| 2 | PASS | 5785 MHz -70 dBm | 174214 |
+| 3 | FAIL dhcp, ping (harness) | 5785 MHz -67 dBm (scan #1 saw 2.4 GHz only; the rescan found 5 GHz) | 175131 |
+| 4 | PASS | 5785 MHz -68 dBm | 180637 |
+| 5 | PASS | 5785 MHz -67 dBm | 180740 |
+| 6 | PASS | 5785 MHz -65 dBm | 180908 |
+| 7 | PASS | 5785 MHz -64 dBm | 181016 |
+
+Open items:
+- **Boot 3: associated, then no DHCP lease reported.** Its log: assoc PASS at 56 s, then `push fjnet failed` (the hub
+  push of the fjnet tool did not finish in 60 s), so `fjnet dhcp` and `fjnet ping` timed out on the hub (`run: timeout`).
+  The link itself carried traffic (data rx 2040 / tx 1427, IPv6 TCP to the internet established) and the same boot's
+  CFNetwork probe fetched http://example.com/ (http 200) over Wi-Fi. So it looks like a USB debug channel / harness
+  failure, not Wi-Fi, but that is not proven: why the push stalled is not known (the session had waited 13 min behind
+  a graphics session before booting).
+- 5785 MHz is often near -67..-70 dBm here, right at `WMLME_5G_GOOD_DBM`; below it `auto` picks 2.4 GHz and joins on
+  the retry. A lower threshold (-75) would keep 5 GHz; not tried.
+- DFS 5 GHz channels (52-144) are not scanned, so an AP that moves there is seen on 2.4 GHz only.
+
 **Opus round (branch `wifi-opus`, worktree `../UniXNU-fajita-wifi3`), 2026-10-25.**
 - **Handover point (2026-10-26):** all work is on ios16-port. Opus stops here; the phone goes to the next agent. Open for done:
   (1) wifid seeing the interface (status icon, Settings > Wi-Fi, join from Settings) - the stopped IO80211.framework survey
