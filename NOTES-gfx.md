@@ -349,3 +349,20 @@ beats the timer arm booted the same way (550): the strongest candidate; the web 
 - The occurrence catcher (gfx-scene.py --catch, on by default, landed 477cc19) keeps the evidence the next time a rest shot differs.
 - Killing a job while session.sh start is booting leaves an orphan boot (no cycle, no hub, the phone up until its autoreset): reset
   it through a temporary hub (`fajita-usbdbg-hub.py serve`, then `call reset`), as done at 19:28.
+
+## Upstream picks (survey), measured as no-Wi-Fi arms on one board (offline five x2 per run, catcher on)
+
+| arm | run | fps | 1% low | 0.1% low | >16.7 | >33 |
+| --- | --- | --- | --- | --- | --- | --- |
+| base3 (stack gfx a8ffa82) | r1 | 51.9 | 10.4 | 7.0 | 471 | 62 |
+| devc (NativeMetal 31867dc: device answers kept) | r1 | 52.5 | 11.3 | 6.3 | 418 | 65 |
+| mesa1 (Turnip push-const/descriptor trio) | r1 | 51.8 | 10.2 | 6.4 | 460 | 61 |
+| base3 + M2V_ALIAS_PADDED_TARGETS=0 | r1 | 51.8 | 10.1 | 6.2 | 453 | 66 |
+| devc | r2 | 52.2 | 10.3 | 6.1 | 420 | 63 |
+| mesa1 | r2 | 51.7 | 9.8 | 5.9 | 462 | 60 |
+| base3 + alias off | r2 | 51.8 | 10.9 | 6.5 | 487 | 70 |
+| base3 | r2b (clean rerun) | 51.3 | 9.9 | 6.1 | 508 | 64 |
+
+devc landed (ios16-port 9295e68: NativeMetal 64fa39e, stack 16123d2). mesa1 and alias-off: no measurable change (both are
+correctness candidates for the smear, which does not reproduce now). base3 r2 (first try) and the r2b/r3 runs of stab/abnd/base3 were
+broken by the App Library rest point opening the search keyboard (then Settings would not open): fixed in gfx-suite (b712c8a), rerun.
