@@ -10,7 +10,7 @@ W=${FAJITA_WORK:-$BOARD/.cache/fajita-work}
 [ $# -gt 0 ] || { sed -n 2,6p "$0"; exit 2; }
 tag=${RUNTAG:-$(date +%m%d)}; rc=0
 for arm in "$@"; do
-  out=$BOARD/.cache/fajita-out-gfx-$arm
+  out=$BOARD/.cache/fajita-out-gfx-$arm${ARM_SUFFIX:-}
   [ -f "$out/payload.img" ] || { echo "== $arm: no image in $out (gfx-arms-build.sh $arm)"; rc=1; continue; }
   echo "== $arm: boot $(date +%T)"
   log=$W/gfx/arm-$arm-$tag-boot.txt; mkdir -p $W/gfx

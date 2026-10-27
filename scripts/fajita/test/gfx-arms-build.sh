@@ -9,7 +9,8 @@
 #   fi2    fajita-frame-info=2                            (frame info, the request's own swap id)
 #   timer  fajita-frame-info=0 fajita-ca-force-timer=1    (CA_FORCE_TIMER for backboardd: CADeviceUseVBL)
 #   m2v    fajita-frame-info=0, the m2v plugin           (metal2vulkan draw-cost)
-# KM for gfx-suite.sh is then .cache/fajita-out-gfx-ARM/unixnu/fajita-ios16/kernel/kernel.macho.
+# KM for gfx-suite.sh is then .cache/fajita-out-gfx-ARM/unixnu/fajita-ios16/kernel/kernel.macho. ARM_SUFFIX=S builds into fajita-out-gfx-ARMS
+# (two images of one arm, e.g. m2v with two plugins; gfx-arms-run.sh takes the same ARM_SUFFIX).
 TD=$(cd "$(dirname "$0")" && pwd); BOARD=$(cd "$TD/../../.." && pwd)
 CREDS=${WIFI_CREDS:-$HOME/.config/unixnu/wifi-kittycorner}
 PHYS_RESERVE=${WIFI_PHYS_RESERVE:-0xf5b00000.0x204000,0x8df00000.0x100000,0x8e000000.0x7800000,0x96500000.0x200000,0xf6000000.0x800000}
@@ -30,7 +31,7 @@ for arm in "$@"; do
     m2v) extra=(fajita-frame-info=0); plugin=${PLUGIN_M2V:-$BOARD/.cache/fajita-out-m2v}/metal.ngpu ;;
     *) echo "gfx-arms-build: unknown arm $arm"; exit 2 ;;
   esac
-  out=$BOARD/.cache/fajita-out-gfx-$arm; mkdir -p "$out"
+  out=$BOARD/.cache/fajita-out-gfx-$arm${ARM_SUFFIX:-}; mkdir -p "$out"
   if [ "${PLUGIN_BASE:-}" = build ] && [ $arm != m2v ]; then   # build this tree's plugin in the arm's own directory (a clean build)
     rm -f "$out/metal.ngpu"; echo "== $arm: ${extra[*]} (plugin built here)"
   else
