@@ -16,6 +16,10 @@
 // fajita-rtc-offset=<seconds>: an explicit anchor, wall time minus counter (constant while the RTC runs, so a build-time value
 // does not go stale): it replaces the recorded offset, and in mode 2 is written as the record. A minute after start the driver
 // logs the calendar against counter + offset.
+// fajita-rtc-floor=<seconds> (scripts/fajita/build.sh passes the payload's build time): the time is never served earlier than this
+// (RTC_TIME_FLOOR). A hard reset (long power press) restarts the PMIC counter, and the record's own floor is then
+// only as recent as its last write; mode 2 therefore also writes the calendar's time as the record a minute after start and every
+// hour (refreshFloor), so time continues across boots from the last known time.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -42,6 +46,7 @@ char fajita_rtc_row[160];
 namespace {
 constexpr uint32_t kSlack = 2;           // seconds of offset change that are written
 constexpr unsigned kUfsWaitMs = 20000;   // the platform expert waits 30 s for IORTC
+constexpr unsigned kRefreshS = 3600;     // the record's floor is refreshed this often (mode 2)
 }
 
 class FajitaRtc : public IOService {
@@ -57,6 +62,9 @@ private:
   void summarise (const char *note);
   IOReturn getTime (clock_sec_t *secs, clock_nsec_t *nsecs);
   IOReturn setTime (clock_sec_t secs);
+  uint64_t floorNow (void);
+  bool writeRecord (const rtc_record &next);
+  void refreshFloor (void);
   IOLock *fLock = nullptr;
   unsigned fMode = 0, fSid = 0, fBase = RTC_PM8941_RW_BASE;
   bool fReady = false, fUfs = false;
@@ -178,7 +186,7 @@ void FajitaRtc::bringUp (void *arg, wait_result_t)
   }
   fajita_rtc_stats[0] = rc == 0 ? 2 : 3;
   uint64_t t = 0;
-  self->fSource = rc == 0 ? rtc_wall_time (raw, self->fHave, &self->fRecord, &t) : RTC_TIME_NONE;
+  self->fSource = rc == 0 ? rtc_wall_time_floored (raw, self->fHave, &self->fRecord, self->floorNow (), &t) : RTC_TIME_NONE;
   fajita_rtc_stats[5] = static_cast<uint32_t> (self->fSource);
   self->summarise ("up");
   IOLog ("FajitaRtc: %s, wall %llu\n", fajita_rtc_row, t);
@@ -195,7 +203,58 @@ void FajitaRtc::bringUp (void *arg, wait_result_t)
   self->summarise ("check");
   IOLog ("FajitaRtc: calendar %lu.%06u, RTC wall %lu (0x%x), %s\n", static_cast<unsigned long> (now), us, static_cast<unsigned long> (rtc), st,
          fajita_rtc_row);
-  self->release ();
+  if (self->fMode != 2) {self->release (); return;}
+  for (;;) {   // the thread keeps its reference: the service lives as long as the system
+    self->refreshFloor ();
+    IOSleep (kRefreshS * 1000);
+  }
+}
+
+uint64_t FajitaRtc::floorNow (void)
+{
+  static uint64_t floor = ~0ull;
+  if (floor == ~0ull) {
+    floor = 0;
+    PE_parse_boot_argn ("fajita-rtc-floor", &floor, sizeof (floor));
+  }
+  // Not plus the uptime: the generic timer keeps counting across a warm reset (session-073431 logged 441 s at 40 s into a boot), so
+  // build time + uptime ran 380 s ahead of the host. The build time alone is a true lower bound.
+  return floor;
+}
+
+bool FajitaRtc::writeRecord (const rtc_record &next)
+{
+  if (!fUfs || native_ufs_rtc_write == nullptr) return false;
+  uint8_t *block = static_cast<uint8_t *> (IOMalloc (RTC_RECORD_BLOCK));
+  if (block == nullptr) return false;
+  rtc_record_encode (&next, block);
+  bool wrote = native_ufs_rtc_write (static_cast<unsigned> (next.seq & 1), block);
+  IOFree (block, RTC_RECORD_BLOCK);
+  if (wrote) fajita_rtc_stats[8]++;
+  else fajita_rtc_stats[9]++;
+  return wrote;
+}
+
+// Mode 2: write the calendar's time as the record (counter + offset = now), a minute after start and every hour. While the time is
+// counter + offset this only moves the record's floor up; after an RTC reset or on the build floor (no network time yet) it makes
+// the next boot continue from the last known time instead of starting over at the same floor (time never runs backwards across
+// boots). A network time fix later corrects it like any set.
+void FajitaRtc::refreshFloor (void)
+{
+  clock_sec_t now = 0;
+  clock_usec_t us = 0;
+  clock_get_calendar_microtime (&now, &us);
+  IOLockLock (fLock);
+  uint32_t raw = 0;
+  bool wrote = false;
+  int was = fSource;
+  if (fReady && now > 0 && readCounter (&raw) == 0) {
+    rtc_record next;
+    rtc_record_set (raw, static_cast<uint64_t> (now), fHave, &fRecord, 0, &next);
+    if ((wrote = writeRecord (next))) {fRecord = next; fHave = 1;}
+  }
+  IOLockUnlock (fLock);
+  if (wrote) IOLog ("FajitaRtc: record refreshed to %lu (counter %u, source was %d)\n", static_cast<unsigned long> (now), raw, was);
 }
 
 void FajitaRtc::summarise (const char *note)
@@ -213,7 +272,7 @@ IOReturn FajitaRtc::getTime (clock_sec_t *secs, clock_nsec_t *nsecs)
   uint32_t raw = 0;
   uint64_t t = 0;
   if (fReady && readCounter (&raw) == 0) {
-    int source = rtc_wall_time (raw, fHave, &fRecord, &t);
+    int source = rtc_wall_time_floored (raw, fHave, &fRecord, floorNow (), &t);
     fSource = source;
     fajita_rtc_stats[5] = static_cast<uint32_t> (source);
     if (source != RTC_TIME_NONE) {
@@ -243,17 +302,7 @@ IOReturn FajitaRtc::setTime (clock_sec_t secs)
   fRecord = next;
   fHave = 1;
   fajita_rtc_stats[7]++;
-  bool wrote = false;
-  if (write && fMode == 2 && fUfs && native_ufs_rtc_write != nullptr) {
-    uint8_t *block = static_cast<uint8_t *> (IOMalloc (RTC_RECORD_BLOCK));
-    if (block != nullptr) {
-      rtc_record_encode (&next, block);
-      wrote = native_ufs_rtc_write (static_cast<unsigned> (next.seq & 1), block);
-      IOFree (block, RTC_RECORD_BLOCK);
-    }
-    if (wrote) fajita_rtc_stats[8]++;
-    else fajita_rtc_stats[9]++;
-  }
+  bool wrote = write && fMode == 2 && writeRecord (next);
   summarise (wrote ? "set, saved" : "set");
   IOLockUnlock (fLock);
   IOLog ("FajitaRtc: time set to %lu (counter %u, offset %lld -> %lld)%s\n", static_cast<unsigned long> (secs), raw,

@@ -92,6 +92,13 @@ int main() {
         CHECK(rtc_wall_time(40, 1, &r, &t) == RTC_TIME_RESET && t == 1792796530ull + 40);   // the RTC restarted from 0
         rtc_record neg = {1, -1000, 0, 0};
         CHECK(rtc_wall_time(10, 1, &neg, &t) == RTC_TIME_NONE);
+        // A floor: served when nothing else is known, after a reset that gives an earlier time, and over an offset gone wrong.
+        CHECK(rtc_wall_time_floored(110200, 0, &r, 0, &t) == RTC_TIME_NONE);
+        CHECK(rtc_wall_time_floored(110200, 0, &r, 1793000000ull, &t) == RTC_TIME_FLOOR && t == 1793000000ull);
+        CHECK(rtc_wall_time_floored(40, 1, &r, 1793000000ull, &t) == RTC_TIME_FLOOR && t == 1793000000ull);
+        CHECK(rtc_wall_time_floored(40, 1, &r, 1792000000ull, &t) == RTC_TIME_RESET && t == 1792796530ull + 40);
+        CHECK(rtc_wall_time_floored(110200, 1, &r, 1792000000ull, &t) == RTC_TIME_OK && t == 1792686397ull + 110200);
+        CHECK(rtc_wall_time_floored(110200, 1, &r, 1792900000ull, &t) == RTC_TIME_FLOOR && t == 1792900000ull);
     }
     // Set: first record, drift below the slack, a real change, an RTC reset; slot alternation by seq.
     {

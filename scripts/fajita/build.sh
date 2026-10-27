@@ -151,6 +151,9 @@ ARGS=(usb-debug=3 fajita-gpu=11 fajita-gpu-delay=8 sheng-fb-gpu=1)
 # FAJITA_AUTORESET (default 600 s): the test build's reset; the hardware stop follows 90 s later.
 AR=${FAJITA_AUTORESET:-600}
 [ $TEST = 1 ] && ARGS+=(sheng-autoreset=$AR wdstop=$((AR + 90)))
+# fajita-rtc-floor: the wall clock is never earlier than the payload's build time (drivers/FajitaRtc), so a hard reset
+# that restarts the PMIC RTC counter cannot start the calendar days in the past before the network time arrives (NOTES-drivers.md).
+ARGS+=(fajita-rtc-floor=$(date -u +%s))
 ARGS+=("${EXTRA[@]}")
 KA=(); for a in "${ARGS[@]}"; do KA+=("--kernel-arg=$a"); done
 # fajita-wifid=1: Apple's own wifid runs as the com.apple.wifid job (the USB debug agent forks off and execs it; NOTES-wifi.md).

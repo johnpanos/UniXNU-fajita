@@ -108,6 +108,7 @@ enum {
     RTC_TIME_OK = 1,       // counter + offset
     RTC_TIME_RESET = 2,    // the counter is below the one recorded: the RTC lost power since; the recorded wall time plus the
                            // counter is a floor (the time is at least that), not the time
+    RTC_TIME_FLOOR = 3,    // the time from the other two was before a floor known to have passed (the payload's build time): the floor is served instead
 };
 
 // Wall seconds from the counter and the offset source (have: 0 none, 1 record). A negative result is clipped to RTC_TIME_NONE.
@@ -122,6 +123,21 @@ static inline int rtc_wall_time(uint32_t raw, int have, const rtc_record *rec, u
     if (t <= 0) return RTC_TIME_NONE;
     *secs = (uint64_t)t;
     return RTC_TIME_OK;
+}
+
+// rtc_wall_time, never earlier than `floor` (wall seconds known to have passed, e.g. the payload's build time; 0 none).
+// A hard reset of the OnePlus 6T (long power press) restarts the PMIC counter from 0 (session-072207: counter 397354 -> 175): the
+// record then gives only a floor, the wall time it was last refreshed at plus the counter, and the build floor is often later.
+static inline int rtc_wall_time_floored(uint32_t raw, int have, const rtc_record *rec, uint64_t floor, uint64_t *secs)
+{
+    uint64_t t = 0;
+    int source = rtc_wall_time(raw, have, rec, &t);
+    if (floor && (source == RTC_TIME_NONE || t < floor)) {
+        *secs = floor;
+        return RTC_TIME_FLOOR;
+    }
+    if (source != RTC_TIME_NONE) *secs = t;
+    return source;
 }
 
 // The record after setting the wall time to secs at counter raw. Returns 1 when it must be written: there was none, the RTC was
