@@ -9,6 +9,8 @@
 // device will not build routes without (the design HackiOS found on its redwood port, written anew for this board):
 //   "Speaker"   stereo output (played into nowhere: no audio hardware is driven yet) and a silent stereo input
 //   "Hawking"   one silent input
+//   "Codec"     one silent input with one data source ('imic', the bottom microphone): the built-in microphone port; the virtual
+//               device keeps a codec only with known data sources (VirtualAudio asks kAudioDevicePropertyDataSources of its input)
 //   "Actuator"  one output channel; each I/O buffer becomes a level (FajitaHapticPolicy.h) written to /dev/fajita-haptic, where
 //               the kernel (package/FajitaHaptics.cpp, fajita-haptics=3) drives the PMI8998 LRA by it
 // The kernel mounts this bundle over /Library/Audio/Plug-Ins/HAL (fajita-haptics=3, ios16/patches/xnu-8796/
@@ -105,6 +107,9 @@ enum {
     SActive = FCC('s', 'a', 'c', 't'), SDirection = FCC('s', 'd', 'i', 'r'), STerminal = FCC('t', 'e', 'r', 'm'),
     SStart = FCC('s', 'c', 'h', 'n'), SVirtual = FCC('s', 'f', 'm', 't'), SVirtuals = FCC('s', 'f', 'm', 'a'),
     SPhysical = FCC('p', 'f', 't', ' '), SPhysicals = FCC('p', 'f', 't', 'a'),
+    ClassSelector = FCC('s', 'l', 'c', 't'), ClassDataSource = FCC('d', 's', 'r', 'c'), CScope = FCC('c', 's', 'c', 'p'),
+    CElement = FCC('c', 'e', 'l', 'm'), CCurrent = FCC('s', 'c', 'c', 'i'), CAvailable = FCC('s', 'c', 'a', 'i'),
+    CItemName = FCC('s', 'c', 'i', 'n'), CItemKind = FCC('c', 'l', 'k', 'k'), MicSource = FCC('i', 'm', 'i', 'c'),
     TermSpeaker = FCC('s', 'p', 'k', 'r'), TermMic = FCC('m', 'i', 'c', 'r'), TransportBuiltIn = FCC('b', 'l', 't', 'n'),
     OpRead = FCC('r', 'e', 'a', 'd'), OpWriteMix = FCC('r', 'i', 't', 'e'),
 };
@@ -113,7 +118,8 @@ enum {
 #define RATE 48000.0
 #define PERIOD 16384u   // frames between the zero time stamps the device reports
 enum {
-    OPlugIn = 1, OSpeaker, OSpeakerOut, OSpeakerIn, OHawking, OHawkingIn, OActuator, OActuatorOut, OLast = OActuatorOut
+    OPlugIn = 1, OSpeaker, OSpeakerOut, OSpeakerIn, OHawking, OHawkingIn, OActuator, OActuatorOut, OCodec, OCodecIn, OCodecSource,
+    OLast = OCodecSource
 };
 typedef struct {
     AudioObjectID object, output, input;
@@ -126,6 +132,7 @@ static Device devices[] = {
     {OSpeaker, OSpeakerOut, OSpeakerIn, 2, 2, CFSTR("Speaker"), 0, 0, 0},
     {OHawking, 0, OHawkingIn, 0, 1, CFSTR("Hawking"), 0, 0, 0},
     {OActuator, OActuatorOut, 0, 1, 0, CFSTR("Actuator"), 0, 0, 0},
+    {OCodec, 0, OCodecIn, 0, 1, CFSTR("Codec"), 0, 0, 0},
 };
 #define NDEVICES (sizeof devices / sizeof devices[0])
 
@@ -186,6 +193,19 @@ typedef struct {
 static Value property(AudioObjectID o, const AudioObjectPropertyAddress *a, UInt32 qsize, const void *q) {
     Value v;
     memset(&v, 0, sizeof v);
+    if (o == OCodecSource) {   // the codec input's data source control: one microphone
+        switch (a->mSelector) {
+        case PBaseClass: WORD(ClassSelector); break;
+        case PClass: WORD(ClassDataSource); break;
+        case POwner: WORD(OCodec); break;
+        case POwned: LISTED(); break;
+        case CScope: WORD(ScopeInput); break;
+        case CElement: WORD(0); break;
+        case CCurrent: case CAvailable: WORD(MicSource); break;
+        case CItemName: STR(qsize == 4 && q && *(const UInt32 *)q == MicSource ? CFSTR("Bottom") : CFSTR("")); break;
+        }
+        return v;
+    }
     const Device *d = deviceOf(o);
     if (o != OPlugIn && !d) return v;
     const UInt32 sel = a->mSelector, scope = a->mScope;
@@ -224,8 +244,9 @@ static Value property(AudioObjectID o, const AudioObjectPropertyAddress *a, UInt
             LISTED();
             if (scope != ScopeInput && d->output) ADD(d->output);
             if (scope != ScopeOutput && d->input) ADD(d->input);
+            if (sel == POwned && d->object == OCodec && scope != ScopeOutput) ADD(OCodecSource);
             break;
-        case PControls: LISTED(); break;
+        case PControls: LISTED(); if (d->object == OCodec) ADD(OCodecSource); break;
         case PRate: v.u.f64 = RATE; v.size = sizeof(Float64); v.known = true; break;
         case PRates: v.u.range.mMinimum = v.u.range.mMaximum = RATE; v.size = sizeof(AudioValueRange); v.known = true; break;
         case PStereo: v.u.w[0] = 1; v.u.w[1] = d->outChannels > 1 ? 2 : 1; v.size = 8; v.known = true; break;
@@ -280,7 +301,7 @@ static OSStatus initialize(AudioServerPlugInDriverRef driver, AudioServerPlugInH
     mach_timebase_info(&tb);
     gTicksPerFrame = 1e9 * tb.denom / tb.numer / RATE;
     gNsPerTick = (Float64)tb.numer / tb.denom;
-    say("plug-in loaded in pid %d: Speaker, Hawking, Actuator (/dev/fajita-haptic %s)", (int)getpid(), gMotor >= 0 ? "open" : "missing");
+    say("plug-in loaded in pid %d: Speaker, Hawking, Actuator, Codec", (int)getpid());
     return 0;
 }
 static OSStatus createDevice(AudioServerPlugInDriverRef dr, CFDictionaryRef desc, const AudioServerPlugInClientInfo *ci, AudioObjectID *o) {
@@ -301,7 +322,8 @@ static Boolean hasProperty(AudioServerPlugInDriverRef dr, AudioObjectID o, pid_t
 static OSStatus isSettable(AudioServerPlugInDriverRef dr, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, Boolean *out) {
     if (!a || !out || !hasProperty(dr, o, pid, a)) return ErrUnknownProperty;
     const Device *d = deviceOf(o);
-    if (o == OPlugIn) *out = false;
+    if (o == OCodecSource) *out = a->mSelector == CCurrent;
+    else if (o == OPlugIn) *out = false;
     else if (o == d->object) *out = a->mSelector == PRate;
     else *out = a->mSelector == SActive || a->mSelector == SVirtual || a->mSelector == SPhysical;
     return 0;
@@ -334,6 +356,7 @@ static OSStatus setData(AudioServerPlugInDriverRef dr, AudioObjectID o, pid_t pi
     Boolean settable = false;
     if (!a || !data || isSettable(dr, o, pid, a, &settable)) return ErrUnknownProperty;
     if (!settable) return ErrIllegal;
+    if (o == OCodecSource) return size == 4 ? (*(const UInt32 *)data == MicSource ? 0 : ErrIllegal) : ErrBadSize;
     if (a->mSelector == SActive) {
         if (size != 4) return ErrBadSize;
         pthread_mutex_lock(&gLock);

@@ -89,6 +89,9 @@ Tools are in `scripts/fajita/test/`; their state (logs, `phone.lock`, reference 
 - Build first, then take the phone. `cycle.sh` and `session.sh` hold `phone.lock`, so runs queue rather than collide.
 - Keep sessions short. An idle session ends after 300 s. Past 1200 s, a session ends when another run is waiting.
 - End only your own session (`session.sh end NAME`).
+- Never kill a session or cycle while it is talking to fastboot (getvar, flash, boot). A run killed there left the bootloader's
+  fastboot enumerated but deaf (every command times out, a host USB reset does not help) until someone held the power key: twice
+  on 2026-10-27. Start a session only after its build is done (bg.sh wait), so there is nothing to kill.
 - One hub per tty. Talk to the phone through `hc`, `session.sh` or `fajita-usbdbg-hub.py call`; never open the tty or start a hub
   yourself while a run is going. A second reader splits the stream, and replies are lost.
 
