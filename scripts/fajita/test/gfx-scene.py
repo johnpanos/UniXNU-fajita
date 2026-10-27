@@ -302,26 +302,42 @@ def catch(fjsurface, path, ref, scene, shot):
     out = os.path.splitext(path)[0] + '-catch'
     os.makedirs(out, exist_ok=True)
     info = dict(scene=scene, shot=shot, strong=d[0], total=d[1], box=d[2], ref=ref)
-    # the render server draws the display again, now (logical size of the panel's display)
+    # the render server draws the display again, now; only the box (with a margin) comes back: a whole display is 11 MB over the hub
     raw = '/private/var/tmp/fjcatch.raw'
     W, H = int(os.environ.get('CATCH_W', 1125)), int(os.environ.get('CATCH_H', 2436))
-    ok, r = hub('run', fjsurface, '--render-display', W, H, raw, timeout=40)
+    sx, sy = W / 540.0, H / 1170.0
+    bx0, by0, bx1, by1 = max(0, d[2][0] - 8), max(0, d[2][1] - 8), min(540, d[2][2] + 8), min(1170, d[2][3] + 8)
+    cx, cy, cw, ch = int(bx0 * sx), int(by0 * sy), max(1, int((bx1 - bx0) * sx)), max(1, int((by1 - by0) * sy))
+    if (bx1 - bx0) * (by1 - by0) > 0.25 * 540 * 1170:
+        # most of the screen differs: another screen than the reference's (an app that did not open, a keyboard); no render pulled
+        info['verdict'] = 'most of the screen differs (another screen than the reference: a navigation failure, not a glitch)'
+        ok, r = False, 'not rendered: the box is over a quarter of the screen'
+    else:
+        ok, r = hub('run', fjsurface, '--render-display', W, H, raw, cx, cy, cw, ch, timeout=40)
     info['render_out'] = r.strip()[-200:]
     ok2, r2 = hub('pull', raw, os.path.join(out, 'render.raw'), timeout=120) if ok else (False, '')
     try:
+        if 'verdict' in info:
+            raise ValueError(r)
         data = open(os.path.join(out, 'render.raw'), 'rb').read()
-        img = Image.frombytes('RGBA', (W, H), data, 'raw', 'BGRA').convert('RGB').resize((540, 1170))
-        img.save(os.path.join(out, 'render.png'))
-        os.remove(os.path.join(out, 'render.raw'))
-        # the same region of the fresh render against the reference: strong there too = the glitch is in a layer's contents
         if ' 0 sampled pixels nonzero' in info['render_out'] or not ok:
             raise ValueError('the render server drew nothing (%s)' % info['render_out'][-80:])
-        rd = shot_diff(ref, os.path.join(out, 'render.png'), box=d[2])
-        info['render_strong_in_box'] = rd[0] if rd else None
-        info['verdict'] = ('in a layer\'s contents (the fresh render shows it too)' if rd and rd[0] > 0.3 * d[0] else
+        img = Image.frombytes('RGBA', (cw, ch), data, 'raw', 'BGRA').convert('RGB').resize((bx1 - bx0, by1 - by0))
+        img.save(os.path.join(out, 'render-box.png'))
+        os.remove(os.path.join(out, 'render.raw'))
+        # the fresh render of the box against the reference's: strong there too = the glitch is in a layer's contents. A fresh render
+        # draws every context of the display, some the scanout leaves out, so the verdict is a hint, the images are the evidence.
+        from PIL import ImageChops
+        refbox = Image.open(ref).convert('RGB').crop((bx0, by0, bx1, by1))
+        dd = ImageChops.difference(refbox, img)
+        px = dd.get_flattened_data() if hasattr(dd, 'get_flattened_data') else dd.getdata()
+        rs = sum(1 for p in px if max(p) > 96)
+        info['render_strong_in_box'] = rs
+        info['verdict'] = ('in a layer\'s contents (the fresh render shows it too)' if rs > 0.3 * d[0] else
                            'in the composed or presented frame only (the fresh render is clean there)')
     except (OSError, ValueError) as e:
         info['render_error'] = str(e)
+        info.setdefault('verdict', 'unknown (no fresh render)')
     try:
         import shutil
         shutil.copy(path, os.path.join(out, 'shot.png'))

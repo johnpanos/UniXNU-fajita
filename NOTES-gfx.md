@@ -336,3 +336,86 @@ measurable change, >33 slightly worse in fi1. timer and m2v could not join Wi-Fi
 a Wi-Fi agent owns it), so they ran the five offline scenes on boots without Wi-Fi: not full results, and a boot without Wi-Fi has
 less background work than b0's. Against b0's same scenes m2v has a third fewer frames over a vsync (433 vs 647) and +2.7 fps, and
 beats the timer arm booted the same way (550): the strongest candidate; the web scenes are to be rerun for both once Wi-Fi works.
+
+## Correctness: the m2v dock-icon smear (2026-10-26 evening)
+
+- Bisect of 1ff8f4b3: only the zeroed-colors change reproduces it (home, 2 of 2 runs per boot on two boots); the depth-range and
+  use-list changes are clean. The change is pure (zeroed_colors is a function of the pipeline and routing, called twice before), so it
+  shifts timing and exposes an older bug (the same smear once in base1, without m2v).
+- The TU_DEBUG=flushall / sysmem result is retracted: those clean runs came after the smeared one in the same boot, and from 17:35 on
+  nothing reproduced it any more (about 14 trials: Turnip flags, backboardd restarts, cold pipeline caches for backboardd and for every
+  process, fresh boots). Note also that gpu-env's TU_DEBUG replaces the plugin's default sysmem,nocb, so those runs were in GMEM.
+- m2v (draw-cost) over two no-Wi-Fi rounds against b0: >16.7 433/500 vs 487/466, no net gain; not landed.
+- The occurrence catcher (gfx-scene.py --catch, on by default, landed 477cc19) keeps the evidence the next time a rest shot differs.
+- Killing a job while session.sh start is booting leaves an orphan boot (no cycle, no hub, the phone up until its autoreset): reset
+  it through a temporary hub (`fajita-usbdbg-hub.py serve`, then `call reset`), as done at 19:28.
+
+## Upstream picks (survey), measured as no-Wi-Fi arms on one board (offline five x2 per run, catcher on)
+
+| arm | run | fps | 1% low | 0.1% low | >16.7 | >33 |
+| --- | --- | --- | --- | --- | --- | --- |
+| base3 (stack gfx a8ffa82) | r1 | 51.9 | 10.4 | 7.0 | 471 | 62 |
+| devc (NativeMetal 31867dc: device answers kept) | r1 | 52.5 | 11.3 | 6.3 | 418 | 65 |
+| mesa1 (Turnip push-const/descriptor trio) | r1 | 51.8 | 10.2 | 6.4 | 460 | 61 |
+| base3 + M2V_ALIAS_PADDED_TARGETS=0 | r1 | 51.8 | 10.1 | 6.2 | 453 | 66 |
+| devc | r2 | 52.2 | 10.3 | 6.1 | 420 | 63 |
+| mesa1 | r2 | 51.7 | 9.8 | 5.9 | 462 | 60 |
+| base3 + alias off | r2 | 51.8 | 10.9 | 6.5 | 487 | 70 |
+| base3 | r2b (clean rerun) | 51.3 | 9.9 | 6.1 | 508 | 64 |
+
+devc landed (ios16-port 9295e68: NativeMetal 64fa39e, stack 16123d2). mesa1 and alias-off: no measurable change (both are
+correctness candidates for the smear, which does not reproduce now). base3 r2 (first try) and the r2b/r3 runs of stab/abnd/base3 were
+broken by the App Library rest point opening the search keyboard (then Settings would not open): fixed in gfx-suite (b712c8a), rerun.
+
+### Rounds A/B and the boot alternation (no-Wi-Fi, offline five x2, App Library scene with drags above its keyboard)
+
+The App Library scene changed at 21:20 (drags at y 400-1400 instead of 900-1900, to stay off its search keyboard), so runs from then
+on compare with each other but not with r1/r2: its applib rows went 92 -> 167 frames over a vsync; the other scenes stayed within noise.
+
+| arm | runs (frames over 16.7 / frames) | verdict |
+| --- | --- | --- |
+| base3 (pre-devc) | rA 540/4120, rB 621/3956, ab1 589/4322, ab2 642/4179, ab3 561/4223 | the reference |
+| devc (31867dc) | r1 418/4066 vs 471, r2 420/4000 vs 508 (old scene); ab1 560/4174 between base3 ab1 589 and ab2 642 | kept (landed 9295e68): neutral to slightly better on neighbours; ab2/ab3 invalid (keyboard stayed up, Settings did not open) |
+| cap (NativeAdreno 25abaa4) | rA 627/4047, rB 617/4181 | speed neutral; landed for capacity (0d5e9d7) |
+| stab (refused encoder + 100 ms fence wait) | rA invalid (keyboard), rB 646/4040 | refused-encoder half landed for stability (f2c9904); the fence wait not landed |
+| abnd (padded-alias tile-store bounds) | rA 599/4127, rB 635/4268 | speed neutral; smear hunt against base3 below |
+
+**The smear caught (stab-rB, calendar-r2 rest):** Calendar's "Location Suggestions" body text in 16-px block garbage, the same pattern
+as the dock icon; the fresh render (CARenderServerRenderDisplay) shows it too, so it is in the layer's own contents. That fits the
+tile-store overrun past an aliased padded IOSurface (M2V_ALIAS_PADDED_TARGETS=1 aliases written padded surfaces with no bounds check;
+a 16x4 tile store writes up to 15 texels past a row and 3 rows past the last), which abnd (metal2vulkan a4c80432) bounds.
+Evidence: .cache/fajita-work/gfx/b0-stab-rB/calendar-r2-rest-catch/.
+
+**Smear hunt (abnd vs base3, alternating boots, killed at 98 min for the drivers work):** abnd 4 runs, base3 3 runs; no smear caught
+in either (one catch in abnd-4 was the date rolling over at midnight against a reference with a placeholder weather widget). abnd
+landed anyway as a correctness fix (ios16-port, metal2vulkan 3f4d5b9e on the fork's fajita-a630): it bounds a provable overrun and was
+speed neutral; the catcher stays on to catch any recurrence.
+
+**devc verdict (alternating boots base3/devc x3):** only pair 1 is valid (devc-2 and devc-3 lost Settings to the App Library keyboard
+and ran a different applib): devc 560/4174 (13.4%) between base3 589/4322 (13.6%) and 642/4179 (15.4%); with r1/r2 (418 vs 471, 420
+vs 508) it stays landed.
+
+## Final state (2026-10-27) and how to resume
+
+On ios16-port: the plugin's cache path fix, the occurrence catcher and session guards, devc (device answers kept), the NativeAdreno
+object cap with its handle index, the refused-encoder fix, the padded-alias bounds check, and the suite/tools below. On the gfx branch
+only (experiments, not landed): frame info (fajita-frame-info=1/2 and the slot 292/211 answers), the CA_FORCE_TIMER boot arg
+(zzt patch), the m2v draw-cost translator, the Mesa push-const trio, the 100 ms fence wait, the two-swaps design.
+
+Open items:
+- **0.1% lows and render-server CPU per frame:** the CAWATCH pass says 178 of 302 2+ tick gaps are LATE (the render on CA's timer
+  thread runs past the next tick). Next: profile backboardd's display thread per frame (proc-sample.sh, NGPU_CPU_PROFILE in a DIAG
+  run), then the translator's per-draw costs (record/bind, Turnip CmdBindPipeline, end_pass, new encoder) and upstream bridge patches
+  0009/0015 (they overlap our recorded patches; build-native-metal-bridge.py needs a combined-source update to take them).
+- **Late client commits (90 of 302 gaps):** find which clients (SpringBoard, WebContent) commit after the tick and why (their CPU,
+  their display link, their priority): proc-sample.sh on the client during a CAWATCH scene.
+- **The GMEM arm:** the plugin runs Turnip with TU_DEBUG=sysmem,nocb (GMEM and LRZ off); an arm with gpu-env TU_DEBUG=nocb (gpu-env's
+  TU_DEBUG replaces the plugin's default) plus the survey's GMEM/LRZ Mesa fixes (d8169d64a, 5000d6644, 99fed09b0/0cd184e94/74865282c,
+  a70d2af59, 8aa621812) needs a build and the full suite for correctness.
+- **The smear:** not reproduced since the bounds fix landed; the catcher keeps the evidence (SCENE-SHOT-catch/) when it recurs.
+- **The App Library scene** still keeps its search keyboard up now and then (Settings then fails to open): applib_keyboard_away does not
+  always see it; the scene's rest shot is the first place it shows.
+
+Resume: merge origin/ios16-port into gfx; build arms with scripts/fajita/test/gfx-arms-build.sh (ARM_SUFFIX, PLUGIN_BASE,
+WIFI_AUTORESET=3000), measure with gfx-arms-run.sh (NOWIFI=1 for the offline five) alternating boots of the arms and their base, and
+compare neighbours (gfx-report.py --compare); a phone left up by a killed job: orphan-reset.sh.
