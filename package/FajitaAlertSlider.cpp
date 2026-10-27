@@ -52,13 +52,26 @@ uint32_t read(unsigned *mask) {
     return (m == 1) ? 0 : (m == 2) ? 1 : (m == 4) ? 2 : 3;
 }
 
-size_t kcmdAlert(const char *, size_t, char *out, size_t cap) {
+volatile int32_t gSim = -1;   // kcmd alert sim: a position that stands in for the switch until `alert sim off` (-1: the pins)
+
+size_t kcmdAlert(const char *args, size_t len, char *out, size_t cap) {
     if (!mapAll()) return size_t(snprintf(out, cap, "alert: map failed\n"));
+    char a[24] = {};
+    for (size_t i = 0; i < len && i < sizeof a - 1; ++i) a[i] = args[i];
+    if (!strncmp(a, "sim ", 4)) {
+        // Unattended tests cannot move the switch: `alert sim silent|vibrate|ring` reports that position to iOS as if the switch had
+        // moved there (the next poll), `alert sim off` goes back to the pins.
+        const char *w = a + 4;
+        int32_t v = !strncmp(w, "silent", 6) ? 0 : !strncmp(w, "vibrate", 7) ? 1 : !strncmp(w, "ring", 4) ? 2 : !strncmp(w, "off", 3) ? -1 : -2;
+        if (v == -2) return size_t(snprintf(out, cap, "usage: alert [sim silent|vibrate|ring|off]\n"));
+        gSim = v;
+        return size_t(snprintf(out, cap, "alert: sim %s (applied at the next poll, <= 1 s)\n", v < 0 ? "off" : w));
+    }
     unsigned m = 0;
     uint32_t p = read(&m);
-    return size_t(snprintf(out, cap, "alert slider: %s (asserted mask %x: silent=1 vibrate=2 ring=4) cfg %x/%x/%x in %x/%x/%x changes %u\n",
+    return size_t(snprintf(out, cap, "alert slider: %s (asserted mask %x: silent=1 vibrate=2 ring=4) cfg %x/%x/%x in %x/%x/%x changes %u%s\n",
         p == 0 ? "SILENT" : p == 1 ? "VIBRATE" : p == 2 ? "RING" : "none/several", m, (unsigned)*reg(0, 0), (unsigned)*reg(1, 0), (unsigned)*reg(2, 0),
-        (unsigned)*reg(0, 4) & 1, (unsigned)*reg(1, 4) & 1, (unsigned)*reg(2, 4) & 1, (unsigned)fajita_alert_changes));
+        (unsigned)*reg(0, 4) & 1, (unsigned)*reg(1, 4) & 1, (unsigned)*reg(2, 4) & 1, (unsigned)fajita_alert_changes, gSim >= 0 ? " (sim: iOS sees the simulated position)" : ""));
 }
 }  // namespace
 
@@ -79,6 +92,7 @@ extern "C" void fajita_alert_poll(void) {
     }
     unsigned m = 0;
     uint32_t p = read(&m);
+    if (gSim >= 0) p = uint32_t(gSim);
     if (p != fajita_alert_position) {
         fajita_alert_position = p;
         fajita_alert_changes = fajita_alert_changes + 1;
