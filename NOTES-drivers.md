@@ -107,3 +107,31 @@ for the switch in unattended tests.
   publish. A simulated 110 C for 60 s left com.apple.system.thermalpressurelevel at 0, so thermalmonitord does not take them yet.
   IOHIDEventDriver's copyEvent has no temperature case, and thermalmonitord calls IOHIDServiceClientCopyEvent; that is the next thing
   to check.
+
+## 4. Vibration to iOS: what it takes (assessment, nothing built yet)
+
+- iOS 16 on the iPhone X plays every haptic (keyboard taps, UIKit and CoreHaptics feedback, notification and ringer vibration) as a
+  one-channel waveform through the audio server. The chain is mediaserverd's CoreAudio HAL, then VirtualAudio.plugin
+  (/Library/Audio/Plug-Ins/HAL), then a device whose UID is "Actuator", using the effects chain `d22_actuator_general` from
+  /Library/Audio/Tunings/D22/Haptics. There is no kernel vibrator interface to implement. On a real iPhone the device comes from
+  AppleAOPAudioPlugin.driver and the AOP.
+- So the iOS side is an AudioServerPlugIn (a CFPlugIn bundle) that presents an "Actuator" output and hands its samples to the kernel.
+  The kernel side, FajitaHaptics.cpp (PMI8998 LRA, already working from kcmd), turns them into motor on/off with an amplitude.
+  HackiOS (redwood) reports that VirtualAudio builds no route unless the companion devices it expects also exist: a "Speaker" output
+  and a "Hawking" input, both silent stand-ins here.
+- Delivery: HAL plug-ins load only from /System/Library/Audio/Plug-Ins/HAL and /Library/Audio/Plug-Ins/HAL, both on the sealed
+  system volume. The stack's boot-time add-on mount (patches/xnu-8796/zzy-native-gpu-addon-mount.patch, the same mechanism that puts
+  NativeAdrenoMetal.bundle over /System/Library/Extensions) would need one more union view, over /Library/Audio/Plug-Ins/HAL, keeping
+  VirtualAudio.plugin visible. That is a stack change: fork commit plus a gpu-plugin.ref bump.
+- Size: a stack patch, a HAL plug-in of roughly 800 lines written for this board, a kernel sample sink for FajitaHaptics, and
+  several phone runs. Medium-hard, not a quick finish.
+
+## 5. Flashlight: what it takes (assessment)
+
+- The PMI8998 flash LED is a few SPMI registers (two channels, torch up to 500 mA per the DT).
+- iOS's Control Center flashlight shows only with MobileGestalt camera-flash. That answer comes from /product/camera `flash`, which
+  is easy to add to the ADT.
+- Turning it on goes AVFlashlight -> mediaserverd's FigFlashlight -> the camera driver (the ISP's kernel user client). With no camera
+  driver there is nothing for FigFlashlight to talk to. HackiOS made it work by injecting a library into mediaserverd, which this port
+  does not do. A non-injecting route needs a kernel service that answers FigFlashlight's ISP torch calls: reverse engineering of a
+  private interface. Hard.
