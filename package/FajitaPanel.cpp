@@ -25,6 +25,8 @@
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
+#include <kern/clock.h>
 #include <string.h>
 
 extern "C" {
@@ -252,6 +254,11 @@ void watchBacklight() {
     static int last = -2;
     static unsigned tries;
     if (!svc) {
+        static uint64_t lastLook;
+        uint64_t now; clock_get_uptime(&now);
+        uint64_t sec; nanoseconds_to_absolutetime(1000000000ull, &sec);
+        if (lastLook && now - lastLook < sec) return;   // look for the service once a second, however often this is called
+        lastLook = now;
         svc = findBacklight();
         if (!svc) {if (++tries == 30) IOLog("fajita-panel: AppleARMBacklight not found\n"); return;}
         svc->retain();
@@ -308,9 +315,26 @@ public:
 OSDefineMetaClassAndStructors(FajitaLcd, IOService)
 
 // Called once a second by the boot progress monitor (FajitaCpuFreq.cpp's sheng_cpufreq_poll); the first call after IOKit is up does the work.
+// The slider: CoreBrightness ramps rawBrightness in many small steps while a finger drags it; sampled once a second the panel
+// followed in visible jumps a second late. fajita-brightness-poll=<ms> (default 30): how often its own thread samples it.
+void watchThread(void *, wait_result_t) {
+    thread_set_thread_name(current_thread(), "fajita-backlight");
+    unsigned ms = 30;
+    PE_parse_boot_argn("fajita-brightness-poll", &ms, sizeof ms);
+    if (ms < 5) ms = 5;
+    for (;;) {watchBacklight(); IOSleep(ms);}
+}
+
 extern "C" void fajita_panel_poll(void) {
-    static bool done;
-    if (done) {if (gEnabled && gLock) watchBacklight(); return;}
+    static bool done, thread;
+    if (done) {
+        if (gEnabled && gLock && !thread) {
+            thread_t t = nullptr;
+            if (kernel_thread_start(watchThread, nullptr, &t) == KERN_SUCCESS) {thread_deallocate(t); thread = true;}
+            else watchBacklight();   // no thread: the once-a-second poll keeps it working
+        }
+        return;
+    }
     if (!IOService::getPlatform()) return;
     done = true;
     unsigned mode = 0;

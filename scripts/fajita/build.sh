@@ -89,6 +89,8 @@ export UNIXNU_XNU_CLANG=${UNIXNU_XNU_CLANG:-$HOME/unixnu-toolchain/clang/bin/cla
 # The cctools/ld64 build carries a RUNPATH into the scratch directory it was built in; its libdispatch/libBlocksRuntime sit in ../lib64.
 export LD_LIBRARY_PATH=$(dirname "$UNIXNU_LD64")/../lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export UNIXNU_IIG_OUTPUTS=$BOARD/.cache/iig-outputs-20H392 FAJITA_USBDBG_AGENT=$IN/fjdbg-agent
+# make-fajita-adt.py runs from the build's copy of the tree, which has no .cache: the iPhone X /backlight node it copies (--backlight) is named here.
+export FAJITA_BACKLIGHT_FROM=${FAJITA_BACKLIGHT_FROM:-$BOARD/.cache/ipsw/20H392/DeviceTree.d221ap.payload}
 export PYTHONPATH=$STACK/scripts FAJITA_STORAGE_CANDIDATE=$IN/storage-candidate/kernel.macho FAJITA_VERIFIED_ROOT_CACHE=$BOARD/.cache/verified-root
 D16=$BOARD/ios16
 cd "$STACK"

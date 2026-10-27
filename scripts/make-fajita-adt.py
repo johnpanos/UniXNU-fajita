@@ -76,8 +76,9 @@ def backlight_node(source):
              ('use-new-AAP-ramp', u32(1)), ('pre-strobe-nit', u32(674)), ('panel-gamma', u32(0x898)),
              ('LminProduct', u32(0x20000)), ('LmidProduct', u32(0x9b0000)), ('LmaxProduct', u32(0x2a20741))]
     if source and not Path(source).is_file():
-        print(f'warning: {source} missing: /backlight carries only its scalar properties (ipsw img4 im4p extract DeviceTree.d221ap.im4p)')
-        source = None
+        # Without the copied properties (backlight-marketing-table above all) AppleARMBacklight's start fails ("Need maketing table for
+        # the new Architecture") and iOS never finds a backlight: refuse instead of building a tree that cannot work.
+        raise SystemExit(f'--backlight: {source} missing (ipsw img4 im4p extract DeviceTree.d221ap.im4p; build.sh sets FAJITA_BACKLIGHT_FROM)')
     if source:
         # the /backlight node is a direct child of the root
         data = Path(source).read_bytes()
