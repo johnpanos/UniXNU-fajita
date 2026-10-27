@@ -24,6 +24,15 @@ own NOTES file; this log links to them.
   (experimental). The alert slider hit 7 phone runs without landing; the agent was told to land a fix or record it as open.
 - The graphics smear hunt overran its 20-minute bound to 98 minutes and two stop messages; the lead killed the job to free the
   phone. Lesson: give a long hunt a hard --max in bg.sh at launch, not just a bound in a message.
+- Graphics wrapped up (ff60ac7, NOTES-gfx.md): landed the bounds check (abnd, 55dfbd8) as a correctness fix; devc stays
+  (a small win). Not landed: frame info, CA_FORCE_TIMER, the m2v draw-cost translator, the Mesa push-const picks, the
+  100 ms fence wait. Open: render-server CPU per frame, late client commits, the GMEM arm, the App Library keyboard flake.
+- Drivers: vibration needs an audio plug-in ("Actuator" for mediaserverd) loaded from /Library/Audio/Plug-Ins/HAL. The user
+  approved (2026-10-27) the read-only boot-time overlay for it and following HackiOS's plug-in design (own code). The
+  flashlight needs the camera driver's torch path, so it goes last. Slider: MobileGestaltHelper rebuilds the cache at boot;
+  a uid-501 query test is next.
+- The phone wedged in fastboot at 00:10 (no command answers; usbreset and reboot-bootloader failed). It needs a hardware
+  reset (Power + Volume Up); the user was asked.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
