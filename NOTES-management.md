@@ -38,6 +38,9 @@ own NOTES file; this log links to them.
   answer false; computed live as mobile they are true). Decision: use iOS's own rebuild request (sentinel, as mobile), not a
   direct rebuild. First, though: the clock read about 11 h behind after the hard reset, so the RTC path is checked first
   (a wrong clock is what made coreduetd spin).
+- Second agent started: sensors (worktree ../UniXNU-fajita-sensors, NOTES-sensors.md). The SLPI sensor DSP boot reuses the
+  Wi-Fi remoteproc/QRTR code, then ambient light, proximity and accelerometer samples, then iOS integration (auto-brightness,
+  proximity screen-off, rotation). Phased, each phase landed behind a flag.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
