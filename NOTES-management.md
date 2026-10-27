@@ -32,7 +32,12 @@ own NOTES file; this log links to them.
   flashlight needs the camera driver's torch path, so it goes last. Slider: MobileGestaltHelper rebuilds the cache at boot;
   a uid-501 query test is next.
 - The phone wedged in fastboot at 00:10 (no command answers; usbreset and reboot-bootloader failed). It needs a hardware
-  reset (Power + Volume Up); the user was asked.
+  reset (Power + Volume Up); the user was asked. The user reset it; it answers again.
+- Vibration built (e2f2e82, fajita-haptics=3, default off): mediaserverd loads our Actuator plug-in through the overlay, but no
+  I/O starts. Both vibration and the slider are gated by MobileGestalt's stale cache (ringer-switch and closed-loop haptics
+  answer false; computed live as mobile they are true). Decision: use iOS's own rebuild request (sentinel, as mobile), not a
+  direct rebuild. First, though: the clock read about 11 h behind after the hard reset, so the RTC path is checked first
+  (a wrong clock is what made coreduetd spin).
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
