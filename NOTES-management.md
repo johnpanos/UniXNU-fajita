@@ -41,6 +41,9 @@ own NOTES file; this log links to them.
 - Second agent started: sensors (worktree ../UniXNU-fajita-sensors, NOTES-sensors.md). The SLPI sensor DSP boot reuses the
   Wi-Fi remoteproc/QRTR code, then ambient light, proximity and accelerometer samples, then iOS integration (auto-brightness,
   proximity screen-off, rotation). Phased, each phase landed behind a flag.
+- Landed: the RTC fix (459437d: a hard reset no longer starts the clock days in the past); the alert slider is iOS's ringer
+  switch by default, proven (ef5b5d3; MobileGestalt rebuilt through iOS's own request). Sensors plan landed (705a8e2:
+  SLPI PAS boot, FastRPC registry, SSC protocol); its PAS boot code is in progress. Vibration is next for the drivers agent.
 - The graphics agent finishes its in-flight verdicts (devc keep/revert, the abnd smear fix) and wraps up NOTES-gfx.md.
 
 ## 2026-10-26: goal "optimize graphics for correctness and speed" (NOTES-gfx.md)
